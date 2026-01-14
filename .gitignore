@@ -1,0 +1,4 @@
+.pio
+_vendor
+*.cl*
+tmp
