@@ -302,8 +302,58 @@ bool CasambiAPIClient::_parseUnits(const JsonArrayConst& unitsArray, NetworkConf
         unit.online = false;
         unit.on = false;
 
+        // --- Parse capabilities from modes[0].state ---
+        // State string length / 2 = number of control channels
+        // 1 byte  ("ff")     = brightness only
+        // 2 bytes ("ff00")   = brightness + 1 aux
+        // 3 bytes ("ff3300") = brightness + 2 aux (vertical + temp)
+        if (unitObj["modes"].is<JsonArrayConst>()) {
+            JsonArrayConst modes = unitObj["modes"];
+            if (modes.size() > 0) {
+                JsonObjectConst mode0 = modes[0];
+                if (mode0["state"].is<const char*>()) {
+                    String stateStr = mode0["state"].as<String>();
+                    unit.numChannels = stateStr.length() / 2;
+                    if (unit.numChannels < 1) unit.numChannels = 1;
+                    if (unit.numChannels > 3) unit.numChannels = 3;
+                }
+            }
+        }
+
+        // --- Parse CCT capability from settings ---
+        if (unitObj["settings"].is<JsonObjectConst>()) {
+            JsonObjectConst settings = unitObj["settings"];
+            if (settings["cct.minKelvins"].is<float>()) {
+                unit.hasCCT = true;
+                unit.cctMinKelvin = static_cast<uint16_t>(settings["cct.minKelvins"].as<float>());
+                unit.cctMaxKelvin = static_cast<uint16_t>(settings["cct.maxKelvins"].as<float>());
+            }
+        }
+
+        // --- Derive hasVertical ---
+        // If 3 channels: has both vertical and CCT
+        // If 2 channels and hasCCT: aux is CCT, no vertical
+        // If 2 channels and !hasCCT: aux is vertical
+        if (unit.numChannels >= 3) {
+            unit.hasVertical = true;
+            // hasCCT should already be set from settings
+        } else if (unit.numChannels == 2) {
+            if (!unit.hasCCT) {
+                unit.hasVertical = true;
+            }
+            // else: aux is CCT, hasVertical stays false
+        }
+
         config.units.push_back(unit);
-        Serial.printf("Parse: Unit [%d] '%s'\n", unit.deviceId, unit.name.c_str());
+
+        // Build capability string for logging
+        String caps = "dim";
+        if (unit.hasVertical) caps += "+vertical";
+        if (unit.hasCCT) caps += "+cct(" + String(unit.cctMinKelvin) + "-" + String(unit.cctMaxKelvin) + "K)";
+
+        Serial.printf("Parse: Unit [%d] '%s' (type=%d, ch=%d, %s)\n",
+                      unit.deviceId, unit.name.c_str(), unit.type,
+                      unit.numChannels, caps.c_str());
     }
 
     return config.units.size() > 0;
@@ -318,13 +368,14 @@ bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfi
 
     JsonArrayConst cells = gridObj["cells"];
 
-    uint8_t groupId = 0;
     for (JsonObjectConst cellObj : cells) {
         // Type 2 = group
         if (cellObj["type"].as<int>() != 2) continue;
 
         CasambiGroup group;
-        group.groupId = groupId++;
+
+        // Use actual groupID from the grid, not sequential
+        group.groupId = cellObj["groupID"].as<uint8_t>();
         group.name = cellObj["name"].as<String>();
 
         // Parse group members
@@ -333,7 +384,7 @@ bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfi
             for (JsonObjectConst subCell : subCells) {
                 // Type 1 = unit
                 if (subCell["type"].as<int>() == 1) {
-                    uint8_t unitId = subCell["deviceID"].as<uint8_t>();
+                    uint8_t unitId = subCell["unit"].as<uint8_t>();
                     group.unitIds.push_back(unitId);
                 }
             }
@@ -353,7 +404,6 @@ bool CasambiAPIClient::_parseScenes(const JsonArrayConst& scenesArray, NetworkCo
     for (JsonObjectConst sceneObj : scenesArray) {
         CasambiScene scene;
 
-        // Casambi API uses "sceneID" (capital ID), not "id"
         scene.sceneId = sceneObj["sceneID"].as<uint8_t>();
         scene.name = sceneObj["name"].as<String>();
 

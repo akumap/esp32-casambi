@@ -1,7 +1,8 @@
 /**
  * Casambi BLE Client
  *
- * Handles BLE connection, ECDH key exchange, authentication, and packet communication
+ * Handles BLE connection, ECDH key exchange, authentication, and packet communication.
+ * Includes auto-reconnect, connection monitoring, and data packet parsing.
  */
 
 #ifndef CASAMBI_CLIENT_H
@@ -11,6 +12,7 @@
 #include <BLEDevice.h>
 #include <BLEClient.h>
 #include <vector>
+#include <functional>
 #include "../config.h"
 #include "../cloud/network_config.h"
 #include "../crypto/encryption.h"
@@ -29,6 +31,30 @@ enum class ConnectionState {
 };
 
 // ============================================================================
+// DISCONNECT REASON (for diagnostics)
+// ============================================================================
+
+enum class DisconnectReason {
+    None = 0,
+    UserRequested,
+    BLELinkLoss,
+    AuthFailed,
+    KeyExchangeFailed,
+    Timeout,
+    InternalError
+};
+
+// ============================================================================
+// CALLBACK TYPES
+// ============================================================================
+
+// Called when a unit state changes (from incoming data packets)
+using UnitStateCallback = std::function<void(uint8_t unitId, uint8_t level, bool online)>;
+
+// Called when connection state changes
+using ConnectionStateCallback = std::function<void(ConnectionState newState, DisconnectReason reason)>;
+
+// ============================================================================
 // CASAMBI BLE CLIENT
 // ============================================================================
 
@@ -36,6 +62,10 @@ class CasambiClient {
 public:
     CasambiClient(NetworkConfig* config);
     ~CasambiClient();
+
+    // ========================================================================
+    // CONNECTION MANAGEMENT
+    // ========================================================================
 
     /**
      * Connect to Casambi device
@@ -57,77 +87,74 @@ public:
     }
 
     /**
+     * Check if BLE link is still alive (low-level check)
+     */
+    bool isBLEConnected() const;
+
+
+    /**
+     * Send "keep-alive" messages to network, check fo response
+     */
+    bool sendKeepalive();
+
+    /**
      * Get current connection state
      */
     ConnectionState getState() const { return _state; }
+
+    /**
+     * Get last disconnect reason
+     */
+    DisconnectReason getLastDisconnectReason() const { return _lastDisconnectReason; }
+
+    /**
+     * Get the address we're connected (or were last connected) to
+     */
+    String getConnectedAddress() const { return _connectedAddress; }
+
+    /**
+     * Get uptime of current connection in milliseconds
+     */
+    unsigned long getConnectionUptime() const;
+
+    /**
+     * Get count of packets received since connection
+     */
+    uint32_t getReceivedPacketCount() const { return _totalReceivedPackets; }
+
+    /**
+     * Check connection health and detect silent disconnects.
+     * Call this periodically from loop().
+     * @return true if connection is healthy
+     */
+    bool checkConnectionHealth();
+
+    // ========================================================================
+    // CALLBACKS
+    // ========================================================================
+
+    /**
+     * Set callback for unit state changes
+     */
+    void setUnitStateCallback(UnitStateCallback cb) { _unitStateCallback = cb; }
+
+    /**
+     * Set callback for connection state changes
+     */
+    void setConnectionStateCallback(ConnectionStateCallback cb) { _connStateCallback = cb; }
 
     // ========================================================================
     // CONTROL FUNCTIONS
     // ========================================================================
 
-    /**
-     * Set scene level
-     * @param sceneId Scene ID (0-255)
-     * @param level Level 0-255 (0xFF = restore last level)
-     */
     void setSceneLevel(uint8_t sceneId, uint8_t level);
-
-    /**
-     * Set unit level
-     * @param unitId Unit ID (0-255)
-     * @param level Level 0-255
-     */
     void setUnitLevel(uint8_t unitId, uint8_t level);
-
-    /**
-     * Set group level
-     * @param groupId Group ID (0-255)
-     * @param level Level 0-255
-     */
     void setGroupLevel(uint8_t groupId, uint8_t level);
-
-    /**
-     * Set unit vertical (light distribution balance)
-     * @param unitId Unit ID (0-255)
-     * @param vertical Light balance 0-255 (0=top only, 127=both, 255=bottom only)
-     */
     void setUnitVertical(uint8_t unitId, uint8_t vertical);
-
-    /**
-     * Set group vertical (light distribution balance)
-     * @param groupId Group ID (0-255)
-     * @param vertical Light balance 0-255 (0=top only, 127=both, 255=bottom only)
-     */
     void setGroupVertical(uint8_t groupId, uint8_t vertical);
-
-    /**
-     * Set unit color temperature
-     * @param unitId Unit ID
-     * @param kelvin Color temperature in Kelvin (divided by 50 for protocol)
-     */
     void setUnitTemperature(uint8_t unitId, uint16_t kelvin);
-
-    /**
-     * Set unit RGB color
-     * @param unitId Unit ID
-     * @param r Red 0-255
-     * @param g Green 0-255
-     * @param b Blue 0-255
-     */
     void setUnitColor(uint8_t unitId, uint8_t r, uint8_t g, uint8_t b);
-
-    /**
-     * Set unit slider (motor position control)
-     * @param unitId Unit ID
-     * @param value Motor position 0-255 (0=up, 255=down)
-     */
     void setUnitSlider(uint8_t unitId, uint8_t value);
-
-    /**
-     * Set group slider (motor position control)
-     * @param groupId Group ID
-     * @param value Motor position 0-255 (0=up, 255=down)
-     */
     void setGroupSlider(uint8_t groupId, uint8_t value);
 
 private:
@@ -148,27 +175,37 @@ private:
     uint32_t _inPacketCount;
     uint16_t _origin;
 
+    // Connection tracking
+    String _connectedAddress;
+    unsigned long _connectTime;          // millis() when connected
+    unsigned long _lastNotificationTime; // millis() when last notification received
+    uint32_t _totalReceivedPackets;
+    DisconnectReason _lastDisconnectReason;
+
     // Thread safety for concurrent command line + web server access
     SemaphoreHandle_t _mutex;
+
+    // Callbacks
+    UnitStateCallback _unitStateCallback;
+    ConnectionStateCallback _connStateCallback;
 
     // ========================================================================
     // CONNECTION FLOW
     // ========================================================================
 
-    /**
-     * Read initial device info and start notifications
-     */
     bool _readDeviceInfo();
-
-    /**
-     * Perform ECDH key exchange
-     */
     bool _performKeyExchange();
+    bool _authenticate();
 
     /**
-     * Authenticate using session key
+     * Internal disconnect with reason tracking
      */
-    bool _authenticate();
+    void _disconnectInternal(DisconnectReason reason);
+
+    /**
+     * Update state and fire callback
+     */
+    void _setState(ConnectionState newState, DisconnectReason reason = DisconnectReason::None);
 
     // ========================================================================
     // PACKET HANDLING
@@ -207,6 +244,11 @@ private:
     void _handleKeyExchangeNotification(uint8_t* data, size_t len);
     void _handleAuthNotification(uint8_t* data, size_t len);
     void _handleDataNotification(uint8_t* data, size_t len);
+
+    /**
+     * Apply parsed unit states to NetworkConfig and fire callbacks
+     */
+    void _applyUnitStates(const std::vector<struct UnitStateInfo>& states);
 };
 
 #endif // CASAMBI_CLIENT_H

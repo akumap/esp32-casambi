@@ -1,65 +1,86 @@
 # ESP32 Casambi Controller
 
-An offline BLE controller for Casambi lighting systems, running on ESP32. Control your Casambi lights without cloud dependency after initial setup.
+An offline BLE controller for Casambi lighting systems, running on ESP32. Control your Casambi lights without cloud dependency after initial setup. Receives real-time state updates from the Casambi mesh network and provides current values via HTTP REST API for integration with home automation systems.
 
 [![Platform](https://img.shields.io/badge/platform-ESP32-blue.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![Framework](https://img.shields.io/badge/framework-Arduino-00979D.svg)](https://www.arduino.cc/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
----
+-----
 
 ## Features
 
-- ✅ **Hybrid WiFi/BLE Operation** - One-time WiFi setup, then fully offline BLE control
-- ✅ **HTTP REST API** - Control lights from home automation systems (Loxone, Home Assistant, etc.)
-- ✅ **Complete Protocol Support** - Full Casambi Evolution protocol implementation
-- ✅ **Encrypted Communication** - ECDH key exchange, AES-CTR encryption, CMAC authentication
-- ✅ **Scene Control** - Activate and control scenes with full state restoration
-- ✅ **Unit Control** - Individual light control (on/off, brightness, color, temperature)
-- ✅ **Group Control** - Control multiple lights simultaneously
-- 🚀 **Auto-Connect** - Automatically connects to your gateway on boot
-- 🔧 **Debug Toggle** - Clean operation by default, verbose debugging when needed
-- 💾 **Persistent Storage** - Configuration stored in LittleFS (survives reboots)
-- 🔍 **Auto-Discovery** - Setup wizard scans and finds your Casambi network
+- ✅ **Hybrid WiFi/BLE Operation** — One-time WiFi setup, then fully offline BLE control
+- ✅ **HTTP REST API** — Control and monitor lights from any home automation system
+- ✅ **Real-Time State Tracking** — Receives status broadcasts from the Casambi mesh; current brightness, color temperature, and vertical distribution always up to date, even when lights are controlled via the Casambi app or other controllers
+- ✅ **Complete Protocol Support** — Full Casambi Evolution protocol implementation (ECDH, AES-CTR, CMAC)
+- ✅ **Generic Capability Detection** — Unit capabilities (dimmer, CCT, vertical) automatically derived from cloud API; no hardcoding of fixture types needed
+- ✅ **Scene, Unit & Group Control** — On/off, brightness, color, temperature, vertical, slider
+- ✅ **Auto-Connect & Auto-Reconnect** — Reconnects automatically on BLE link loss with exponential backoff
+- ✅ **WiFi Auto-Reconnect** — Recovers WiFi connection silently in background
+- ✅ **Hardware Watchdog** — Prevents permanent hangs (30s timeout)
+- ✅ **Heap Monitoring** — Automatic restart on critical memory levels
+- ✅ **Connection Health Checks** — Detects silent BLE disconnects
+- 💾 **Persistent Storage** — Configuration and capabilities stored in LittleFS (survives reboots and reflashing)
 
----
+-----
+
+## Tested Hardware & Lights
+
+### ESP32 Boards
+
+- [AZDelivery ESP32 Dev Kit C V4](https://www.amazon.de/dp/B07Z83MF5W) — Primary development and test board (PSRAM not required)
+- [ESP32-C3 Super Mini](https://www.amazon.de/dp/B0DMNBWTFD) — Compact alternative
+
+### Build Host
+
+- Raspberry Pi (used for PlatformIO builds and serial monitoring)
+
+### Tested Casambi Lights
+
+The following Occhio luminaires have been tested with this controller:
+
+|Luminaire                |Capabilities                             |Verified          |
+|-------------------------|-----------------------------------------|------------------|
+|Occhio Mito sospeso (air)|Brightness + Vertical + Color Temperature|✅ All controls    |
+|Occhio Sento (air)       |Brightness + Vertical                    |✅ Brightness + Vertical|
+|Occhio Luna sospeso (air)|Brightness + Color Temperature           |✅ Brightness + CCT|
+|Occhio air module        |Brightness only                          |✅ Brightness      |
+
+The controller should work with any Casambi-enabled luminaire. Capabilities are detected generically from the Casambi cloud configuration — no fixture-specific code is required.
+
+-----
 
 ## Quick Start
 
-### Hardware Requirements
+### Requirements
 
-**Supported ESP32 Boards:**
-- [AZDelivery ESP32 Dev Kit C V4](https://www.amazon.de/dp/B07Z83MF5W) - Primary development board
-- [ESP32-C3 Super Mini](https://www.amazon.de/dp/B0DMNBWTFD) - Compact alternative
 - Any ESP32 board with BLE support
-
-**Additional Requirements:**
 - USB cable for programming and serial communication
 - Casambi network with at least one BLE-enabled device
-
-### Software Requirements
 - [PlatformIO](https://platformio.org/) (recommended) or Arduino IDE
 
 ### Installation
 
 1. **Clone the repository:**
+   
    ```bash
-   git clone https://github.com/lian/esp32-casambi.git
+   git clone https://github.com/akumap/esp32-casambi.git
    cd esp32-casambi
    ```
-
-2. **Build and upload:**
+1. **Build and upload:**
+   
    ```bash
    # For ESP32 Dev Kit V4 (default)
-   pio run -t upload
-
+   pio run -e devkit-v4 -t upload
+   
    # For ESP32-C3 Super Mini
    pio run -e esp32-c3 -t upload
    ```
-
-3. **Open serial monitor:**
+1. **Open serial monitor:**
+   
    ```bash
-   pio device monitor --echo
+   pio device monitor --filter esp32_exception_decoder --filter time
    ```
 
 ### Initial Setup
@@ -71,530 +92,436 @@ On first boot, the device enters setup mode. Run the setup wizard:
 ```
 
 The wizard will:
-1. Scan for nearby Casambi networks
-2. Auto-discover your network UUID from the device MAC
-3. Connect to WiFi (you provide credentials)
-4. Download network configuration from Casambi Cloud
-5. Save everything to flash
-6. Reboot into operation mode
 
-**After setup:** WiFi stays connected to provide the HTTP REST API for home automation systems, while BLE handles all Casambi protocol communication.
+1. Scan for nearby Casambi networks via BLE
+1. Auto-discover your network UUID from the device MAC
+1. Connect to WiFi (you provide credentials)
+1. Download network configuration from Casambi Cloud (including unit capabilities)
+1. Save everything to flash
+1. Reboot into operation mode
 
----
+Then connect to a BLE gateway:
+
+```
+> scan
+> connect 0
+```
+
+The MAC address is saved automatically. On subsequent boots, the controller reconnects automatically.
+
+-----
 
 ## Usage
 
-### Connection
+### Serial Commands
+
+#### Connection
 
 ```bash
 scan               # Scan for Casambi devices
-connect 0          # Connect to first device found (auto-saves for next boot)
+connect 0          # Connect to first device found (auto-saves MAC)
 disconnect         # Disconnect from device
+status             # Show detailed system status (BLE, WiFi, heap, uptime)
+restart            # Restart ESP32
 ```
 
-### Scene Control
+#### Scene Control
 
 ```bash
-son 1              # Turn scene 1 ON
-soff 1             # Turn scene 1 OFF
-slevel 1 255       # Set scene 1 to full intensity
-slevel 1 128       # Set scene 1 to 50% intensity
+son 10             # Turn scene 10 ON
+soff 10            # Turn scene 10 OFF
+slevel 10 128      # Set scene 10 to 50% intensity
 ```
 
-### Unit Control
+#### Unit Control
 
 ```bash
-uon 2              # Turn unit 2 ON
-uoff 2             # Turn unit 2 OFF
-ulevel 2 200       # Set unit 2 brightness to 200/255
-ucolor 2 255 0 0   # Set unit 2 to red
-utemp 2 3000       # Set unit 2 to warm white (3000K)
-uvertical 2 200    # Set light balance (0=top only, 127=both, 255=bottom only)
+uon 5              # Turn unit 5 ON
+uoff 5             # Turn unit 5 OFF
+ulevel 5 200       # Set unit 5 brightness to 200/255
+utemp 5 3000       # Set unit 5 to warm white (3000K)
+ucolor 5 255 0 0   # Set unit 5 to red
+uvertical 1 200    # Set light balance (0=top only, 127=both, 255=bottom only)
 uslider 2 200      # Set motor position (0=up, 255=down)
 ```
 
-### Group Control
+#### Group Control
 
 ```bash
-glevel 1 128       # Set group 1 brightness to 50%
-gvertical 1 200    # Set light balance (0=top only, 127=both, 255=bottom only)
-gslider 1 200      # Set motor position (0=up, 255=down)
+glevel 4 128       # Set group 4 brightness to 50%
+gvertical 4 200    # Set group light balance
+gslider 4 200      # Set group motor position
 ```
 
-### Information
+**Note on motor and light distribution controls:** The `vertical` command controls light distribution between top and bottom emitters (0=top only, 127=both equally, 255=bottom only). The `slider` command controls physical motor position. The actual behavior depends on your specific fixtures. Motor control (`slider`) has not been extensively tested and may not work on all devices — use scenes for reliable motor control.
+
+#### Configuration
 
 ```bash
-status             # Show connection status
-refresh            # Sync config from Casambi cloud
-list units         # Show all units
-list groups        # Show all groups
-list scenes        # Show all scenes
-debug on/off       # Toggle verbose debug output
+autoconnect on/off/status    # Auto-connect control
+autoconnect set <mac>        # Set MAC for auto-connect
+reconnect on/off             # Enable/disable auto-reconnect on link loss
+wifi set <ssid> <password>   # Update WiFi credentials
+wifi status                  # Show WiFi connection status
+debug on/off/status          # Toggle verbose debug output
+refresh                      # Re-download config from Casambi cloud
+clearconfig                  # Factory reset
 ```
 
-### Full Command Reference
+#### Information
 
-| Command | Description |
-|---------|-------------|
-| `help` | Show all commands |
-| `status` | Show connection status |
-| `refresh` | Refresh config from Casambi cloud |
-| `clearconfig` | Factory reset |
-| **BLE Commands** | |
-| `scan` | Scan for BLE devices |
-| `connect <n>` | Connect to device number n |
-| `disconnect` | Disconnect from device |
-| `autoconnect on/off/status` | Auto-connect control |
-| `autoconnect set <mac>` | Set MAC for auto-connect |
-| `wifi status` | Show WiFi connection status |
-| `wifi set <ssid> <password>` | Update WiFi credentials |
-| `debug on/off/status` | Debug output control |
-| **Scene Commands** | |
-| `son <id>` | Activate scene |
-| `soff <id>` | Deactivate scene |
-| `slevel <id> <0-255>` | Set scene intensity |
-| **Unit Commands** | |
-| `uon <id>` | Turn unit on |
-| `uoff <id>` | Turn unit off |
-| `ulevel <id> <0-255>` | Set unit brightness |
-| `ucolor <id> <r> <g> <b>` | Set unit RGB color (0-255 each) |
-| `utemp <id> <kelvin>` | Set unit color temperature (e.g., 2700-6500K) |
-| `uvertical <id> <0-255>` | Set unit motor position |
-| `uslider <id> <0-255>` | Set unit top/bottom light balance (0=bottom, 127=middle, 255=top) |
-| **Group Commands** | |
-| `glevel <id> <0-255>` | Set group brightness |
-| `gvertical <id> <0-255>` | Set group motor position |
-| `gslider <id> <0-255>` | Set group top/bottom light balance |
-| **Info Commands** | |
-| `list units` | List all units |
-| `list groups` | List all groups |
-| `list scenes` | List all scenes |
+```bash
+list units         # Show all units with ON/OFF state
+list groups        # Show all groups with IDs
+list scenes        # Show all scenes with IDs
+```
 
-**Motor and Light Distribution Controls:**
-- **Vertical** (light balance): Controls light distribution between top and bottom emitters (0=top only, 127=both equally, 255=bottom only)
-- **Slider** (motor position): Controls physical motor position (0=up, 255=down)
+-----
 
-**Note:** The actual behavior of vertical/slider controls depends on your specific light fixtures. Different manufacturers map these Casambi protocol controls differently. The descriptions above reflect typical motorized lights with dual emitters. Test with your fixtures to verify behavior.
+## HTTP REST API
 
----
+The ESP32 provides a REST API for integration with home automation systems (FHEM, Loxone, Home Assistant, Node-RED, etc.). The API serves both control commands and real-time state information from the Casambi mesh.
+
+### Base URL
+
+```
+http://<esp32-ip>/api
+```
+
+The IP address is displayed in the serial console on boot.
+
+### Status & Discovery
+
+**GET /api/status**
+
+```json
+{
+  "ble_connected": true,
+  "ble_state": 3,
+  "network_name": "Wohnung",
+  "wifi_ssid": "MyNetwork",
+  "wifi_ip": "192.168.178.111",
+  "wifi_rssi": -32,
+  "uptime_ms": 123456,
+  "free_heap": 56000,
+  "gateway_mac": "9e:d8:2b:33:15:44",
+  "connection_uptime_ms": 98765,
+  "packets_received": 42
+}
+```
+
+**GET /api/units** — List all units with current state
+
+```json
+{
+  "units": [
+    {
+      "id": 7,
+      "name": "Mito sospeso",
+      "type": 19425,
+      "address": "b0e0780c693a",
+      "online": true,
+      "on": true,
+      "level": 200,
+      "numChannels": 3,
+      "vertical": 127,
+      "colorTemp": 58,
+      "cctMin": 2700,
+      "cctMax": 4000
+    },
+    {
+      "id": 2,
+      "name": "Più Spüle",
+      "type": 1422,
+      "address": "c755032f4f9c",
+      "online": true,
+      "on": true,
+      "level": 255,
+      "numChannels": 1
+    }
+  ]
+}
+```
+
+The `level`, `on`, `vertical`, and `colorTemp` fields are updated in real-time from status broadcasts received over the BLE mesh. Changes made via the Casambi app, timers, sensors, or other controllers are reflected here.
+
+`colorTemp` is a device-normalized value (0–255). To convert to Kelvin: `kelvin = cctMin + (colorTemp / 255) * (cctMax - cctMin)`.
+
+Fields like `vertical` and `colorTemp` only appear for units that support these controls.
+
+**GET /api/groups** — List all groups
+
+**GET /api/scenes** — List all scenes
+
+### Control Endpoints
+
+#### Scenes
+
+```bash
+curl -X POST http://<ip>/api/scenes/10/on
+curl -X POST http://<ip>/api/scenes/10/off
+curl -X POST http://<ip>/api/scenes/10/level \
+  -H "Content-Type: application/json" -d '{"level": 128}'
+```
+
+#### Units
+
+```bash
+curl -X POST http://<ip>/api/units/5/on
+curl -X POST http://<ip>/api/units/5/off
+curl -X POST http://<ip>/api/units/5/level \
+  -H "Content-Type: application/json" -d '{"level": 200}'
+curl -X POST http://<ip>/api/units/5/temperature \
+  -H "Content-Type: application/json" -d '{"kelvin": 3000}'
+curl -X POST http://<ip>/api/units/5/color \
+  -H "Content-Type: application/json" -d '{"r": 255, "g": 100, "b": 0}'
+curl -X POST http://<ip>/api/units/1/vertical \
+  -H "Content-Type: application/json" -d '{"value": 127}'
+curl -X POST http://<ip>/api/units/2/slider \
+  -H "Content-Type: application/json" -d '{"value": 200}'
+```
+
+#### Groups
+
+```bash
+curl -X POST http://<ip>/api/groups/4/level \
+  -H "Content-Type: application/json" -d '{"level": 128}'
+curl -X POST http://<ip>/api/groups/4/vertical \
+  -H "Content-Type: application/json" -d '{"value": 127}'
+curl -X POST http://<ip>/api/groups/4/slider \
+  -H "Content-Type: application/json" -d '{"value": 200}'
+```
+
+### Response Format
+
+**Success:** `{"success": true}`
+
+**Error:** `{"success": false, "error": "Unit not found"}`
+
+-----
+
+## Known Limitations & Stability Notes
+
+### Stability
+
+- **Spontaneous reboots** have been observed under certain conditions. The most likely cause is the ESPAsyncWebServer library crashing under regular HTTP polling. Avoid polling more frequently than once per minute. A BLE-level keepalive (`readValue()`) is a more robust alternative to HTTP polling for connection monitoring.
+- **Long-term BLE stability** has not been exhaustively tested. The auto-reconnect mechanism mitigates most connection drops, but edge cases may exist.
+- The **hardware watchdog** (30s) and **heap monitoring** provide safety nets against hangs and memory leaks, but do not address root causes.
+
+### Untested or Partially Tested Features
+
+- **Motor control** (`uslider`, `gslider`): Not extensively tested. May not work on all devices. Use scenes for reliable motor control.
+- **RGB color control** (`ucolor`): Implemented but not tested with RGB-capable Casambi fixtures.
+- **Incoming packet types 0x08 and 0x09**: Received but not parsed. 0x09 appears to contain mesh topology data in an unknown format.
+- **Classic networks** (non-Evolution): The code has a fallback path for networks without encryption keys, but this has not been tested.
+
+### Protocol Notes
+
+- **Group IDs** are assigned internally by Casambi and do not start at 0. After setup, verify with `list groups`.
+- **Color temperature** values in status broadcasts are device-normalized (0–255), not absolute Kelvin. The `cctMin`/`cctMax` fields from the cloud API are needed for conversion.
+- **Fixture type codes** (the `type` field) are manufacturer-specific IDs registered with Casambi. There is no public lookup table.
+
+-----
+
+## Architecture
+
+### Stability Features
+
+The controller is designed for 24/7 unattended operation:
+
+- **BLE Auto-Reconnect:** On link loss, reconnects with exponential backoff (5s → 60s). After 10 consecutive failures, restarts the ESP32.
+- **WiFi Auto-Reconnect:** Checks every 30s, reconnects silently. Web server is restarted automatically.
+- **Hardware Watchdog:** 30-second WDT timeout prevents permanent hangs. Fed in every `loop()` iteration.
+- **Heap Monitoring:** Logged every 60s. If free heap drops below 20KB, the ESP32 restarts to prevent corruption.
+- **Connection Health:** Periodic `isBLEConnected()` check detects silent disconnects where the BLE stack hasn’t noticed a link loss.
+
+### BLE Protocol
+
+**Authentication Flow:**
+
+1. BLE connection to Casambi gateway
+1. ECDH key exchange (SECP256R1)
+1. Derive transport key (SHA256 + XOR fold)
+1. Authenticate with session key (SHA256 digest)
+1. Encrypted communication (AES-128-CTR + CMAC)
+
+**Incoming Data Packets (after decryption):**
+
+|Type|Description                                     |Status                                                |
+|----|------------------------------------------------|------------------------------------------------------|
+|0x06|Status Broadcast (unit states)                  |Fully parsed — brightness, vertical, color temperature|
+|0x07|Operation Echo (commands from other controllers)|Parsed and applied to state                           |
+|0x08|Unit State Update                               |Logged only (format unknown)                          |
+|0x09|Network State                                   |Logged only (different format, likely mesh topology)  |
+|0x0A|Time Sync                                       |Recognized                                            |
+|0x0C|Keepalive                                       |Recognized                                            |
+
+**Outgoing Operation Packets:**
+
+- Opcode `0x01` SetLevel, `0x03` SetTemperature, `0x04` SetVertical, `0x07` SetColor, `0x0C` SetSlider
+- Target encoding: `(id << 8) | type` where type is 0x01=Unit, 0x02=Group, 0x04=Scene
+
+### Generic Capability Detection
+
+Unit capabilities are derived from the Casambi Cloud API response during setup:
+
+- **Number of channels:** Length of `modes[0].state` string / 2 (1=dimmer, 2=dimmer+aux, 3=dimmer+vertical+temp)
+- **CCT support:** Presence of `settings.cct.minKelvins` and `settings.cct.maxKelvins`
+- **Vertical support:** Inferred — 3 channels always has vertical; 2 channels without CCT has vertical
+
+No fixture-type-specific hardcoding is needed. New Casambi device types are supported automatically.
+
+### Directory Structure
+
+```
+esp32-casambi/
+├── src/
+│   ├── main.cpp              # Main application, reconnect logic, monitoring
+│   ├── config.h              # Configuration constants, timeouts
+│   ├── ble/
+│   │   ├── casambi_client.*  # BLE connection, encryption, state tracking
+│   │   └── packet.*          # Packet building, 0x06/0x07 parsing
+│   ├── cloud/
+│   │   ├── api_client.*      # Casambi Cloud API client
+│   │   └── network_config.h  # Data structures (units, groups, capabilities)
+│   ├── crypto/
+│   │   ├── encryption.*      # AES-CTR + CMAC
+│   │   └── key_exchange.*    # ECDH (SECP256R1)
+│   ├── storage/
+│   │   └── config_store.*    # LittleFS persistence
+│   └── web/
+│       └── webserver.*       # HTTP REST API (ESPAsyncWebServer)
+├── platformio.ini
+└── README.md
+```
+
+-----
 
 ## Configuration
 
-### Auto-Connect
+### Auto-Connect & Auto-Reconnect
 
-Auto-connect is enabled by default. Simply connect once and the MAC address is saved:
-
-```bash
-connect 0          # Connect to device (MAC address auto-saved)
-```
-
-On next boot, the controller automatically reconnects to your Casambi gateway.
-
-**Disable auto-connect:**
-```bash
-autoconnect off    # Disable auto-connect
-autoconnect on     # Re-enable auto-connect
-```
-
-### Debug Mode
-
-Control output verbosity:
+Auto-connect saves the gateway MAC on first manual connection:
 
 ```bash
-debug off     # Clean operation (default) - only shows important messages
-debug on      # Verbose mode - shows packet details, encryption, nonces
+connect 0          # MAC address auto-saved
 ```
 
-### WiFi Configuration
-
-Update WiFi credentials without losing your Casambi configuration:
+On subsequent boots, the controller reconnects automatically. If the BLE link drops during operation, auto-reconnect attempts to restore the connection with exponential backoff.
 
 ```bash
-wifi status                        # Show WiFi connection status
-wifi set MyNetwork MyPassword123   # Update WiFi credentials
+autoconnect on/off     # Enable/disable auto-connect on boot
+reconnect on/off       # Enable/disable auto-reconnect on link loss
 ```
 
-The `wifi set` command will:
-- Save new credentials to flash
-- Disconnect from current WiFi
-- Connect to new network
-- Restart the web server
-- Display the new IP address
+### Syncing Changes
 
-This is useful when:
-- Your WiFi password changes
-- You move the ESP32 to a different network
-- You need to troubleshoot WiFi issues
-
-### Syncing Changes from Official App
-
-If you add new lights, rename devices, or modify scenes in the official Casambi app, use the `refresh` command to sync:
+If you modify your Casambi network (add lights, rename devices, change scenes) in the official app:
 
 ```bash
 refresh
 ```
 
-The command will:
-- Download fresh configuration from Casambi cloud
-- Update all units, groups, and scenes
-- Preserve your local settings (auto-connect, debug mode)
-- Require your network password for authentication
+This re-downloads the full configuration from the Casambi cloud while preserving local settings (auto-connect address, debug mode).
 
-This is useful when:
-- Adding new lights to your Casambi network
-- Renaming devices, groups, or scenes
-- Modifying scene configurations
-- Changes made by other users need to be synced
-
-**Note:** You need WiFi connected. The command will auto-connect if WiFi credentials are saved.
-
----
-
-## HTTP REST API
-
-The ESP32 provides a REST API for integration with home automation systems like Loxone, Home Assistant, Node-RED, and others.
-
-### Base URL
-
-After setup, the API is available at:
-```
-http://<esp32-ip>/api
-```
-
-The ESP32's IP address is displayed in the serial console on boot.
-
-### Endpoints
-
-#### Status & Discovery
-
-**GET /api/status**
-```bash
-curl http://192.168.1.100/api/status
-```
-```json
-{
-  "ble_connected": true,
-  "network_name": "Home Lights",
-  "wifi_ssid": "MyNetwork",
-  "wifi_ip": "192.168.1.100",
-  "uptime_ms": 123456,
-  "gateway_mac": "connected"
-}
-```
-
-**GET /api/units** - List all light units
-```bash
-curl http://192.168.1.100/api/units
-```
-```json
-{
-  "units": [
-    {"id": 1, "name": "Kitchen Ceiling", "address": "...", "online": true},
-    {"id": 2, "name": "Living Room", "address": "...", "online": true}
-  ]
-}
-```
-
-**GET /api/groups** - List all groups
-```bash
-curl http://192.168.1.100/api/groups
-```
-
-**GET /api/scenes** - List all scenes
-```bash
-curl http://192.168.1.100/api/scenes
-```
-
-#### Scene Control
-
-**POST /api/scenes/:id/on** - Activate scene
-```bash
-curl -X POST http://192.168.1.100/api/scenes/1/on
-```
-
-**POST /api/scenes/:id/off** - Deactivate scene
-```bash
-curl -X POST http://192.168.1.100/api/scenes/1/off
-```
-
-**POST /api/scenes/:id/level** - Set scene intensity (0-255)
-```bash
-curl -X POST http://192.168.1.100/api/scenes/1/level \
-  -H "Content-Type: application/json" \
-  -d '{"level": 128}'
-```
-
-#### Unit Control
-
-**POST /api/units/:id/on** - Turn unit on
-```bash
-curl -X POST http://192.168.1.100/api/units/2/on
-```
-
-**POST /api/units/:id/off** - Turn unit off
-```bash
-curl -X POST http://192.168.1.100/api/units/2/off
-```
-
-**POST /api/units/:id/level** - Set brightness (0-255)
-```bash
-curl -X POST http://192.168.1.100/api/units/2/level \
-  -H "Content-Type: application/json" \
-  -d '{"level": 200}'
-```
-
-**POST /api/units/:id/color** - Set RGB color (0-255 each)
-```bash
-curl -X POST http://192.168.1.100/api/units/2/color \
-  -H "Content-Type: application/json" \
-  -d '{"r": 255, "g": 100, "b": 0}'
-```
-
-**POST /api/units/:id/temperature** - Set color temperature (Kelvin)
-```bash
-curl -X POST http://192.168.1.100/api/units/2/temperature \
-  -H "Content-Type: application/json" \
-  -d '{"kelvin": 2700}'
-```
-
-**POST /api/units/:id/vertical** - Set light balance (0-255)
-```bash
-curl -X POST http://192.168.1.100/api/units/2/vertical \
-  -H "Content-Type: application/json" \
-  -d '{"value": 127}'
-```
-
-**POST /api/units/:id/slider** - Set motor position (0-255)
-```bash
-curl -X POST http://192.168.1.100/api/units/2/slider \
-  -H "Content-Type: application/json" \
-  -d '{"value": 200}'
-```
-
-#### Group Control
-
-**POST /api/groups/:id/level** - Set group brightness (0-255)
-```bash
-curl -X POST http://192.168.1.100/api/groups/1/level \
-  -H "Content-Type: application/json" \
-  -d '{"level": 128}'
-```
-
-**POST /api/groups/:id/vertical** - Set group light balance (0-255)
-```bash
-curl -X POST http://192.168.1.100/api/groups/1/vertical \
-  -H "Content-Type: application/json" \
-  -d '{"value": 127}'
-```
-
-**POST /api/groups/:id/slider** - Set group motor position (0-255)
-```bash
-curl -X POST http://192.168.1.100/api/groups/1/slider \
-  -H "Content-Type: application/json" \
-  -d '{"value": 200}'
-```
-
-### Response Format
-
-**Success:**
-```json
-{"success": true}
-```
-
-**Error:**
-```json
-{
-  "success": false,
-  "error": "Unit not found"
-}
-```
-
-### Integration Examples
-
-#### Loxone Miniserver
-
-Use Virtual HTTP Output commands:
-
-```
-Scene ON: http://192.168.1.100/api/scenes/1/on (POST)
-Unit Dimmer: http://192.168.1.100/api/units/2/level (POST, body: {"level":<v>})
-```
-
-#### Home Assistant
-
-```yaml
-rest_command:
-  casambi_scene_on:
-    url: "http://192.168.1.100/api/scenes/{{ scene_id }}/on"
-    method: POST
-
-  casambi_unit_level:
-    url: "http://192.168.1.100/api/units/{{ unit_id }}/level"
-    method: POST
-    content_type: "application/json"
-    payload: '{"level": {{ level }}}'
-```
-
-#### Node-RED
-
-Use HTTP Request nodes with method POST and appropriate payloads.
-
----
-
-## Architecture
-
-### Protocol Implementation
-
-**Authentication Flow:**
-1. BLE connection to Casambi gateway
-2. ECDH key exchange (SECP256R1)
-3. Derive transport key (SHA256 + XOR fold)
-4. Authenticate with session key
-5. Encrypted communication (AES-CTR + CMAC)
-
-**Encryption Details:**
-- Key Exchange: ECDH with SECP256R1 elliptic curve
-- Encryption: AES-128-CTR mode
-- Authentication: Manual CMAC-AES (RFC 4493)
-- Packet Format: Big-endian operation packets
-
-**Cloud API:**
-- Initial setup downloads network configuration
-- Stored locally in LittleFS flash filesystem
-- Includes keys, units, groups, scenes
-- No cloud dependency after setup
-
-### Directory Structure
-```
-esp32-casambi/
-├── src/
-│   ├── main.cpp              # Main application
-│   ├── config.h              # Configuration constants
-│   ├── ble/                  # BLE protocol implementation
-│   ├── cloud/                # Casambi Cloud API client
-│   ├── crypto/               # AES-CTR + CMAC + ECDH
-│   └── storage/              # LittleFS configuration
-├── platformio.ini
-└── README.md
-```
-
----
+-----
 
 ## Troubleshooting
 
 ### Setup Issues
 
-**WiFi won't connect:**
-- Ensure 2.4 GHz network (ESP32 doesn't support 5 GHz)
-- Check SSID and password
-- Try moving closer to access point
-
-**Network not found during scan:**
-- Ensure Casambi device is powered on and in range
-- Only gateway devices advertise via BLE
+- **WiFi won’t connect:** Ensure 2.4 GHz network (ESP32 doesn’t support 5 GHz)
+- **`HTTP -1` during setup:** TLS handshake failure — usually transient, retry
+- **Network not found during scan:** Ensure Casambi devices are powered on and in BLE range
 
 ### Connection Issues
 
-**Authentication fails:**
-- Run `clearconfig` and redo setup
-- Ensure correct Casambi network password
+- **Authentication fails:** Run `clearconfig` and redo setup with correct password
+- **Auto-connect doesn’t work:** Run `scan` + `connect` once to save the MAC address
+- **Silent disconnects:** Enable `debug on` to see BLE packet activity
 
-**Auto-connect doesn't work:**
-- Check `autoconnect status`
-- Try manual `connect` first to save MAC address
+### Spontaneous Reboots
+
+- Ensure PSRAM flags are **not** set in `platformio.ini` for boards without PSRAM
+- ESPAsyncWebServer can crash under frequent HTTP requests — avoid polling more than once per minute
+- Check `status` for heap values; decreasing free heap indicates a memory leak
+- Build with `pio run -e debug` for full stack traces on crash
 
 ### Control Issues
 
-**Commands don't work:**
-- Check connection: `status`
-- Verify device IDs: `list units`, `list scenes`
-- Try reconnecting
+- **Commands don’t work:** Check `status` — must show “Authenticated”
+- **Wrong group affected:** Verify group IDs with `list groups`; Casambi assigns IDs internally (not sequential from 0)
+- **Temperature command ignored:** Not all fixtures support CCT. Check `numChannels` in `/api/units`
 
----
+-----
 
 ## Development
 
 ### Build Environments
 
-The project includes optimized PlatformIO configurations:
+|Environment|Purpose                                          |
+|-----------|-------------------------------------------------|
+|`devkit-v4`|ESP32 Dev Kit V4 (default)                       |
+|`esp32-c3` |ESP32-C3 Super Mini                              |
+|`debug`    |Verbose logging, debug symbols, exception decoder|
+|`release`  |Size-optimized production build                  |
 
-**Production Environments:**
-- `devkit-v4` - ESP32 Dev Kit V4 (default)
-- `esp32-c3` - ESP32-C3 Super Mini
-
-**Development Environments:**
-- `debug` - Verbose logging with full debug symbols
-- `release` - Size-optimized production build
-
-**Build Features:**
-- Automatic exception decoding in serial monitor
-- Fast uploads (921600 baud vs default 115200)
-- Pinned library versions for reproducible builds
-- AsyncTCP optimizations for better WiFi/BLE coexistence
-- PSRAM support for Dev Kit V4
-
-**Usage:**
 ```bash
-pio run              # Build default environment
-pio run -e esp32-c3  # Build for ESP32-C3
-pio run -e debug     # Build with debug symbols
-pio run -e release   # Build optimized release
+pio run -e devkit-v4 -t upload    # Default build
+pio run -e debug -t upload        # Debug build with verbose BLE logging
 ```
 
----
+**Note:** After structural changes to the config format, run `clearconfig` + `setup` on the ESP32 to repopulate the configuration with new fields.
+
+-----
 
 ## Protocol Documentation
 
-Based on reverse-engineering the [Casambi Bluetooth library](https://github.com/lkempf/casambi-bt).
+Based on reverse-engineering the [Casambi Bluetooth library](https://github.com/lkempf/casambi-bt) and extensive packet analysis.
 
-**Key Opcodes:**
-- `0x01` - SetLevel (brightness, scenes)
-- `0x03` - SetTemperature (color temperature)
-- `0x04` - SetVertical (position)
-- `0x07` - SetColor (RGB/HSV)
-- `0x0C` - SetSlider
-- `0x30` - SetState
+### Outgoing Operations
 
-**Target Encoding:**
-- Unit: `(deviceId << 8) | 0x01`
-- Group: `(groupId << 8) | 0x02`
-- Scene: `(sceneId << 8) | 0x04`
+|Opcode|Name          |Payload                |
+|------|--------------|-----------------------|
+|`0x01`|SetLevel      |`[level]` (0-255)      |
+|`0x03`|SetTemperature|`[kelvin/50]`          |
+|`0x04`|SetVertical   |`[value]` (0-255)      |
+|`0x07`|SetColor      |`[hue_lo, hue_hi, sat]`|
+|`0x0C`|SetSlider     |`[value]` (0-255)      |
 
----
+### Incoming 0x06 Status Broadcast
+
+Variable-length records, one per unit, concatenated in a single packet. Record structure:
+
+```
+[unit_id] [flags] [cap] [const?] [prev_level?] [brightness] [aux1?] [aux2?]
+```
+
+- `flags` bit 4: previous level byte present; lower nibble: change source (0=physical, 3/7=software)
+- `cap`: upper nibble = aux count (0-2); lower nibble 0x03 = has constant byte, 0x00 = no constant
+- Record length: `3 + (cap==0x03?1:0) + (flags&0x10?1:0) + 1 + (cap>>4)`
+
+Group commands produce multi-unit packets with one record per affected unit.
+
+-----
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License — see <LICENSE> file for details.
 
----
+-----
 
 ## Acknowledgments
 
 - **Casambi Protocol:** Reverse-engineered from [casambi-bt](https://github.com/lkempf/casambi-bt) Python library
+- **Implementation:** based on [esp32-casambi](https://github.com/lian/esp32-casambi) project by lian
+- **0x06 Packet Format:** Reverse-engineered through systematic testing with Occhio luminaires
 - **ESP32 Community:** For excellent BLE and crypto libraries
-- **Screaming GPUs in a datacenter somewhere**
 
----
+-----
 
 ## Disclaimer
 
-This project is not affiliated with or endorsed by Casambi. It is an independent implementation for educational and personal use.
+This project is not affiliated with or endorsed by Casambi or Occhio. It is an independent implementation for personal use.
 
 **Security Note:** This controller stores Casambi network keys locally. Protect your ESP32 device physically to maintain security.
-
----
-
-## Project Status
-
-**Status:** Complete and hardware-tested
-
-**Tested Hardware:**
-- [AZDelivery ESP32 Dev Kit C V4](https://www.amazon.de/dp/B07Z83MF5W)
-- [ESP32-C3 Super Mini](https://www.amazon.de/dp/B0DMNBWTFD)
-- Casambi network (protocol v43)
-
----
-
-## Support
-
-- **Issues:** [GitHub Issues](https://github.com/lian/esp32-casambi/issues)

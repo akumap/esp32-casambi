@@ -67,7 +67,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
         keyObj["key"] = String(hexKey);
     }
 
-    // Save units
+    // Save units (with capabilities)
     JsonArray unitsArray = doc["units"].to<JsonArray>();
     for (const auto& unit : config.units) {
         JsonObject unitObj = unitsArray.add<JsonObject>();
@@ -77,6 +77,15 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
         unitObj["address"] = unit.address;
         unitObj["name"] = unit.name;
         unitObj["firmware"] = unit.firmware;
+
+        // Capabilities
+        unitObj["numChannels"] = unit.numChannels;
+        unitObj["hasCCT"] = unit.hasCCT;
+        unitObj["hasVertical"] = unit.hasVertical;
+        if (unit.hasCCT) {
+            unitObj["cctMin"] = unit.cctMinKelvin;
+            unitObj["cctMax"] = unit.cctMaxKelvin;
+        }
     }
 
     // Save groups
@@ -184,7 +193,7 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
         }
     }
 
-    // Load units
+    // Load units (with capabilities)
     config.units.clear();
     if (doc["units"].is<JsonArrayConst>()) {
         JsonArrayConst unitsArray = doc["units"];
@@ -198,6 +207,13 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
             unit.firmware = unitObj["firmware"].as<String>();
             unit.online = false;
             unit.on = false;
+
+            // Capabilities (with defaults for backward compatibility)
+            unit.numChannels = unitObj["numChannels"] | 1;
+            unit.hasCCT = unitObj["hasCCT"] | false;
+            unit.hasVertical = unitObj["hasVertical"] | false;
+            unit.cctMinKelvin = unitObj["cctMin"] | 0;
+            unit.cctMaxKelvin = unitObj["cctMax"] | 0;
 
             config.units.push_back(unit);
         }

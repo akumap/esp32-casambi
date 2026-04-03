@@ -62,6 +62,13 @@ void CasambiWebServer::_setupRoutes() {
         _handleGetScenes(request);
     });
 
+    // Reboot endpoint
+    _server->on("/api/reboot", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        request->send(200, "application/json", "{\"status\":\"rebooting\"}");
+        delay(1000);
+        ESP.restart();
+    });
+
     // NotFound handler for POST requests to match dynamic routes
     _server->onNotFound([this](AsyncWebServerRequest *request) {
         if (request->method() != HTTP_POST) {
@@ -173,14 +180,24 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     JsonDocument doc;
 
     doc["ble_connected"] = _client->isAuthenticated();
+    doc["ble_state"] = static_cast<int>(_client->getState());
     doc["network_name"] = _config->networkName;
     doc["wifi_ssid"] = WiFi.SSID();
     doc["wifi_ip"] = WiFi.localIP().toString();
+    doc["wifi_rssi"] = WiFi.RSSI();
     doc["uptime_ms"] = millis();
+    doc["free_heap"] = ESP.getFreeHeap();
+
+Serial.printf("Web: /api/status from %s\n", _getClientIP(request).c_str());
 
     if (_client->isAuthenticated()) {
-        // Add gateway MAC if connected
-        doc["gateway_mac"] = "connected";  // We don't store MAC in client
+        doc["gateway_mac"] = _client->getConnectedAddress();
+        doc["connection_uptime_ms"] = _client->getConnectionUptime();
+        doc["packets_received"] = _client->getReceivedPacketCount();
+    }
+
+    if (_client->getLastDisconnectReason() != DisconnectReason::None) {
+        doc["last_disconnect_reason"] = static_cast<int>(_client->getLastDisconnectReason());
     }
 
     String response;
@@ -189,18 +206,26 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
+    Serial.printf("Web: /api/units from %s\n", _getClientIP(request).c_str());
     JsonDocument doc;
     JsonArray units = doc["units"].to<JsonArray>();
-
     for (const auto& unit : _config->units) {
         JsonObject u = units.add<JsonObject>();
         u["id"] = unit.deviceId;
         u["name"] = unit.name;
+        u["type"] = unit.type;
         u["address"] = unit.address;
-        u["uuid"] = unit.uuid;
         u["online"] = unit.online;
+        u["on"] = unit.on;
+        u["level"] = unit.level;
+        u["numChannels"] = unit.numChannels;
+        if (unit.hasVertical) u["vertical"] = unit.vertical;
+        if (unit.hasCCT) {
+            u["colorTemp"] = unit.colorTemp;
+            u["cctMin"] = unit.cctMinKelvin;
+            u["cctMax"] = unit.cctMaxKelvin;
+        }
     }
-
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);

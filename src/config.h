@@ -59,6 +59,34 @@
 #define API_REQUEST_TIMEOUT_MS    15000
 
 // ============================================================================
+// RECONNECT & WATCHDOG SETTINGS
+// ============================================================================
+
+// BLE auto-reconnect interval (ms) - wait before trying to reconnect
+#define BLE_RECONNECT_INTERVAL_MS       5000
+
+// BLE reconnect maximum backoff (ms)
+#define BLE_RECONNECT_MAX_BACKOFF_MS    60000
+
+// WiFi reconnect check interval (ms)
+#define WIFI_RECONNECT_INTERVAL_MS      30000
+
+// Connection health check interval (ms) - verify BLE is still alive
+#define CONNECTION_CHECK_INTERVAL_MS    10000
+
+// Heap monitoring interval (ms) - log free heap periodically
+#define HEAP_MONITOR_INTERVAL_MS        60000
+
+// Minimum free heap before forced restart (bytes)
+#define HEAP_CRITICAL_THRESHOLD         20000
+
+// Watchdog timeout (seconds) - hardware WDT
+#define WDT_TIMEOUT_SECONDS             30
+
+// Maximum consecutive BLE reconnect failures before ESP restart
+#define MAX_RECONNECT_FAILURES          10
+
+// ============================================================================
 // BLE PACKET CONSTANTS
 // ============================================================================
 

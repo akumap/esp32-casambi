@@ -38,11 +38,27 @@ struct CasambiUnit {
     String address;
     String name;
     String firmware;
+
+    // Capabilities (derived from API: modes and settings)
+    uint8_t numChannels;     // 1=dimmer only, 2=dimmer+aux, 3=dimmer+vertical+temp
+    bool hasCCT;             // Has color temperature control
+    bool hasVertical;        // Has vertical light distribution control
+    uint16_t cctMinKelvin;   // Minimum color temperature (from settings)
+    uint16_t cctMaxKelvin;   // Maximum color temperature (from settings)
+
+    // Current state (updated from 0x06 packets)
     bool online;
     bool on;
+    uint8_t level;           // Current brightness 0-255
+    uint8_t vertical;        // Current vertical value 0-255 (if hasVertical)
+    uint8_t colorTemp;       // Current color temp 0-255 normalized (if hasCCT)
 
     CasambiUnit() : deviceId(0), type(0), uuid(""), address(""),
-                    name(""), firmware(""), online(false), on(false) {}
+                    name(""), firmware(""),
+                    numChannels(1), hasCCT(false), hasVertical(false),
+                    cctMinKelvin(0), cctMaxKelvin(0),
+                    online(false), on(false), level(0),
+                    vertical(127), colorTemp(0) {}
 };
 
 struct CasambiGroup {
