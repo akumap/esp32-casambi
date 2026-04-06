@@ -223,6 +223,17 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         }
     }
 
+    if (parseDebugEnabled && !states.empty()) {
+        Serial.print("P06:");
+        for (const auto& s : states) {
+            Serial.printf(" U%d=%d", s.unitId, s.level);
+            if (!s.online) Serial.print("(off)");
+            if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
+            if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
+        }
+        Serial.println();
+    }
+
     return !states.empty();
 }
 
@@ -268,6 +279,17 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
         }
     }
 
+    if (parseDebugEnabled) {
+        Serial.printf("P07: %s %s[%d]",
+                      opcodeName(echo.opcode),
+                      targetTypeName(echo.targetType),
+                      echo.targetId);
+        for (size_t i = 0; i < echo.payload.size(); i++) {
+            Serial.printf(" %02x", echo.payload[i]);
+        }
+        Serial.println();
+    }
+
     return true;
 }
 
@@ -311,6 +333,24 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
         Serial.printf("PARSE 0x08: Parsed %d unit states (fallback)\n", states.size());
         for (const auto& s : states) {
             Serial.printf("  Unit %d: level=%d on=%d\n", s.unitId, s.level, s.on);
+        }
+    }
+
+    if (parseDebugEnabled) {
+        if (!states.empty()) {
+            Serial.print("P08:");
+            for (const auto& s : states) {
+                Serial.printf(" U%d=%d", s.unitId, s.level);
+                if (!s.online) Serial.print("(off)");
+                if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
+                if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
+            }
+            Serial.println();
+        } else {
+            // Unbekanntes Format — Rohbytes ausgeben
+            Serial.printf("P08-raw (%d):", len);
+            for (size_t i = 0; i < len; i++) Serial.printf(" %02x", data[i]);
+            Serial.println();
         }
     }
 

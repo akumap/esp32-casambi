@@ -48,6 +48,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
 
     // Debug settings
     doc["debugEnabled"] = config.debugEnabled;
+    doc["parseDebugEnabled"] = config.parseDebugEnabled;
 
     // Save keys
     JsonArray keysArray = doc["keys"].to<JsonArray>();
@@ -170,6 +171,7 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
 
     // Load debug settings (with defaults for backward compatibility)
     config.debugEnabled = doc["debugEnabled"] | false;
+    config.parseDebugEnabled = doc["parseDebugEnabled"] | false;
 
     // Load keys
     config.keys.clear();

@@ -109,6 +109,7 @@
 // GLOBAL FLAGS
 // ============================================================================
 
-extern bool debugEnabled;  // Debug output toggle (defined in main.cpp)
+extern bool debugEnabled;       // Debug output toggle (defined in main.cpp)
+extern bool parseDebugEnabled;  // Protocol parse debug toggle (defined in main.cpp)
 
 #endif // CONFIG_H

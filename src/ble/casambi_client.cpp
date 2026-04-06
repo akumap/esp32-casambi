@@ -778,8 +778,14 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         }
 
         case 0x08: {
-            Serial.printf("BLE: <<< Unit state (0x08) %d bytes\n", payloadLen);
-            hexDump("BLE: 0x08", payload, payloadLen);
+            if (debugEnabled) {
+                Serial.printf("BLE: <<< Unit state (0x08) %d bytes\n", payloadLen);
+                hexDump("BLE: 0x08", payload, payloadLen);
+            }
+            std::vector<UnitStateInfo> states;
+            if (parseUnitStateUpdate(payload, payloadLen, states)) {
+                _applyUnitStates(states);
+            }
             break;
         }
 
@@ -787,6 +793,11 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
             if (debugEnabled) {
                 Serial.printf("BLE: <<< Network state (0x09) %d bytes\n", payloadLen);
                 hexDump("BLE: 0x09", payload, payloadLen);
+            }
+            if (parseDebugEnabled) {
+                Serial.printf("P09 (%d):", payloadLen);
+                for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
+                Serial.println();
             }
             break;
         }

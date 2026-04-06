@@ -98,11 +98,12 @@ struct NetworkConfig {
 
     // Debug settings
     bool debugEnabled;
+    bool parseDebugEnabled;
 
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
                       autoConnectEnabled(true), autoConnectAddress(""),
-                      debugEnabled(false) {}
+                      debugEnabled(false), parseDebugEnabled(false) {}
 
     // Get the best key (highest role)
     CasambiKey* getBestKey() {

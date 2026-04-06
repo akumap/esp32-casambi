@@ -23,6 +23,7 @@ CasambiClient* casambiClient = nullptr;
 CasambiAPIClient* apiClient = nullptr;
 CasambiWebServer* webServer = nullptr;
 bool debugEnabled = false;
+bool parseDebugEnabled = false;
 
 // BLE scan state
 struct ScannedDevice {
@@ -101,8 +102,9 @@ void setup() {
             Serial.printf("Groups: %d\n", networkConfig.groups.size());
             Serial.printf("Scenes: %d\n", networkConfig.scenes.size());
 
-            // Load debug setting
+            // Load debug settings
             debugEnabled = networkConfig.debugEnabled;
+            parseDebugEnabled = networkConfig.parseDebugEnabled;
 
             // Initialize BLE first (before WiFi for proper coexistence)
             BLEDevice::init("ESP32-Casambi");
@@ -817,21 +819,33 @@ void handleCommand(const String& cmd) {
 
             if (subcmd == "on") {
                 debugEnabled = true;
+                parseDebugEnabled = true;
                 networkConfig.debugEnabled = true;
+                networkConfig.parseDebugEnabled = true;
                 ConfigStore::saveNetworkConfig(networkConfig);
-                Serial.println("Debug output enabled");
+                Serial.println("Debug output enabled (full)");
+            }
+            else if (subcmd == "parse") {
+                parseDebugEnabled = true;
+                networkConfig.parseDebugEnabled = true;
+                ConfigStore::saveNetworkConfig(networkConfig);
+                Serial.println("Parse debug enabled");
             }
             else if (subcmd == "off") {
                 debugEnabled = false;
+                parseDebugEnabled = false;
                 networkConfig.debugEnabled = false;
+                networkConfig.parseDebugEnabled = false;
                 ConfigStore::saveNetworkConfig(networkConfig);
                 Serial.println("Debug output disabled");
             }
             else if (subcmd == "status") {
-                Serial.printf("Debug output: %s\n", debugEnabled ? "enabled" : "disabled");
+                Serial.printf("Debug: %s  Parse: %s\n",
+                              debugEnabled ? "on" : "off",
+                              parseDebugEnabled ? "on" : "off");
             }
             else {
-                Serial.println("Usage: debug on/off/status");
+                Serial.println("Usage: debug on/off/parse/status");
             }
         }
         // Scene commands
