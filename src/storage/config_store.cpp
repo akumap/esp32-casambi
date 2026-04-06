@@ -47,10 +47,11 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     doc["autoConnectAddress"] = config.autoConnectAddress;
 
     // Debug settings (per category)
-    doc["bleDebugEnabled"]   = config.bleDebugEnabled;
-    doc["webDebugEnabled"]   = config.webDebugEnabled;
-    doc["parseDebugEnabled"] = config.parseDebugEnabled;
-    doc["heapDebugEnabled"]  = config.heapDebugEnabled;
+    doc["bleDebugEnabled"]     = config.bleDebugEnabled;
+    doc["casambiDebugEnabled"] = config.casambiDebugEnabled;
+    doc["webDebugEnabled"]     = config.webDebugEnabled;
+    doc["parseDebugEnabled"]   = config.parseDebugEnabled;
+    doc["heapDebugEnabled"]    = config.heapDebugEnabled;
 
     // Save keys
     JsonArray keysArray = doc["keys"].to<JsonArray>();
@@ -172,10 +173,11 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
     config.autoConnectAddress = doc["autoConnectAddress"] | "";
 
     // Load debug settings (with defaults for backward compatibility)
-    config.bleDebugEnabled   = doc["bleDebugEnabled"]   | false;
-    config.webDebugEnabled   = doc["webDebugEnabled"]   | true;
-    config.parseDebugEnabled = doc["parseDebugEnabled"] | false;
-    config.heapDebugEnabled  = doc["heapDebugEnabled"]  | false;
+    config.bleDebugEnabled     = doc["bleDebugEnabled"]     | false;
+    config.casambiDebugEnabled = doc["casambiDebugEnabled"] | true;
+    config.webDebugEnabled     = doc["webDebugEnabled"]     | true;
+    config.parseDebugEnabled   = doc["parseDebugEnabled"]   | false;
+    config.heapDebugEnabled    = doc["heapDebugEnabled"]    | false;
 
     // Load keys
     config.keys.clear();

@@ -109,9 +109,10 @@
 // GLOBAL FLAGS
 // ============================================================================
 
-extern bool bleDebugEnabled;    // BLE/crypto verbose debug (defined in main.cpp)
-extern bool webDebugEnabled;    // Web API request logging (defined in main.cpp)
-extern bool parseDebugEnabled;  // Protocol parse compact output (defined in main.cpp)
-extern bool heapDebugEnabled;   // Heap monitoring output (defined in main.cpp)
+extern bool bleDebugEnabled;      // BLE/crypto verbose debug (defined in main.cpp)
+extern bool casambiDebugEnabled;  // Casambi network events: unit states, echo, callbacks (defined in main.cpp)
+extern bool webDebugEnabled;      // Web API request logging (defined in main.cpp)
+extern bool parseDebugEnabled;    // Protocol parse compact output (defined in main.cpp)
+extern bool heapDebugEnabled;     // Heap monitoring output (defined in main.cpp)
 
 #endif // CONFIG_H

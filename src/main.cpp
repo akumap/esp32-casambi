@@ -22,10 +22,11 @@ NetworkConfig networkConfig;
 CasambiClient* casambiClient = nullptr;
 CasambiAPIClient* apiClient = nullptr;
 CasambiWebServer* webServer = nullptr;
-bool bleDebugEnabled   = false;
-bool webDebugEnabled   = true;
-bool parseDebugEnabled = false;
-bool heapDebugEnabled  = false;
+bool bleDebugEnabled     = false;
+bool casambiDebugEnabled = true;
+bool webDebugEnabled     = true;
+bool parseDebugEnabled   = false;
+bool heapDebugEnabled    = false;
 
 // BLE scan state
 struct ScannedDevice {
@@ -105,10 +106,11 @@ void setup() {
             Serial.printf("Scenes: %d\n", networkConfig.scenes.size());
 
             // Load debug settings
-            bleDebugEnabled   = networkConfig.bleDebugEnabled;
-            webDebugEnabled   = networkConfig.webDebugEnabled;
-            parseDebugEnabled = networkConfig.parseDebugEnabled;
-            heapDebugEnabled  = networkConfig.heapDebugEnabled;
+            bleDebugEnabled     = networkConfig.bleDebugEnabled;
+            casambiDebugEnabled = networkConfig.casambiDebugEnabled;
+            webDebugEnabled     = networkConfig.webDebugEnabled;
+            parseDebugEnabled   = networkConfig.parseDebugEnabled;
+            heapDebugEnabled    = networkConfig.heapDebugEnabled;
 
             // Initialize BLE first (before WiFi for proper coexistence)
             BLEDevice::init("ESP32-Casambi");
@@ -135,7 +137,7 @@ void setup() {
                 [](uint8_t unitId, uint8_t level, bool online) {
                     // This is called from the notification handler
                     // Could be used to push state to home automation, MQTT, etc.
-                    if (bleDebugEnabled) {
+                    if (casambiDebugEnabled) {
                         Serial.printf("CALLBACK: Unit %d -> level=%d online=%d\n",
                                       unitId, level, online);
                     }
@@ -497,12 +499,13 @@ void handleCommand(const String& cmd) {
                 Serial.println("wifi set <ssid> <password> - Update WiFi credentials");
                 Serial.println("wifi status        - Show WiFi connection status");
                 Serial.println();
-                Serial.println("debug on/off       - Restore/suppress all debug (settings preserved)");
-                Serial.println("debug ble on/off   - BLE/crypto verbose output");
-                Serial.println("debug web on/off   - Web API request logging");
-                Serial.println("debug parse on/off - Protocol compact output (P06/P07...)");
-                Serial.println("debug heap on/off  - Heap monitoring");
-                Serial.println("debug status       - Show debug status per category");
+                Serial.println("debug on/off          - Restore/suppress all debug (settings preserved)");
+                Serial.println("debug ble on/off      - BLE/crypto verbose output");
+                Serial.println("debug casambi on/off  - Casambi network events (units, echo)");
+                Serial.println("debug web on/off      - Web API request logging");
+                Serial.println("debug parse on/off    - Protocol compact output (P06/P07...)");
+                Serial.println("debug heap on/off     - Heap monitoring");
+                Serial.println("debug status          - Show debug status per category");
                 Serial.println();
                 Serial.println("=== Control Commands ===");
                 Serial.println("son <id>      - Turn scene ON");
@@ -594,10 +597,11 @@ void handleCommand(const String& cmd) {
             // Preserve local settings
             bool savedAutoConnect = networkConfig.autoConnectEnabled;
             String savedAutoConnectAddr = networkConfig.autoConnectAddress;
-            bool savedBleDebug   = networkConfig.bleDebugEnabled;
-            bool savedWebDebug   = networkConfig.webDebugEnabled;
-            bool savedParseDebug = networkConfig.parseDebugEnabled;
-            bool savedHeapDebug  = networkConfig.heapDebugEnabled;
+            bool savedBleDebug     = networkConfig.bleDebugEnabled;
+            bool savedCasambiDebug = networkConfig.casambiDebugEnabled;
+            bool savedWebDebug     = networkConfig.webDebugEnabled;
+            bool savedParseDebug   = networkConfig.parseDebugEnabled;
+            bool savedHeapDebug    = networkConfig.heapDebugEnabled;
 
             // Get network ID from stored UUID
             Serial.println("--- Fetching network ID ---");
@@ -629,12 +633,13 @@ void handleCommand(const String& cmd) {
             freshConfig.networkId = networkId;
 
             // Restore local settings
-            freshConfig.autoConnectEnabled  = savedAutoConnect;
-            freshConfig.autoConnectAddress  = savedAutoConnectAddr;
-            freshConfig.bleDebugEnabled     = savedBleDebug;
-            freshConfig.webDebugEnabled     = savedWebDebug;
-            freshConfig.parseDebugEnabled   = savedParseDebug;
-            freshConfig.heapDebugEnabled    = savedHeapDebug;
+            freshConfig.autoConnectEnabled    = savedAutoConnect;
+            freshConfig.autoConnectAddress    = savedAutoConnectAddr;
+            freshConfig.bleDebugEnabled       = savedBleDebug;
+            freshConfig.casambiDebugEnabled   = savedCasambiDebug;
+            freshConfig.webDebugEnabled       = savedWebDebug;
+            freshConfig.parseDebugEnabled     = savedParseDebug;
+            freshConfig.heapDebugEnabled      = savedHeapDebug;
 
             // Save updated configuration
             Serial.println("--- Saving to flash ---");
@@ -644,11 +649,12 @@ void handleCommand(const String& cmd) {
             }
 
             // Update in-memory config
-            networkConfig    = freshConfig;
-            bleDebugEnabled   = freshConfig.bleDebugEnabled;
-            webDebugEnabled   = freshConfig.webDebugEnabled;
-            parseDebugEnabled = freshConfig.parseDebugEnabled;
-            heapDebugEnabled  = freshConfig.heapDebugEnabled;
+            networkConfig       = freshConfig;
+            bleDebugEnabled     = freshConfig.bleDebugEnabled;
+            casambiDebugEnabled = freshConfig.casambiDebugEnabled;
+            webDebugEnabled     = freshConfig.webDebugEnabled;
+            parseDebugEnabled   = freshConfig.parseDebugEnabled;
+            heapDebugEnabled    = freshConfig.heapDebugEnabled;
 
             Serial.println("\n=== Refresh Complete! ===");
             Serial.printf("Network: %s\n", networkConfig.networkName.c_str());
@@ -836,22 +842,25 @@ void handleCommand(const String& cmd) {
 
             if (subcmd == "on") {
                 // Restore all saved per-category settings
-                bleDebugEnabled   = networkConfig.bleDebugEnabled;
-                webDebugEnabled   = networkConfig.webDebugEnabled;
-                parseDebugEnabled = networkConfig.parseDebugEnabled;
-                heapDebugEnabled  = networkConfig.heapDebugEnabled;
-                Serial.printf("Debug on: ble=%s web=%s parse=%s heap=%s\n",
-                              bleDebugEnabled ? "on" : "off",
-                              webDebugEnabled ? "on" : "off",
-                              parseDebugEnabled ? "on" : "off",
-                              heapDebugEnabled ? "on" : "off");
+                bleDebugEnabled     = networkConfig.bleDebugEnabled;
+                casambiDebugEnabled = networkConfig.casambiDebugEnabled;
+                webDebugEnabled     = networkConfig.webDebugEnabled;
+                parseDebugEnabled   = networkConfig.parseDebugEnabled;
+                heapDebugEnabled    = networkConfig.heapDebugEnabled;
+                Serial.printf("Debug on: ble=%s casambi=%s web=%s parse=%s heap=%s\n",
+                              bleDebugEnabled     ? "on" : "off",
+                              casambiDebugEnabled ? "on" : "off",
+                              webDebugEnabled     ? "on" : "off",
+                              parseDebugEnabled   ? "on" : "off",
+                              heapDebugEnabled    ? "on" : "off");
             }
             else if (subcmd == "off") {
                 // Suppress all output without changing saved settings
-                bleDebugEnabled   = false;
-                webDebugEnabled   = false;
-                parseDebugEnabled = false;
-                heapDebugEnabled  = false;
+                bleDebugEnabled     = false;
+                casambiDebugEnabled = false;
+                webDebugEnabled     = false;
+                parseDebugEnabled   = false;
+                heapDebugEnabled    = false;
                 Serial.println("Debug off (settings preserved, use 'debug on' to restore)");
             }
             else if (subcmd.startsWith("ble ")) {
@@ -860,6 +869,13 @@ void handleCommand(const String& cmd) {
                 networkConfig.bleDebugEnabled = val;
                 ConfigStore::saveNetworkConfig(networkConfig);
                 Serial.printf("BLE debug: %s\n", val ? "on" : "off");
+            }
+            else if (subcmd.startsWith("casambi ")) {
+                bool val = subcmd.endsWith(" on");
+                casambiDebugEnabled = val;
+                networkConfig.casambiDebugEnabled = val;
+                ConfigStore::saveNetworkConfig(networkConfig);
+                Serial.printf("Casambi debug: %s\n", val ? "on" : "off");
             }
             else if (subcmd.startsWith("web ")) {
                 bool val = subcmd.endsWith(" on");
@@ -883,18 +899,20 @@ void handleCommand(const String& cmd) {
                 Serial.printf("Heap debug: %s\n", val ? "on" : "off");
             }
             else if (subcmd == "status") {
-                Serial.printf("ble=%s  web=%s  parse=%s  heap=%s\n",
-                              bleDebugEnabled   ? "on" : "off",
-                              webDebugEnabled   ? "on" : "off",
-                              parseDebugEnabled ? "on" : "off",
-                              heapDebugEnabled  ? "on" : "off");
+                Serial.printf("ble=%s  casambi=%s  web=%s  parse=%s  heap=%s\n",
+                              bleDebugEnabled     ? "on" : "off",
+                              casambiDebugEnabled ? "on" : "off",
+                              webDebugEnabled     ? "on" : "off",
+                              parseDebugEnabled   ? "on" : "off",
+                              heapDebugEnabled    ? "on" : "off");
             }
             else {
                 Serial.println("Usage: debug on/off/status");
-                Serial.println("       debug ble on/off    - BLE/crypto verbose output");
-                Serial.println("       debug web on/off    - Web API request logging");
-                Serial.println("       debug parse on/off  - Protocol compact output (P06/P07...)");
-                Serial.println("       debug heap on/off   - Heap monitoring");
+                Serial.println("       debug ble on/off     - BLE/crypto verbose output");
+                Serial.println("       debug casambi on/off - Casambi network events (units, echo)");
+                Serial.println("       debug web on/off     - Web API request logging");
+                Serial.println("       debug parse on/off   - Protocol compact output (P06/P07...)");
+                Serial.println("       debug heap on/off    - Heap monitoring");
             }
         }
         // Scene commands

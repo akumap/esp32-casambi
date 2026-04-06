@@ -98,6 +98,7 @@ struct NetworkConfig {
 
     // Debug settings (per category; persisted so debug on/off is non-destructive)
     bool bleDebugEnabled;
+    bool casambiDebugEnabled;
     bool webDebugEnabled;
     bool parseDebugEnabled;
     bool heapDebugEnabled;
@@ -105,7 +106,8 @@ struct NetworkConfig {
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
                       autoConnectEnabled(true), autoConnectAddress(""),
-                      bleDebugEnabled(false), webDebugEnabled(true),
+                      bleDebugEnabled(false), casambiDebugEnabled(true),
+                      webDebugEnabled(true),
                       parseDebugEnabled(false), heapDebugEnabled(false) {}
 
     // Get the best key (highest role)
