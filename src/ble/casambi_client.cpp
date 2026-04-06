@@ -177,6 +177,7 @@ bool CasambiClient::sendKeepalive() {
     if (debugEnabled) {
         Serial.printf("BLE: Keepalive OK (%d bytes)\n", value.length());
     }
+    _lastNotificationTime = millis();
     return true;
 }
 
