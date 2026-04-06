@@ -796,7 +796,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 hexDump("BLE: 0x09", payload, payloadLen);
             }
             if (parseDebugEnabled) {
-                Serial.printf("P09 (%d):", payloadLen);
+                Serial.printf("P09 raw (%d):", payloadLen);
                 for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
                 Serial.println();
             }
