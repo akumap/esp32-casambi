@@ -10,7 +10,7 @@
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
 
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
-    : _server(nullptr), _client(client), _config(config), _running(false) {
+    : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false) {
 }
 
 CasambiWebServer::~CasambiWebServer() {
@@ -24,22 +24,132 @@ bool CasambiWebServer::begin(uint16_t port) {
     }
 
     _server = new AsyncWebServer(port);
+
+    // Create WebSocket endpoint
+    _ws = new AsyncWebSocket("/ws");
+    _ws->onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client,
+                        AwsEventType type, void* arg, uint8_t* data, size_t len) {
+        _handleWebSocketEvent(server, client, type, arg, data, len);
+    });
+    _server->addHandler(_ws);
+
     _setupRoutes();
     _server->begin();
     _running = true;
 
-    WEB_LOG("Web: Server started on port %d\n", port);
+    WEB_LOG("Web: Server started on port %d (WebSocket: ws://[ip]:%d/ws)\n", port, port);
     return true;
 }
 
 void CasambiWebServer::stop() {
     if (_server && _running) {
+        if (_ws) {
+            _ws->closeAll();
+        }
         _server->end();
         delete _server;
         _server = nullptr;
+        // _ws is owned by _server (added via addHandler), do not delete separately
+        _ws = nullptr;
         _running = false;
         Serial.println("Web: Server stopped");
     }
+}
+
+void CasambiWebServer::loop() {
+    if (_ws) {
+        _ws->cleanupClients();
+    }
+}
+
+// ============================================================================
+// WebSocket Support
+// ============================================================================
+
+void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
+                                              AsyncWebSocketClient* client,
+                                              AwsEventType type, void* arg,
+                                              uint8_t* data, size_t len) {
+    switch (type) {
+        case WS_EVT_CONNECT:
+            WEB_LOG("WS: client #%u connected from %s\n",
+                    client->id(), client->remoteIP().toString().c_str());
+            // Send full state to the newly connected client
+            client->text(_buildHelloMessage());
+            break;
+
+        case WS_EVT_DISCONNECT:
+            WEB_LOG("WS: client #%u disconnected\n", client->id());
+            break;
+
+        case WS_EVT_ERROR:
+            WEB_LOG("WS: client #%u error(%u): %s\n",
+                    client->id(), *((uint16_t*)arg), (char*)data);
+            break;
+
+        case WS_EVT_DATA:
+            // Incoming messages from clients are ignored for now.
+            // Future: accept control commands via WebSocket.
+            break;
+
+        default:
+            break;
+    }
+}
+
+String CasambiWebServer::_buildHelloMessage() const {
+    JsonDocument doc;
+    doc["type"] = "hello";
+    doc["ble_connected"] = _client->isAuthenticated();
+
+    JsonArray units = doc["units"].to<JsonArray>();
+    for (const auto& unit : _config->units) {
+        JsonObject u = units.add<JsonObject>();
+        u["id"]      = unit.deviceId;
+        u["name"]    = unit.name;
+        u["online"]  = unit.online;
+        u["on"]      = unit.on;
+        u["level"]   = unit.level;
+        if (unit.hasVertical) u["vertical"]  = unit.vertical;
+        if (unit.hasCCT)      u["colorTemp"] = unit.colorTemp;
+    }
+
+    String msg;
+    serializeJson(doc, msg);
+    return msg;
+}
+
+void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
+    if (!_ws || _ws->count() == 0) return;
+
+    JsonDocument doc;
+    doc["type"]   = "unit_state";
+    doc["id"]     = unitId;
+    doc["level"]  = level;
+    doc["online"] = online;
+
+    String msg;
+    serializeJson(doc, msg);
+    _ws->textAll(msg);
+
+    WEB_LOG("WS: broadcast unit_state id=%d level=%d online=%d (%u client(s))\n",
+            unitId, level, online, _ws->count());
+}
+
+void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
+    if (!_ws || _ws->count() == 0) return;
+
+    JsonDocument doc;
+    doc["type"]      = "connection_state";
+    doc["connected"] = connected;
+    if (reason != 0) doc["reason"] = reason;
+
+    String msg;
+    serializeJson(doc, msg);
+    _ws->textAll(msg);
+
+    WEB_LOG("WS: broadcast connection_state connected=%d reason=%d (%u client(s))\n",
+            connected, reason, _ws->count());
 }
 
 void CasambiWebServer::_setupRoutes() {
