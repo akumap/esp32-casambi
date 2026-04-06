@@ -228,7 +228,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         Serial.print("P06:");
         for (const auto& s : states) {
             Serial.printf(" U%d=%d", s.unitId, s.level);
-            if (!s.online) Serial.print("(off)");
+            if (!s.online) Serial.print("(offline)");
             if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
             if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
         }
@@ -342,7 +342,7 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
             Serial.print("P08:");
             for (const auto& s : states) {
                 Serial.printf(" U%d=%d", s.unitId, s.level);
-                if (!s.online) Serial.print("(off)");
+                if (!s.online) Serial.print("(offline)");
                 if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
                 if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
             }
