@@ -1,8 +1,14 @@
 /**
- * Web Server - HTTP REST API for Casambi control
+ * Web Server - HTTP REST API + WebSocket for Casambi control
  *
  * Provides HTTP endpoints for controlling lights via home automation systems
- * like Loxone. Runs concurrently with BLE connection.
+ * like FHEM. WebSocket at /ws delivers real-time push events so clients
+ * no longer need to poll.
+ *
+ * WebSocket protocol (server → client, JSON):
+ *   {"type":"hello","ble_connected":true,"units":[...]}  – sent on connect
+ *   {"type":"unit_state","id":1,"level":128,"online":true}
+ *   {"type":"connection_state","connected":true,"reason":0}
  */
 
 #ifndef WEBSERVER_H
@@ -56,9 +62,32 @@ public:
      */
     bool isRunning() const { return _running; }
 
+    /**
+     * Call from loop() to clean up disconnected WebSocket clients.
+     * Should be called roughly every second.
+     */
+    void loop();
+
+    /**
+     * Broadcast a unit state change to all connected WebSocket clients.
+     * Safe to call from the BLE notification task.
+     * @param unitId  Casambi unit ID
+     * @param level   Brightness 0-255
+     * @param online  Whether the unit is reachable
+     */
+    void broadcastUnitState(uint8_t unitId, uint8_t level, bool online);
+
+    /**
+     * Broadcast a BLE connection state change to all WebSocket clients.
+     * @param connected true = authenticated/connected, false = disconnected
+     * @param reason    DisconnectReason cast to int (0 = n/a)
+     */
+    void broadcastConnectionState(bool connected, int reason = 0);
+
 private:
-    // Server instance
-    AsyncWebServer* _server;
+    // Server and WebSocket instances
+    AsyncWebServer*  _server;
+    AsyncWebSocket*  _ws;
 
     // References to BLE client and config
     CasambiClient* _client;
@@ -99,6 +128,11 @@ private:
     void _sendJsonError(AsyncWebServerRequest* request, const String& error, int code = 400);
     void _sendJsonSuccess(AsyncWebServerRequest* request);
     String _getClientIP(AsyncWebServerRequest* request);
+
+    // WebSocket helpers
+    void _handleWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
+                               AwsEventType type, void* arg, uint8_t* data, size_t len);
+    String _buildHelloMessage() const;
 };
 
 #endif // WEBSERVER_H

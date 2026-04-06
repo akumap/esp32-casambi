@@ -118,28 +118,33 @@ void setup() {
             // Initialize BLE client
             casambiClient = new CasambiClient(&networkConfig);
 
-            // Set up connection state callback for auto-reconnect
+            // Set up connection state callback for auto-reconnect and WebSocket push
             casambiClient->setConnectionStateCallback(
                 [](ConnectionState newState, DisconnectReason reason) {
                     if (newState == ConnectionState::None &&
                         reason != DisconnectReason::UserRequested) {
                         Serial.printf("*** BLE connection lost (reason: %d) - will auto-reconnect ***\n",
                                       static_cast<int>(reason));
-                        // Reset backoff on new disconnect
                         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;
                         lastBLEReconnectAttempt = millis();
+                    }
+                    if (webServer) {
+                        bool connected = (newState == ConnectionState::Authenticated);
+                        webServer->broadcastConnectionState(connected,
+                                                            static_cast<int>(reason));
                     }
                 }
             );
 
-            // Set up unit state callback for logging
+            // Set up unit state callback – log and push via WebSocket
             casambiClient->setUnitStateCallback(
                 [](uint8_t unitId, uint8_t level, bool online) {
-                    // This is called from the notification handler
-                    // Could be used to push state to home automation, MQTT, etc.
                     if (casambiDebugEnabled) {
                         Serial.printf("CALLBACK: Unit %d -> level=%d online=%d\n",
                                       unitId, level, online);
+                    }
+                    if (webServer) {
+                        webServer->broadcastUnitState(unitId, level, online);
                     }
                 }
             );
@@ -245,6 +250,11 @@ void loop() {
 
     // Monitor heap usage
     monitorHeap();
+
+    // WebSocket housekeeping (clean up disconnected clients)
+    if (webServer) {
+        webServer->loop();
+    }
 
     delay(10);
 }
