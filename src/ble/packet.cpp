@@ -1,9 +1,10 @@
 /**
  * Packet utilities and data packet parsing
  *
- * 0x06 Status Broadcast format (reverse-engineered):
+ * 0x06 Unit State Change Event (reverse-engineered):
  *
- * One or more variable-length unit records concatenated.
+ * Sent whenever one or more units change state (via app, power, scene, etc.).
+ * Contains one record per changed unit, concatenated.
  * Each record:
  *
  *   Byte 0: Unit-ID
@@ -128,13 +129,13 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
     states.clear();
 
     if (len < 4) {
-        if (debugEnabled) {
+        if (bleDebugEnabled) {
             Serial.printf("PARSE 0x06: Packet too short (%d bytes)\n", len);
         }
         return false;
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         hexDump("PARSE 0x06 raw", data, len);
     }
 
@@ -146,7 +147,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         uint8_t cap    = data[offset + 2];
 
         if (!isValidCap(cap)) {
-            if (debugEnabled) {
+            if (bleDebugEnabled) {
                 Serial.printf("PARSE 0x06: Unknown cap=0x%02x at offset %d, stopping\n",
                               cap, offset);
             }
@@ -156,7 +157,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         size_t recordLen = calcRecordLength(flags, cap);
 
         if (offset + recordLen > len) {
-            if (debugEnabled) {
+            if (bleDebugEnabled) {
                 Serial.printf("PARSE 0x06: Truncated record at offset %d (need %d, have %d)\n",
                               offset, recordLen, len - offset);
             }
@@ -212,13 +213,29 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         offset += recordLen;
     }
 
-    if (debugEnabled && !states.empty()) {
+    if (bleDebugEnabled && !states.empty()) {
         Serial.printf("PARSE 0x06: Parsed %d unit state(s)\n", states.size());
         for (const auto& s : states) {
             Serial.printf("  Unit %d: level=%d online=%d on=%d",
                           s.unitId, s.level, s.online, s.on);
             if (s.hasVertical) Serial.printf(" aux1=%d", s.vertical);
             if (s.hasColorTemp) Serial.printf(" aux2=%d", s.colorTemp);
+            Serial.println();
+        }
+    }
+
+    if (parseDebugEnabled) {
+        Serial.printf("P06 raw (%d):", len);
+        for (size_t i = 0; i < len; i++) Serial.printf(" %02x", data[i]);
+        Serial.println();
+        if (!states.empty()) {
+            Serial.print("P06:");
+            for (const auto& s : states) {
+                Serial.printf(" U%d=%d", s.unitId, s.level);
+                if (!s.online) Serial.print("(offline)");
+                if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
+                if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
+            }
             Serial.println();
         }
     }
@@ -232,13 +249,13 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
 
 bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
     if (len < 9) {
-        if (debugEnabled) {
+        if (bleDebugEnabled) {
             Serial.printf("PARSE 0x07: Too short (%d bytes, need >= 9)\n", len);
         }
         return false;
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         hexDump("PARSE 0x07 raw", data, len);
     }
 
@@ -258,7 +275,7 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
         echo.payload.assign(data + 9, data + 9 + copyLen);
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         Serial.printf("PARSE 0x07: op=%s(%d) target=%s[%d] payload=%d bytes\n",
                       opcodeName(echo.opcode), echo.opcode,
                       targetTypeName(echo.targetType), echo.targetId,
@@ -266,6 +283,20 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
         if (!echo.payload.empty()) {
             hexDump("  payload", echo.payload.data(), echo.payload.size(), 16);
         }
+    }
+
+    if (parseDebugEnabled) {
+        Serial.printf("P07 raw (%d):", len);
+        for (size_t i = 0; i < len; i++) Serial.printf(" %02x", data[i]);
+        Serial.println();
+        Serial.printf("P07: %s %s[%d]",
+                      opcodeName(echo.opcode),
+                      targetTypeName(echo.targetType),
+                      echo.targetId);
+        for (size_t i = 0; i < echo.payload.size(); i++) {
+            Serial.printf(" %02x", echo.payload[i]);
+        }
+        Serial.println();
     }
 
     return true;
@@ -279,13 +310,13 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
     states.clear();
 
     if (len < 2) {
-        if (debugEnabled) {
+        if (bleDebugEnabled) {
             Serial.println("PARSE 0x08: Packet too short");
         }
         return false;
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         hexDump("PARSE 0x08 raw", data, len);
     }
 
@@ -307,10 +338,26 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
         states.push_back(info);
     }
 
-    if (debugEnabled && !states.empty()) {
+    if (bleDebugEnabled && !states.empty()) {
         Serial.printf("PARSE 0x08: Parsed %d unit states (fallback)\n", states.size());
         for (const auto& s : states) {
             Serial.printf("  Unit %d: level=%d on=%d\n", s.unitId, s.level, s.on);
+        }
+    }
+
+    if (parseDebugEnabled) {
+        Serial.printf("P08 raw (%d):", len);
+        for (size_t i = 0; i < len; i++) Serial.printf(" %02x", data[i]);
+        Serial.println();
+        if (!states.empty()) {
+            Serial.print("P08:");
+            for (const auto& s : states) {
+                Serial.printf(" U%d=%d", s.unitId, s.level);
+                if (!s.online) Serial.print("(offline)");
+                if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
+                if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
+            }
+            Serial.println();
         }
     }
 

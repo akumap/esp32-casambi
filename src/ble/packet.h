@@ -33,9 +33,9 @@ enum class OpCode : uint8_t {
 enum class DataPacketType : uint8_t {
     AuthSuccess     = 0x05,  // Authentication accepted
     AuthReject      = 0x06,  // Authentication rejected (auth context only)
-    StatusBroadcast = 0x06,  // Unit/scene status broadcast (data context)
+    StatusBroadcast = 0x06,  // Unit state change event, one record per changed unit (data context)
     OperationEcho   = 0x07,  // Echo of operations from other controllers
-    UnitState       = 0x08,  // Individual unit state update
+    UnitState       = 0x08,  // Individual unit state update (not yet observed in practice)
     NetworkState    = 0x09,  // Full network state snapshot
     TimeSync        = 0x0A,  // Time synchronization
     Keepalive       = 0x0C,  // Keepalive / heartbeat

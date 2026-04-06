@@ -163,7 +163,12 @@ autoconnect set <mac>        # Set MAC for auto-connect
 reconnect on/off             # Enable/disable auto-reconnect on link loss
 wifi set <ssid> <password>   # Update WiFi credentials
 wifi status                  # Show WiFi connection status
-debug on/off/status          # Toggle verbose debug output
+debug on/off/status          # Toggle all debug output (restores/saves per-category settings)
+debug ble on/off             # BLE/crypto layer verbose logging
+debug casambi on/off         # Casambi network events (unit states, echo, callbacks)
+debug web on/off             # HTTP API request logging
+debug parse on/off           # Protocol parse output with raw bytes (for analysis)
+debug heap on/off            # Heap monitoring output
 refresh                      # Re-download config from Casambi cloud
 clearconfig                  # Factory reset
 ```
@@ -312,7 +317,7 @@ curl -X POST http://<ip>/api/groups/4/slider \
 
 - **Motor control** (`uslider`, `gslider`): Not extensively tested. May not work on all devices. Use scenes for reliable motor control.
 - **RGB color control** (`ucolor`): Implemented but not tested with RGB-capable Casambi fixtures.
-- **Incoming packet types 0x08 and 0x09**: Received but not parsed. 0x09 appears to contain mesh topology data in an unknown format.
+- **0x09 Mesh Topology Parser**: Experimental — reverse-engineered from two captures. The structure is interpreted as `[0x80+nodeId][metric][quality]` triplets. Node IDs map to units, groups, or scenes; metric/quality bytes are not fully understood. May misclassify nodes under different network configurations.
 - **Classic networks** (non-Evolution): The code has a fallback path for networks without encryption keys, but this has not been tested.
 
 ### Protocol Notes
@@ -349,10 +354,10 @@ The controller is designed for 24/7 unattended operation:
 
 |Type|Description                                     |Status                                                |
 |----|------------------------------------------------|------------------------------------------------------|
-|0x06|Status Broadcast (unit states)                  |Fully parsed — brightness, vertical, color temperature|
-|0x07|Operation Echo (commands from other controllers)|Parsed and applied to state                           |
-|0x08|Unit State Update                               |Logged only (format unknown)                          |
-|0x09|Network State                                   |Logged only (different format, likely mesh topology)  |
+|0x06|Status Broadcast (unit states)                  |Fully parsed — brightness, vertical, color temperature; event-driven, one record per changed unit|
+|0x07|Operation Echo (commands from other controllers)|Parsed and applied to state                                                                      |
+|0x08|Unit State Update                               |Parsed via `parseUnitStateUpdate()`                                                              |
+|0x09|Mesh Topology                                   |Experimental parser — `[0x80+nodeId][metric][quality]` triplets; IDs map to units/groups/scenes  |
 |0x0A|Time Sync                                       |Recognized                                            |
 |0x0C|Keepalive                                       |Recognized                                            |
 
@@ -377,10 +382,10 @@ No fixture-type-specific hardcoding is needed. New Casambi device types are supp
 esp32-casambi/
 ├── src/
 │   ├── main.cpp              # Main application, reconnect logic, monitoring
-│   ├── config.h              # Configuration constants, timeouts
+│   ├── config.h              # Configuration constants, timeouts, debug flags
 │   ├── ble/
 │   │   ├── casambi_client.*  # BLE connection, encryption, state tracking
-│   │   └── packet.*          # Packet building, 0x06/0x07 parsing
+│   │   └── packet.*          # Packet building, 0x06/0x07/0x08/0x09 parsing
 │   ├── cloud/
 │   │   ├── api_client.*      # Casambi Cloud API client
 │   │   └── network_config.h  # Data structures (units, groups, capabilities)
@@ -388,9 +393,11 @@ esp32-casambi/
 │   │   ├── encryption.*      # AES-CTR + CMAC
 │   │   └── key_exchange.*    # ECDH (SECP256R1)
 │   ├── storage/
-│   │   └── config_store.*    # LittleFS persistence
+│   │   └── config_store.*    # LittleFS persistence (config + debug flags)
 │   └── web/
 │       └── webserver.*       # HTTP REST API (ESPAsyncWebServer)
+├── FHEM/
+│   └── 99_OcchioControl.pm   # FHEM integration module (HTTP polling)
 ├── platformio.ini
 └── README.md
 ```
@@ -414,6 +421,20 @@ autoconnect on/off     # Enable/disable auto-connect on boot
 reconnect on/off       # Enable/disable auto-reconnect on link loss
 ```
 
+### Debug Categories
+
+Debug output is split into independently controllable categories, all persisted to flash:
+
+|Category  |Default|Description                                                              |
+|----------|-------|-------------------------------------------------------------------------|
+|`ble`     |off    |BLE transport layer: connections, crypto, raw packet hex dumps           |
+|`casambi` |on     |Casambi protocol events: unit state changes, operation echo, callbacks   |
+|`web`     |on     |HTTP API: incoming requests and response codes                           |
+|`parse`   |off    |Protocol analysis: compact parse output with raw bytes for all packets   |
+|`heap`    |off    |Heap size logged every 60 seconds                                        |
+
+`debug off` suppresses all output without changing the saved per-category settings. `debug on` restores them.
+
 ### Syncing Changes
 
 If you modify your Casambi network (add lights, rename devices, change scenes) in the official app:
@@ -422,7 +443,7 @@ If you modify your Casambi network (add lights, rename devices, change scenes) i
 refresh
 ```
 
-This re-downloads the full configuration from the Casambi cloud while preserving local settings (auto-connect address, debug mode).
+This re-downloads the full configuration from the Casambi cloud while preserving local settings (auto-connect address, per-category debug flags).
 
 -----
 
@@ -438,7 +459,7 @@ This re-downloads the full configuration from the Casambi cloud while preserving
 
 - **Authentication fails:** Run `clearconfig` and redo setup with correct password
 - **Auto-connect doesn’t work:** Run `scan` + `connect` once to save the MAC address
-- **Silent disconnects:** Enable `debug on` to see BLE packet activity
+- **Silent disconnects:** Enable `debug ble on` to see BLE packet activity
 
 ### Spontaneous Reboots
 
@@ -472,6 +493,34 @@ pio run -e debug -t upload        # Debug build with verbose BLE logging
 ```
 
 **Note:** After structural changes to the config format, run `clearconfig` + `setup` on the ESP32 to repopulate the configuration with new fields.
+
+-----
+
+## FHEM Integration
+
+A ready-made FHEM module is provided under `FHEM/99_OcchioControl.pm`. It wraps the ESP32 HTTP REST API and exposes each Casambi unit as a FHEM device.
+
+### Installation
+
+Copy `FHEM/99_OcchioControl.pm` to your FHEM `FHEM/` directory and reload:
+
+```
+reload 99_OcchioControl
+```
+
+### Usage
+
+```
+define OcchioGateway OcchioControl 192.168.178.111
+```
+
+The module polls `/api/units` every 10 seconds and creates sub-devices for each unit. Set `casambiUnitId` on each device to associate it with the correct Casambi unit.
+
+Control commands are sent as HTTP POST to the gateway. The module supports `on`, `off`, `dim`, and `color_temp` operations.
+
+### Reducing Polling Load
+
+The current polling implementation (HTTP every 10 seconds) is sufficient for typical use. A future WebSocket-based push notification path is planned for real-time state propagation without polling.
 
 -----
 
