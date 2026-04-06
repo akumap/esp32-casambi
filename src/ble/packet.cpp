@@ -1,9 +1,10 @@
 /**
  * Packet utilities and data packet parsing
  *
- * 0x06 Status Broadcast format (reverse-engineered):
+ * 0x06 Unit State Change Event (reverse-engineered):
  *
- * One or more variable-length unit records concatenated.
+ * Sent whenever one or more units change state (via app, power, scene, etc.).
+ * Contains one record per changed unit, concatenated.
  * Each record:
  *
  *   Byte 0: Unit-ID

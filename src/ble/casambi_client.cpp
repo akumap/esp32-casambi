@@ -741,7 +741,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
     switch (packetType) {
         case 0x06: {
-            // Status broadcast — unit state information
+            // Unit state change event — one record per changed unit
             std::vector<UnitStateInfo> states;
             if (parseStatusBroadcast(payload, payloadLen, states)) {
                 _applyUnitStates(states);
