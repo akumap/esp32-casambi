@@ -594,7 +594,10 @@ void handleCommand(const String& cmd) {
             // Preserve local settings
             bool savedAutoConnect = networkConfig.autoConnectEnabled;
             String savedAutoConnectAddr = networkConfig.autoConnectAddress;
-            bool savedDebug = networkConfig.debugEnabled;
+            bool savedBleDebug   = networkConfig.bleDebugEnabled;
+            bool savedWebDebug   = networkConfig.webDebugEnabled;
+            bool savedParseDebug = networkConfig.parseDebugEnabled;
+            bool savedHeapDebug  = networkConfig.heapDebugEnabled;
 
             // Get network ID from stored UUID
             Serial.println("--- Fetching network ID ---");
@@ -626,9 +629,12 @@ void handleCommand(const String& cmd) {
             freshConfig.networkId = networkId;
 
             // Restore local settings
-            freshConfig.autoConnectEnabled = savedAutoConnect;
-            freshConfig.autoConnectAddress = savedAutoConnectAddr;
-            freshConfig.debugEnabled = savedDebug;
+            freshConfig.autoConnectEnabled  = savedAutoConnect;
+            freshConfig.autoConnectAddress  = savedAutoConnectAddr;
+            freshConfig.bleDebugEnabled     = savedBleDebug;
+            freshConfig.webDebugEnabled     = savedWebDebug;
+            freshConfig.parseDebugEnabled   = savedParseDebug;
+            freshConfig.heapDebugEnabled    = savedHeapDebug;
 
             // Save updated configuration
             Serial.println("--- Saving to flash ---");
@@ -638,8 +644,11 @@ void handleCommand(const String& cmd) {
             }
 
             // Update in-memory config
-            networkConfig = freshConfig;
-            debugEnabled = freshConfig.debugEnabled;
+            networkConfig    = freshConfig;
+            bleDebugEnabled   = freshConfig.bleDebugEnabled;
+            webDebugEnabled   = freshConfig.webDebugEnabled;
+            parseDebugEnabled = freshConfig.parseDebugEnabled;
+            heapDebugEnabled  = freshConfig.heapDebugEnabled;
 
             Serial.println("\n=== Refresh Complete! ===");
             Serial.printf("Network: %s\n", networkConfig.networkName.c_str());
