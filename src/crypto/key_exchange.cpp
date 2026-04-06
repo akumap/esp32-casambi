@@ -68,7 +68,7 @@ bool ECDHKeyExchange::generateKeyPair() {
     mbedtls_entropy_free(&entropy);
 
     _keyPairGenerated = true;
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         Serial.println("ECDH: Key pair generated");
     }
     return true;
@@ -133,7 +133,7 @@ bool ECDHKeyExchange::setDevicePublicKey(const uint8_t* x, const uint8_t* y) {
     mbedtls_ecp_point_free(&Qp);
 
     _deviceKeySet = true;
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         Serial.println("ECDH: Device public key set");
     }
     return true;
@@ -213,7 +213,7 @@ std::vector<uint8_t> ECDHKeyExchange::deriveTransportKey() {
         result[i] = hash[i] ^ hash[16 + i];
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         Serial.println("ECDH: Transport key derived");
     }
     return result;

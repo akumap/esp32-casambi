@@ -129,13 +129,13 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
     states.clear();
 
     if (len < 4) {
-        if (debugEnabled) {
+        if (bleDebugEnabled) {
             Serial.printf("PARSE 0x06: Packet too short (%d bytes)\n", len);
         }
         return false;
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         hexDump("PARSE 0x06 raw", data, len);
     }
 
@@ -147,7 +147,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         uint8_t cap    = data[offset + 2];
 
         if (!isValidCap(cap)) {
-            if (debugEnabled) {
+            if (bleDebugEnabled) {
                 Serial.printf("PARSE 0x06: Unknown cap=0x%02x at offset %d, stopping\n",
                               cap, offset);
             }
@@ -157,7 +157,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         size_t recordLen = calcRecordLength(flags, cap);
 
         if (offset + recordLen > len) {
-            if (debugEnabled) {
+            if (bleDebugEnabled) {
                 Serial.printf("PARSE 0x06: Truncated record at offset %d (need %d, have %d)\n",
                               offset, recordLen, len - offset);
             }
@@ -213,7 +213,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         offset += recordLen;
     }
 
-    if (debugEnabled && !states.empty()) {
+    if (bleDebugEnabled && !states.empty()) {
         Serial.printf("PARSE 0x06: Parsed %d unit state(s)\n", states.size());
         for (const auto& s : states) {
             Serial.printf("  Unit %d: level=%d online=%d on=%d",
@@ -244,13 +244,13 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
 
 bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
     if (len < 9) {
-        if (debugEnabled) {
+        if (bleDebugEnabled) {
             Serial.printf("PARSE 0x07: Too short (%d bytes, need >= 9)\n", len);
         }
         return false;
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         hexDump("PARSE 0x07 raw", data, len);
     }
 
@@ -270,7 +270,7 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
         echo.payload.assign(data + 9, data + 9 + copyLen);
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         Serial.printf("PARSE 0x07: op=%s(%d) target=%s[%d] payload=%d bytes\n",
                       opcodeName(echo.opcode), echo.opcode,
                       targetTypeName(echo.targetType), echo.targetId,
@@ -302,13 +302,13 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
     states.clear();
 
     if (len < 2) {
-        if (debugEnabled) {
+        if (bleDebugEnabled) {
             Serial.println("PARSE 0x08: Packet too short");
         }
         return false;
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         hexDump("PARSE 0x08 raw", data, len);
     }
 
@@ -330,7 +330,7 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
         states.push_back(info);
     }
 
-    if (debugEnabled && !states.empty()) {
+    if (bleDebugEnabled && !states.empty()) {
         Serial.printf("PARSE 0x08: Parsed %d unit states (fallback)\n", states.size());
         for (const auto& s : states) {
             Serial.printf("  Unit %d: level=%d on=%d\n", s.unitId, s.level, s.on);

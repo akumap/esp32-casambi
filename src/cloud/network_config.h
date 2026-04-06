@@ -96,14 +96,17 @@ struct NetworkConfig {
     bool autoConnectEnabled;
     String autoConnectAddress;
 
-    // Debug settings
-    bool debugEnabled;
+    // Debug settings (per category; persisted so debug on/off is non-destructive)
+    bool bleDebugEnabled;
+    bool webDebugEnabled;
     bool parseDebugEnabled;
+    bool heapDebugEnabled;
 
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
                       autoConnectEnabled(true), autoConnectAddress(""),
-                      debugEnabled(false), parseDebugEnabled(false) {}
+                      bleDebugEnabled(false), webDebugEnabled(true),
+                      parseDebugEnabled(false), heapDebugEnabled(false) {}
 
     // Get the best key (highest role)
     CasambiKey* getBestKey() {

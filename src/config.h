@@ -109,7 +109,9 @@
 // GLOBAL FLAGS
 // ============================================================================
 
-extern bool debugEnabled;       // Debug output toggle (defined in main.cpp)
-extern bool parseDebugEnabled;  // Protocol parse debug toggle (defined in main.cpp)
+extern bool bleDebugEnabled;    // BLE/crypto verbose debug (defined in main.cpp)
+extern bool webDebugEnabled;    // Web API request logging (defined in main.cpp)
+extern bool parseDebugEnabled;  // Protocol parse compact output (defined in main.cpp)
+extern bool heapDebugEnabled;   // Heap monitoring output (defined in main.cpp)
 
 #endif // CONFIG_H
