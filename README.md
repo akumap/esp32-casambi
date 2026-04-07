@@ -12,6 +12,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 
 - ✅ **Hybrid WiFi/BLE Operation** — One-time WiFi setup, then fully offline BLE control
 - ✅ **HTTP REST API** — Control and monitor lights from any home automation system
+- ✅ **WebSocket Push** — Real-time state push to connected clients; no polling required
 - ✅ **Real-Time State Tracking** — Receives status broadcasts from the Casambi mesh; current brightness, color temperature, and vertical distribution always up to date, even when lights are controlled via the Casambi app or other controllers
 - ✅ **Complete Protocol Support** — Full Casambi Evolution protocol implementation (ECDH, AES-CTR, CMAC)
 - ✅ **Generic Capability Detection** — Unit capabilities (dimmer, CCT, vertical) automatically derived from cloud API; no hardcoding of fixture types needed
@@ -305,6 +306,91 @@ curl -X POST http://<ip>/api/groups/4/slider \
 
 -----
 
+## WebSocket Push
+
+In addition to the REST API, the ESP32 pushes state changes in real time to all connected WebSocket clients. This eliminates polling and delivers updates with sub-100 ms latency.
+
+### Endpoint
+
+```
+ws://<esp32-ip>/ws
+```
+
+### Messages (server → client, JSON)
+
+#### `hello` — sent immediately on connect
+
+Full state snapshot of all units:
+
+```json
+{
+  "type": "hello",
+  "ble_connected": true,
+  "units": [
+    {
+      "id": 7,
+      "name": "Mito sospeso",
+      "online": true,
+      "on": true,
+      "level": 200,
+      "vertical": 127,
+      "colorTemp": 58,
+      "cctMin": 2700,
+      "cctMax": 4000
+    },
+    {
+      "id": 2,
+      "name": "Più Spüle",
+      "online": true,
+      "on": true,
+      "level": 255
+    }
+  ]
+}
+```
+
+`vertical`, `colorTemp`, `cctMin`, and `cctMax` are only present for units that support these controls.
+
+#### `unit_state` — sent on every state change
+
+```json
+{
+  "type": "unit_state",
+  "id": 7,
+  "level": 200,
+  "online": true,
+  "on": true,
+  "vertical": 127,
+  "colorTemp": 58,
+  "cctMin": 2700,
+  "cctMax": 4000
+}
+```
+
+Triggered by any change originating from the Casambi mesh — whether sent by this controller, the Casambi app, a scene timer, a sensor, or another controller.
+
+#### `connection_state` — sent on BLE connect/disconnect
+
+```json
+{
+  "type": "connection_state",
+  "connected": true,
+  "reason": 0
+}
+```
+
+### colorTemp conversion
+
+`colorTemp` is a normalized value (0–255). Convert to Kelvin:
+
+```
+kelvin = cctMin + (colorTemp / 255) * (cctMax - cctMin)
+```
+
+This is the same formula used by the REST `/api/units` endpoint.
+
+-----
+
 ## Known Limitations & Stability Notes
 
 ### Stability
@@ -395,9 +481,9 @@ esp32-casambi/
 │   ├── storage/
 │   │   └── config_store.*    # LittleFS persistence (config + debug flags)
 │   └── web/
-│       └── webserver.*       # HTTP REST API (ESPAsyncWebServer)
+│       └── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
 ├── FHEM/
-│   └── 99_OcchioControl.pm   # FHEM integration module (HTTP polling)
+│   └── 99_OcchioControl.pm   # FHEM integration module (WebSocket push + REST fallback)
 ├── platformio.ini
 └── README.md
 ```
@@ -498,7 +584,25 @@ pio run -e debug -t upload        # Debug build with verbose BLE logging
 
 ## FHEM Integration
 
-A ready-made FHEM module is provided under `FHEM/99_OcchioControl.pm`. It wraps the ESP32 HTTP REST API and exposes each Casambi unit as a FHEM device.
+The FHEM module `FHEM/99_OcchioControl.pm` serves as a reference integration showing how to connect a home automation system to the ESP32. It uses the WebSocket push interface for real-time state updates and the REST API for sending commands.
+
+### Architecture
+
+```
+ESP32                          FHEM
+─────                          ────
+WebSocket /ws  ──push──►  OcchioControl (DevIo device)
+                               │ unit_state, hello
+                               └──► readingsBulkUpdate(Occhio_*)
+
+REST /api/units/*  ◄──POST──  OcchioControl_SendCommand
+                               called from notify rules
+
+REST /api/units    ◄──GET───  OcchioControl_UpdateStatus
+                               (optional fallback, via at-timer)
+```
+
+State updates flow from the ESP32 to FHEM via WebSocket push. Commands flow from FHEM to the ESP32 via HTTP POST. A REST polling fallback is available for resilience but is not needed for normal operation.
 
 ### Installation
 
@@ -508,19 +612,82 @@ Copy `FHEM/99_OcchioControl.pm` to your FHEM `FHEM/` directory and reload:
 reload 99_OcchioControl
 ```
 
-### Usage
+### WebSocket device
+
+Define one device per ESP32. This opens a persistent TCP connection and performs the WebSocket handshake automatically:
 
 ```
-define OcchioGateway OcchioControl 192.168.178.111
+define OcchioWS OcchioControl
 ```
 
-The module polls `/api/units` every 10 seconds and creates sub-devices for each unit. Set `casambiUnitId` on each device to associate it with the correct Casambi unit.
+On successful connect, the ESP32 sends a `hello` message with the current state of all units. From that point on, every state change in the Casambi mesh is pushed as a `unit_state` message and applied to the corresponding FHEM device readings immediately.
 
-Control commands are sent as HTTP POST to the gateway. The module supports `on`, `off`, `dim`, and `color_temp` operations.
+The module reconnects automatically on link loss, including on FHEM startup.
 
-### Reducing Polling Load
+**Readings on `OcchioWS`:**
 
-The current polling implementation (HTTP every 10 seconds) is sufficient for typical use. A future WebSocket-based push notification path is planned for real-time state propagation without polling.
+| Reading | Values | Description |
+|---------|--------|-------------|
+| `state` | `connected` / `disconnected` | WebSocket connection state |
+| `ble_state` | `ble_connected` / `ble_disconnected` | BLE connection of the ESP32 |
+
+### Unit devices
+
+Each Casambi unit is represented as a separate FHEM device. Set the `casambiUnitId` attribute to link it to the correct Casambi unit ID (visible in `/api/units`):
+
+```
+attr Occhio_Mito_Sospeso casambiUnitId 7
+attr Occhio_Mito_Sospeso cctMin 2700
+attr Occhio_Mito_Sospeso cctMax 4000
+```
+
+**Readings updated by push:**
+
+| Reading | Description |
+|---------|-------------|
+| `state` | `on` / `off` |
+| `brightness` | 0–100 (%) |
+| `online` | `true` / `false` |
+| `colorTemp` | Kelvin (only for CCT-capable units) |
+| `vertical` | 0–255 raw value (only for units with vertical control) |
+
+### Command forwarding
+
+Commands are forwarded to the ESP32 via HTTP POST. The module is typically called from FHEM `notify` rules:
+
+```
+define n_occhio_mito notify Occhio_Mito_Sospeso {OcchioControl_Notify("Occhio_Mito_Sospeso", $EVENT)}
+```
+
+Supported events: `on`, `off`, `brightness <0-100>`, `colorTemp <kelvin>`, `vertical <0-255>`.
+
+Analog values (`brightness`, `colorTemp`, `vertical`) are debounced with a 300 ms delay to avoid flooding the BLE mesh during slider movement.
+
+The module includes a feedback-loop guard (`$_updatingStatus`) that suppresses outgoing commands while readings are being updated from incoming push or poll data. This prevents re-triggering when other systems (e.g. Homebridge) react to reading changes.
+
+ColorTemp accepts both Kelvin (≥ 500) and Mired (< 500, converted automatically). Values are clamped to the device's `cctMin`/`cctMax` range.
+
+### Polling fallback
+
+`OcchioControl_UpdateStatus()` performs a full REST poll of `/api/units` and updates all unit readings. It can be called via an `at`-timer as a fallback, e.g. every 5 minutes:
+
+```
+define at_occhio_poll at +*00:05:00 {OcchioControl_UpdateStatus()}
+```
+
+With WebSocket push active, this interval can be set very low-frequency (5–10 minutes) or omitted entirely.
+
+### Unit ID map
+
+The module contains a hardcoded map of Casambi unit IDs to FHEM device names. Edit `%_deviceMap` in `99_OcchioControl.pm` to match your installation:
+
+```perl
+my %_deviceMap = (
+    7  => "Occhio_Mito_Sospeso",
+    8  => "Occhio_Mel_Luna",
+    # ...
+);
+```
 
 -----
 

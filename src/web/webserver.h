@@ -6,8 +6,10 @@
  * no longer need to poll.
  *
  * WebSocket protocol (server → client, JSON):
- *   {"type":"hello","ble_connected":true,"units":[...]}  – sent on connect
- *   {"type":"unit_state","id":1,"level":128,"online":true}
+ *   {"type":"hello","ble_connected":true,"units":[{"id":1,"name":"...","online":true,
+ *     "on":true,"level":128,"vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000},...]}
+ *   {"type":"unit_state","id":1,"level":128,"online":true,"on":true,
+ *     "vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000}  – aux fields omitted if unsupported
  *   {"type":"connection_state","connected":true,"reason":0}
  */
 
@@ -70,6 +72,8 @@ public:
 
     /**
      * Broadcast a unit state change to all connected WebSocket clients.
+     * Enriches the message with vertical/colorTemp/cctMin/cctMax from NetworkConfig
+     * (already updated before this callback fires).
      * Safe to call from the BLE notification task.
      * @param unitId  Casambi unit ID
      * @param level   Brightness 0-255

@@ -111,7 +111,11 @@ String CasambiWebServer::_buildHelloMessage() const {
         u["on"]      = unit.on;
         u["level"]   = unit.level;
         if (unit.hasVertical) u["vertical"]  = unit.vertical;
-        if (unit.hasCCT)      u["colorTemp"] = unit.colorTemp;
+        if (unit.hasCCT) {
+            u["colorTemp"] = unit.colorTemp;
+            u["cctMin"]    = unit.cctMinKelvin;
+            u["cctMax"]    = unit.cctMaxKelvin;
+        }
     }
 
     String msg;
@@ -127,6 +131,18 @@ void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool on
     doc["id"]     = unitId;
     doc["level"]  = level;
     doc["online"] = online;
+    doc["on"]     = (level > 0);
+
+    // Enrich with current aux state from NetworkConfig (already updated before callback fires)
+    CasambiUnit* unit = _config->getUnitById(unitId);
+    if (unit) {
+        if (unit->hasVertical) doc["vertical"]  = unit->vertical;
+        if (unit->hasCCT) {
+            doc["colorTemp"] = unit->colorTemp;
+            doc["cctMin"]    = unit->cctMinKelvin;
+            doc["cctMax"]    = unit->cctMaxKelvin;
+        }
+    }
 
     String msg;
     serializeJson(doc, msg);
