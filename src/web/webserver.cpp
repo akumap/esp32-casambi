@@ -3,11 +3,14 @@
  */
 
 #include "webserver.h"
+#include "../config.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
 
+#define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
+
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
-    : _server(nullptr), _client(client), _config(config), _running(false) {
+    : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false) {
 }
 
 CasambiWebServer::~CasambiWebServer() {
@@ -21,22 +24,132 @@ bool CasambiWebServer::begin(uint16_t port) {
     }
 
     _server = new AsyncWebServer(port);
+
+    // Create WebSocket endpoint
+    _ws = new AsyncWebSocket("/ws");
+    _ws->onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client,
+                        AwsEventType type, void* arg, uint8_t* data, size_t len) {
+        _handleWebSocketEvent(server, client, type, arg, data, len);
+    });
+    _server->addHandler(_ws);
+
     _setupRoutes();
     _server->begin();
     _running = true;
 
-    Serial.printf("Web: Server started on port %d\n", port);
+    WEB_LOG("Web: Server started on port %d (WebSocket: ws://[ip]:%d/ws)\n", port, port);
     return true;
 }
 
 void CasambiWebServer::stop() {
     if (_server && _running) {
+        if (_ws) {
+            _ws->closeAll();
+        }
         _server->end();
         delete _server;
         _server = nullptr;
+        // _ws is owned by _server (added via addHandler), do not delete separately
+        _ws = nullptr;
         _running = false;
         Serial.println("Web: Server stopped");
     }
+}
+
+void CasambiWebServer::loop() {
+    if (_ws) {
+        _ws->cleanupClients();
+    }
+}
+
+// ============================================================================
+// WebSocket Support
+// ============================================================================
+
+void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
+                                              AsyncWebSocketClient* client,
+                                              AwsEventType type, void* arg,
+                                              uint8_t* data, size_t len) {
+    switch (type) {
+        case WS_EVT_CONNECT:
+            WEB_LOG("WS: client #%u connected from %s\n",
+                    client->id(), client->remoteIP().toString().c_str());
+            // Send full state to the newly connected client
+            client->text(_buildHelloMessage());
+            break;
+
+        case WS_EVT_DISCONNECT:
+            WEB_LOG("WS: client #%u disconnected\n", client->id());
+            break;
+
+        case WS_EVT_ERROR:
+            WEB_LOG("WS: client #%u error(%u): %s\n",
+                    client->id(), *((uint16_t*)arg), (char*)data);
+            break;
+
+        case WS_EVT_DATA:
+            // Incoming messages from clients are ignored for now.
+            // Future: accept control commands via WebSocket.
+            break;
+
+        default:
+            break;
+    }
+}
+
+String CasambiWebServer::_buildHelloMessage() const {
+    JsonDocument doc;
+    doc["type"] = "hello";
+    doc["ble_connected"] = _client->isAuthenticated();
+
+    JsonArray units = doc["units"].to<JsonArray>();
+    for (const auto& unit : _config->units) {
+        JsonObject u = units.add<JsonObject>();
+        u["id"]      = unit.deviceId;
+        u["name"]    = unit.name;
+        u["online"]  = unit.online;
+        u["on"]      = unit.on;
+        u["level"]   = unit.level;
+        if (unit.hasVertical) u["vertical"]  = unit.vertical;
+        if (unit.hasCCT)      u["colorTemp"] = unit.colorTemp;
+    }
+
+    String msg;
+    serializeJson(doc, msg);
+    return msg;
+}
+
+void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
+    if (!_ws || _ws->count() == 0) return;
+
+    JsonDocument doc;
+    doc["type"]   = "unit_state";
+    doc["id"]     = unitId;
+    doc["level"]  = level;
+    doc["online"] = online;
+
+    String msg;
+    serializeJson(doc, msg);
+    _ws->textAll(msg);
+
+    WEB_LOG("WS: broadcast unit_state id=%d level=%d online=%d (%u client(s))\n",
+            unitId, level, online, _ws->count());
+}
+
+void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
+    if (!_ws || _ws->count() == 0) return;
+
+    JsonDocument doc;
+    doc["type"]      = "connection_state";
+    doc["connected"] = connected;
+    if (reason != 0) doc["reason"] = reason;
+
+    String msg;
+    serializeJson(doc, msg);
+    _ws->textAll(msg);
+
+    WEB_LOG("WS: broadcast connection_state connected=%d reason=%d (%u client(s))\n",
+            connected, reason, _ws->count());
 }
 
 void CasambiWebServer::_setupRoutes() {
@@ -188,7 +301,7 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["uptime_ms"] = millis();
     doc["free_heap"] = ESP.getFreeHeap();
 
-Serial.printf("Web: /api/status from %s\n", _getClientIP(request).c_str());
+WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
 
     if (_client->isAuthenticated()) {
         doc["gateway_mac"] = _client->getConnectedAddress();
@@ -206,7 +319,7 @@ Serial.printf("Web: /api/status from %s\n", _getClientIP(request).c_str());
 }
 
 void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
-    Serial.printf("Web: /api/units from %s\n", _getClientIP(request).c_str());
+    WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
     JsonDocument doc;
     JsonArray units = doc["units"].to<JsonArray>();
     for (const auto& unit : _config->units) {
@@ -292,7 +405,7 @@ void CasambiWebServer::_handleSceneOn(AsyncWebServerRequest* request) {
     // Execute command
     _client->setSceneLevel(sceneId, 0xFF);
 
-    Serial.printf("Web: Scene %d (%s) ON from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
+    WEB_LOG("Web: Scene %d (%s) ON from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -318,7 +431,7 @@ void CasambiWebServer::_handleSceneOff(AsyncWebServerRequest* request) {
     // Execute command
     _client->setSceneLevel(sceneId, 0);
 
-    Serial.printf("Web: Scene %d (%s) OFF from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
+    WEB_LOG("Web: Scene %d (%s) OFF from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -374,7 +487,7 @@ void CasambiWebServer::_handleSceneLevel(AsyncWebServerRequest* request) {
     // Execute command
     _client->setSceneLevel(sceneId, level);
 
-    Serial.printf("Web: Scene %d (%s) level=%d from %s\n", sceneId, scene->name.c_str(), level, _getClientIP(request).c_str());
+    WEB_LOG("Web: Scene %d (%s) level=%d from %s\n", sceneId, scene->name.c_str(), level, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -404,7 +517,7 @@ void CasambiWebServer::_handleUnitOn(AsyncWebServerRequest* request) {
     // Execute command
     _client->setUnitLevel(unitId, 255);
 
-    Serial.printf("Web: Unit %d (%s) ON from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
+    WEB_LOG("Web: Unit %d (%s) ON from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -430,7 +543,7 @@ void CasambiWebServer::_handleUnitOff(AsyncWebServerRequest* request) {
     // Execute command
     _client->setUnitLevel(unitId, 0);
 
-    Serial.printf("Web: Unit %d (%s) OFF from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
+    WEB_LOG("Web: Unit %d (%s) OFF from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -486,7 +599,7 @@ void CasambiWebServer::_handleUnitLevel(AsyncWebServerRequest* request) {
     // Execute command
     _client->setUnitLevel(unitId, level);
 
-    Serial.printf("Web: Unit %d (%s) level=%d from %s\n", unitId, unit->name.c_str(), level, _getClientIP(request).c_str());
+    WEB_LOG("Web: Unit %d (%s) level=%d from %s\n", unitId, unit->name.c_str(), level, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -545,7 +658,7 @@ void CasambiWebServer::_handleUnitColor(AsyncWebServerRequest* request) {
     // Execute command
     _client->setUnitColor(unitId, r, g, b);
 
-    Serial.printf("Web: Unit %d (%s) color=(%d,%d,%d) from %s\n", unitId, unit->name.c_str(), r, g, b, _getClientIP(request).c_str());
+    WEB_LOG("Web: Unit %d (%s) color=(%d,%d,%d) from %s\n", unitId, unit->name.c_str(), r, g, b, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -601,7 +714,7 @@ void CasambiWebServer::_handleUnitTemperature(AsyncWebServerRequest* request) {
     // Execute command
     _client->setUnitTemperature(unitId, kelvin);
 
-    Serial.printf("Web: Unit %d (%s) temperature=%dK from %s\n", unitId, unit->name.c_str(), kelvin, _getClientIP(request).c_str());
+    WEB_LOG("Web: Unit %d (%s) temperature=%dK from %s\n", unitId, unit->name.c_str(), kelvin, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -661,7 +774,7 @@ void CasambiWebServer::_handleGroupLevel(AsyncWebServerRequest* request) {
     // Execute command
     _client->setGroupLevel(groupId, level);
 
-    Serial.printf("Web: Group %d (%s) level=%d from %s\n", groupId, group->name.c_str(), level, _getClientIP(request).c_str());
+    WEB_LOG("Web: Group %d (%s) level=%d from %s\n", groupId, group->name.c_str(), level, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -717,7 +830,7 @@ void CasambiWebServer::_handleUnitSlider(AsyncWebServerRequest* request) {
     // Execute command
     _client->setUnitSlider(unitId, value);
 
-    Serial.printf("Web: Unit %d (%s) slider=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
+    WEB_LOG("Web: Unit %d (%s) slider=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -773,7 +886,7 @@ void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
     // Execute command
     _client->setUnitVertical(unitId, value);
 
-    Serial.printf("Web: Unit %d (%s) vertical=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
+    WEB_LOG("Web: Unit %d (%s) vertical=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -829,7 +942,7 @@ void CasambiWebServer::_handleGroupSlider(AsyncWebServerRequest* request) {
     // Execute command
     _client->setGroupSlider(groupId, value);
 
-    Serial.printf("Web: Group %d (%s) slider=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
+    WEB_LOG("Web: Group %d (%s) slider=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -885,7 +998,7 @@ void CasambiWebServer::_handleGroupVertical(AsyncWebServerRequest* request) {
     // Execute command
     _client->setGroupVertical(groupId, value);
 
-    Serial.printf("Web: Group %d (%s) vertical=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
+    WEB_LOG("Web: Group %d (%s) vertical=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 

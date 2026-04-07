@@ -81,7 +81,7 @@ std::vector<uint8_t> CasambiEncryption::decryptAndVerify(
     }
 
     if (!mac_valid) {
-        if (debugEnabled) {
+        if (bleDebugEnabled) {
             Serial.println("Decrypt: CMAC verification failed!");
             Serial.print("Expected: ");
             for (size_t i = 0; i < 8; i++) Serial.printf("%02x ", received_mac[i]);
@@ -92,7 +92,7 @@ std::vector<uint8_t> CasambiEncryption::decryptAndVerify(
         return std::vector<uint8_t>();
     }
 
-    if (debugEnabled) {
+    if (bleDebugEnabled) {
         Serial.println("Decrypt: CMAC verified OK");
     }
 
