@@ -2,6 +2,9 @@ package main;
 use JSON;
 use MIME::Base64;
 
+use constant WS_PING_INTERVAL => 30;  # seconds between keepalive pings
+use constant WS_PONG_TIMEOUT  => 60;  # seconds without pong → reconnect
+
 # ============================================================================
 # Globals
 # ============================================================================
@@ -49,6 +52,7 @@ sub OcchioControl_Define {
 
 sub OcchioControl_Undefine {
     my ($hash, $name) = @_;
+    RemoveInternalTimer($hash, "OcchioControl_Ping");
     DevIo_CloseDev($hash);
     return undef;
 }
@@ -103,6 +107,9 @@ sub OcchioControl_Read {
             # Strip HTTP headers, keep any trailing WebSocket data
             $hash->{buf} =~ s/^.*?\r\n\r\n//s;
             $hash->{wsState} = "connected";
+            $hash->{lastPong} = gettimeofday();
+            RemoveInternalTimer($hash, "OcchioControl_Ping");
+            InternalTimer(gettimeofday() + WS_PING_INTERVAL, "OcchioControl_Ping", $hash);
             readingsSingleUpdate($hash, "state", "connected", 1);
             Log3 $name, 3, "$name: WebSocket connected";
             OcchioControl_ProcessWsFrames($hash) if length($hash->{buf}) > 0;
@@ -110,6 +117,7 @@ sub OcchioControl_Read {
             my $status = (split /\r\n/, $hash->{buf})[0];
             Log3 $name, 2, "$name: WebSocket handshake failed: $status";
             $hash->{wsState} = "disconnected";
+            RemoveInternalTimer($hash, "OcchioControl_Ping");
             DevIo_Disconnected($hash);
         }
         return undef;
@@ -155,17 +163,49 @@ sub OcchioControl_ProcessWsFrames {
             # Close frame — server requested close
             Log3 $name, 3, "$name: WebSocket close frame received";
             $hash->{wsState} = "disconnected";
+            RemoveInternalTimer($hash, "OcchioControl_Ping");
             DevIo_Disconnected($hash);
             last;
         } elsif ($opcode == 0x09) {
             # Ping — respond with pong
             OcchioControl_WsSendPong($hash, $payload);
+        } elsif ($opcode == 0x0A) {
+            # Pong — keepalive acknowledged
+            $hash->{lastPong} = gettimeofday();
+            Log3 $name, 5, "$name: WS pong received";
         } elsif ($opcode == 0x01 || $opcode == 0x00) {
             # Text frame (0x01) or continuation (0x00)
             OcchioControl_HandleWsMessage($hash, $payload);
         }
-        # 0x0A pong: ignore
     }
+}
+
+# ============================================================================
+# Keepalive: periodic ping to detect half-open TCP connections
+# ============================================================================
+
+sub OcchioControl_Ping {
+    my $hash = shift;
+    my $name = $hash->{NAME};
+
+    return unless $hash->{wsState} eq "connected";
+
+    # Pong timeout → declare dead and let DevIo reconnect
+    if (gettimeofday() - ($hash->{lastPong} // 0) > WS_PONG_TIMEOUT) {
+        Log3 $name, 2, "$name: WebSocket pong timeout, reconnecting";
+        $hash->{wsState} = "disconnected";
+        readingsSingleUpdate($hash, "state", "disconnected", 1);
+        DevIo_Disconnected($hash);
+        return;
+    }
+
+    # Send masked ping (empty payload)
+    my @mask = map { int(rand(256)) } 1..4;
+    my $frame = pack("CC", 0x89, 0x80) . pack("CCCC", @mask);
+    DevIo_SimpleWrite($hash, $frame, 0);
+    Log3 $name, 5, "$name: WS ping sent";
+
+    InternalTimer(gettimeofday() + WS_PING_INTERVAL, "OcchioControl_Ping", $hash);
 }
 
 # Send a masked pong frame (client→server frames must be masked per RFC 6455)
