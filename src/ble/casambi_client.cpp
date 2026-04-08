@@ -802,51 +802,67 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
                 Serial.println();
 
-                // EXPERIMENTAL: P09 mesh topology parsing.
-                // Observed structure: after a 1-byte header (0x02), a sequence of
-                // triplets [0x80+nodeId][val1][val2]. Node IDs map to units, groups,
-                // or scenes. val1 may encode routing distance/metric; val2 may be
-                // signal quality or path weight. Bytes without 0x80 prefix between
-                // triplets are not yet understood (possibly edge definitions or padding).
-                // Order of triplets varies between sessions (likely reflects discovery
-                // recency). Content appears stable across reconnects = static mesh config.
-                // Reliability: LOW — reverse-engineered from two captures only.
-                if (payloadLen > 1) {
-                    Serial.printf("P09 mesh (EXPERIMENTAL):\n");
-                    size_t i = 1;  // skip header byte
-                    while (i < payloadLen) {
-                        uint8_t b = payload[i];
-                        if (b >= 0x80 && i + 2 < payloadLen) {
-                            uint8_t nodeId = b & 0x7F;
-                            uint8_t val1   = payload[i + 1];
-                            uint8_t val2   = payload[i + 2];
+                // P09 = mesh topology snapshot. Confirmed structure:
+                //   Byte 0:     preamble 0x02
+                //   Bytes 1…:   3-byte records; stops when first byte of record is 0x00
+                //
+                // Record classes (distinguished by which byte carries the 0x80 node-ID flag):
+                //   Class A  [0x80|id][peer][metric]  — id is destination/subject of route
+                //   Class B  [raw][0x80|id][cost]     — id is next-hop relay node
+                //   Unclassified [b0][b1][b2]         — no 0x80 in b0 or b1; semantics unknown
+                //
+                // Node IDs (0x80 stripped) map to units, groups, or scenes (separate namespaces).
+                // For Class A scene records: b1/b2 may encode scene member IDs (hypothesis).
+                // IDs with no matching unit/group/scene are likely deleted/expired entries.
+                // Reliability: MEDIUM — 3-byte structure and two record classes confirmed;
+                //   byte semantics (peer/metric/cost) still partially hypothetical.
+                if (payloadLen > 1 && payload[0] == 0x02) {
+                    Serial.printf("P09 mesh topology (EXPERIMENTAL):\n");
 
-                            // Classify node by ID
-                            const char* kind = "?";
-                            const char* name = "";
-                            if (_config->getUnitById(nodeId)) {
-                                kind = "unit";
-                                name = _config->getUnitById(nodeId)->name.c_str();
-                            } else if (_config->getGroupById(nodeId)) {
-                                kind = "group";
-                                name = _config->getGroupById(nodeId)->name.c_str();
-                            } else if (_config->getSceneById(nodeId)) {
-                                kind = "scene";
-                                name = _config->getSceneById(nodeId)->name.c_str();
+                    // Helper: print node description (type + id + name) to Serial
+                    auto printNode = [this](uint8_t id) {
+                        if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
+                        if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
+                        if (CasambiScene* s = _config->getSceneById(id)) { Serial.printf("scene%d(%s)", id, s->name.c_str()); return; }
+                        Serial.printf("?%d", id);
+                    };
+
+                    size_t i = 1;
+                    int recNum = 0;
+                    while (i + 2 < payloadLen) {
+                        uint8_t b0 = payload[i], b1 = payload[i+1], b2 = payload[i+2];
+                        if (b0 == 0x00) break;  // terminator
+
+                        recNum++;
+                        Serial.printf("  [%2d] %02x %02x %02x  ", recNum, b0, b1, b2);
+
+                        if (b0 & 0x80) {
+                            // Class A: b0 encodes destination/subject node
+                            uint8_t id = b0 & 0x7F;
+                            bool isScene = (_config->getSceneById(id) != nullptr);
+                            Serial.printf("A dest=");
+                            printNode(id);
+                            if (isScene) {
+                                // Hypothesis: b1/b2 are scene member IDs (unit or group)
+                                Serial.printf(" members=[0x%02x,0x%02x]", b1, b2);
                             } else {
-                                kind = "unknown";
+                                Serial.printf(" peer=0x%02x metric=0x%02x", b1, b2);
                             }
-
-                            Serial.printf("  node=%d(%s", nodeId, kind);
-                            if (name[0]) Serial.printf("/%s", name);
-                            Serial.printf(") metric=%02x quality=%02x\n", val1, val2);
-                            i += 3;
+                        } else if (b1 & 0x80) {
+                            // Class B: b1 encodes next-hop relay node
+                            Serial.printf("B hop=");
+                            printNode(b1 & 0x7F);
+                            Serial.printf(" from=0x%02x cost=0x%02x", b0, b2);
                         } else {
-                            // Unrecognised byte — log and advance
-                            Serial.printf("  seq %02x [not decoded]\n", b);
-                            i++;
+                            // Unclassified: no 0x80 node flag in b0 or b1
+                            Serial.printf("? raw");
                         }
+                        Serial.println();
+                        i += 3;
                     }
+                    Serial.printf("  %d records parsed\n", recNum);
+                } else if (payloadLen > 0) {
+                    Serial.printf("P09: unexpected preamble 0x%02x\n", payload[0]);
                 }
             }
             break;
