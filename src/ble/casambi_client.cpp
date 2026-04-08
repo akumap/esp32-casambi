@@ -806,14 +806,17 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 //   [0x02] [3-byte records...] [0x00 terminator]
                 //
                 // Record classes (position of 0x80 node-flag determines class):
-                //   A  [0x80|id][gw][seq]  entity, config-gateway unit, revision seq
-                //   B  [b0][0x80|id][b2]   relay node; b0/b2 semantics unknown
-                //   ?  [b0][b1][b2]        no flag in b0/b1; semantics unknown
+                //   A  [0x80|id][gw][seq]       entity, config-gateway, revision seq
+                //   B  [b0][0x80|id][b2]         relay node; b0/b2 semantics unknown
+                //   C  chain record — b2 carries 0x80|next_entity (or 0x00 to end chain):
+                //        header:     [reporter][ctx][0x80|first]  no prior chain context
+                //        link:       [gw_prev][seq_prev][0x80|next]  encodes prev entity's gw/seq
+                //        terminator: [gw_last][seq_last][0x00]   ends chain, b0 != 0x00
                 //
                 // P09 tracks VERSIONS only — it does NOT encode scene membership.
                 // Scene membership must come from the cloud config (LittleFS).
                 //
-                // Entity lookup (Class A): scene before unit to resolve ID collisions
+                // Entity lookup (Class A/C): scene before unit to resolve ID collisions
                 //   (scene10 and unit10 share ID=10; scene wins in P09 context).
                 // Gateway split: gw=unit2 → scene entities; gw=unit10 → unit/group entities.
                 //
@@ -845,13 +848,16 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                     bool isDelta = (payloadLen <= 8);
                     if (!isDelta) Serial.printf("P09 snapshot:\n");
 
+                    bool inChain = false;
+                    uint8_t chainPrev = 0;
                     size_t i = 1;
-                    int nA = 0, nB = 0, nUnk = 0;
+                    int nA = 0, nB = 0, nC = 0, nUnk = 0;
                     while (i + 2 < payloadLen) {
                         uint8_t b0 = payload[i], b1 = payload[i+1], b2 = payload[i+2];
                         if (b0 == 0x00) break;
                         if (b0 & 0x80) {
                             // Class A: entity / gateway / seq
+                            inChain = false;
                             Serial.printf(isDelta ? "P09 Δ " : "  A ");
                             printEntity(b0 & 0x7F);
                             Serial.printf(" seq=%d gw=", b2);
@@ -860,12 +866,48 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                             nA++;
                         } else if (b1 & 0x80) {
                             // Class B: relay node, raw bytes
+                            inChain = false;
                             if (!isDelta) {
                                 Serial.printf("  B relay=");
                                 printDevice(b1 & 0x7F);
                                 Serial.printf(" %02x ?? %02x\n", b0, b2);
                             }
                             nB++;
+                        } else if (b2 & 0x80) {
+                            // Class C: chain header or chain link
+                            if (!isDelta) {
+                                if (!inChain) {
+                                    // header: b0=reporter, b1=ctx, b2&0x7F=first entity
+                                    Serial.printf("  C[ ");
+                                    printDevice(b0);
+                                    Serial.printf(" ctx=%02x → ", b1);
+                                    printEntity(b2 & 0x7F);
+                                    Serial.println();
+                                } else {
+                                    // link: b0=gw, b1=seq for chainPrev, b2&0x7F=next entity
+                                    Serial.printf("  C  ");
+                                    printEntity(chainPrev);
+                                    Serial.printf(" seq=%d gw=", b1);
+                                    printDevice(b0);
+                                    Serial.printf(" → ");
+                                    printEntity(b2 & 0x7F);
+                                    Serial.println();
+                                }
+                            }
+                            chainPrev = b2 & 0x7F;
+                            inChain = true;
+                            nC++;
+                        } else if (inChain) {
+                            // Class C terminator: b0=gw, b1=seq for chainPrev, b2=0x00
+                            if (!isDelta) {
+                                Serial.printf("  C  ");
+                                printEntity(chainPrev);
+                                Serial.printf(" seq=%d gw=", b1);
+                                printDevice(b0);
+                                Serial.printf(" [end]\n");
+                            }
+                            inChain = false;
+                            nC++;
                         } else {
                             // Unclassified
                             if (!isDelta) Serial.printf("  ? %02x %02x %02x\n", b0, b1, b2);
@@ -873,7 +915,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                         }
                         i += 3;
                     }
-                    if (!isDelta) Serial.printf("  (%d config, %d relay, %d unknown)\n", nA, nB, nUnk);
+                    if (!isDelta) Serial.printf("  (%d config, %d relay, %d chain, %d unknown)\n", nA, nB, nC, nUnk);
                 } else if (payloadLen > 0) {
                     Serial.printf("P09 bad preamble: 0x%02x\n", payload[0]);
                 }
