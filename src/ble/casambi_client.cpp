@@ -802,20 +802,31 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
                 Serial.println();
 
-                // P09 = scene/config state update (confirmed). Structure:
+                // P09 = scene/config revision tracker (confirmed). Structure:
                 //   [0x02] [3-byte records...] [0x00 terminator]
                 //
                 // Record classes (position of 0x80 node-flag determines class):
-                //   A  [0x80|id][gw][seq]  entity id, config-gateway unit, revision seq
+                //   A  [0x80|id][gw][seq]  entity, config-gateway unit, revision seq
                 //   B  [b0][0x80|id][b2]   relay node; b0/b2 semantics unknown
                 //   ?  [b0][b1][b2]        no flag in b0/b1; semantics unknown
+                //
+                // P09 tracks VERSIONS only — it does NOT encode scene membership.
+                // Scene membership must come from the cloud config (LittleFS).
                 //
                 // Entity lookup (Class A): scene before unit to resolve ID collisions
                 //   (scene10 and unit10 share ID=10; scene wins in P09 context).
                 // Gateway split: gw=unit2 → scene entities; gw=unit10 → unit/group entities.
-                // Seq counter: per-entity, +2 per save, persists across sessions.
-                //   Two P09 deltas per edit: screen 1 (member list) + screen 2 (properties).
-                // Packet size: ≤8 B = single delta; >8 B = full snapshot on connect.
+                //
+                // Seq counter semantics (confirmed):
+                //   - Per-entity, persists across sessions
+                //   - +2 per save screen: screen 1 (member list), screen 2 (properties)
+                //   - Even seq = active/committed entry
+                //   - Odd  seq = deleted/tombstone entry (scene was removed from network)
+                //     All deleted scene IDs (11,12,14,17) have seq=5 in the known snapshot,
+                //     suggesting they were at seq=4 when deleted (bumped to 5 as marker).
+                //
+                // Packet size: ≤8 B = single delta (one entity changed);
+                //              >8 B = full snapshot sent on connect.
                 if (payloadLen > 1 && payload[0] == 0x02) {
                     // scene first: resolves ID collisions (e.g. scene10 vs unit10)
                     auto printEntity = [this](uint8_t id) {
