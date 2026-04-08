@@ -802,95 +802,69 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
                 Serial.println();
 
-                // P09 = network config/scene state update. Confirmed structure:
-                //   Byte 0:     preamble 0x02
-                //   Bytes 1…:   3-byte records; stops when first byte of record is 0x00
+                // P09 = scene/config state update (confirmed). Structure:
+                //   [0x02] [3-byte records...] [0x00 terminator]
                 //
-                // Two packet sizes observed:
-                //   Large (≥ ~20 B): full config snapshot of all entities, sent on connect.
-                //   Small (5 B):     single-entity update, fired each time a scene is saved
-                //                    in the app. Format: [preamble][0x80|scene][gw][seq][0x00]
+                // Record classes (position of 0x80 node-flag determines class):
+                //   A  [0x80|id][gw][seq]  entity id, config-gateway unit, revision seq
+                //   B  [b0][0x80|id][b2]   relay node; b0/b2 semantics unknown
+                //   ?  [b0][b1][b2]        no flag in b0/b1; semantics unknown
                 //
-                // "Mesh topology" was the initial hypothesis — REVISED after observing that
-                // small P09 packets fire during scene editing and the third field increments
-                // by exactly +2 per save operation, which matches a sequence counter, not
-                // a topology metric.
-                //
-                // Record classes (distinguished by which byte carries the 0x80 node-ID flag):
-                //   Class A  [0x80|id][gw][seq]   — id is the entity (scene/unit/group);
-                //                                    gw = config-distribution gateway unit;
-                //                                    seq = per-entity sequence/revision counter
-                //                                    (increments by 2 per save; monotonically
-                //                                    increasing across sessions)
-                //   Class B  [b0][0x80|id][b2]    — id = routing relay node; semantics of
-                //                                    b0/b2 not yet determined (possibly
-                //                                    routing cost for config distribution)
-                //   Unclassified [b0][b1][b2]     — no 0x80 in b0 or b1; unknown
-                //
-                // Gateway split (confirmed): scene records use gw=0x02 (unit2/air module);
-                //   unit/group records use gw=0x0a (unit10/air module). Air modules act
-                //   as config-distribution hubs for their respective entity namespaces.
-                // Namespace collision: unit IDs and scene IDs share the same numeric space
-                //   (e.g. unit10 and scene10 both have ID=10). In Class A records, scene
-                //   takes priority because P09 primarily tracks config revisions; the gateway
-                //   field (b1) provides a secondary disambiguation signal.
-                // Seq counter is per-entity; increments by +2 per save operation (two P09
-                //   packets per edit session: one after member selection, one after property
-                //   adjustment). Counter persists across sessions.
-                // IDs with no matching unit/group/scene = likely deleted/expired entries.
-                // Reliability: MEDIUM — 3-byte structure and seq-counter pattern confirmed;
-                //   Class B and unclassified record semantics still unknown.
+                // Entity lookup (Class A): scene before unit to resolve ID collisions
+                //   (scene10 and unit10 share ID=10; scene wins in P09 context).
+                // Gateway split: gw=unit2 → scene entities; gw=unit10 → unit/group entities.
+                // Seq counter: per-entity, +2 per save, persists across sessions.
+                //   Two P09 deltas per edit: screen 1 (member list) + screen 2 (properties).
+                // Packet size: ≤8 B = single delta; >8 B = full snapshot on connect.
                 if (payloadLen > 1 && payload[0] == 0x02) {
-                    Serial.printf("P09 config state (%s, EXPERIMENTAL):\n",
-                                  payloadLen <= 8 ? "delta" : "full snapshot");
-
-                    // Class A entities: scene checked first to handle ID collisions
-                    // (e.g. scene10 and unit10 share ID=10; scene wins in this context).
+                    // scene first: resolves ID collisions (e.g. scene10 vs unit10)
                     auto printEntity = [this](uint8_t id) {
                         if (CasambiScene* s = _config->getSceneById(id)) { Serial.printf("scene%d(%s)", id, s->name.c_str()); return; }
                         if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
                         if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
                         Serial.printf("?%d", id);
                     };
-
-                    // Class B relays and gateway nodes: physical devices (unit or group first)
+                    // unit first: gateways and relay nodes are physical devices
                     auto printDevice = [this](uint8_t id) {
                         if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
                         if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
                         Serial.printf("?%d", id);
                     };
 
+                    bool isDelta = (payloadLen <= 8);
+                    if (!isDelta) Serial.printf("P09 snapshot:\n");
+
                     size_t i = 1;
-                    int recNum = 0;
+                    int nA = 0, nB = 0, nUnk = 0;
                     while (i + 2 < payloadLen) {
                         uint8_t b0 = payload[i], b1 = payload[i+1], b2 = payload[i+2];
-                        if (b0 == 0x00) break;  // terminator
-
-                        recNum++;
-                        Serial.printf("  [%2d] %02x %02x %02x  ", recNum, b0, b1, b2);
-
+                        if (b0 == 0x00) break;
                         if (b0 & 0x80) {
-                            // Class A: entity=b0, gateway=b1, seq_counter=b2
-                            Serial.printf("A entity=");
+                            // Class A: entity / gateway / seq
+                            Serial.printf(isDelta ? "P09 Δ " : "  A ");
                             printEntity(b0 & 0x7F);
-                            Serial.printf(" gw=");
+                            Serial.printf(" seq=%d gw=", b2);
                             printDevice(b1);
-                            Serial.printf(" seq=%d", b2);
+                            Serial.println();
+                            nA++;
                         } else if (b1 & 0x80) {
-                            // Class B: relay=b1; b0/b2 semantics unknown
-                            Serial.printf("B relay=");
-                            printDevice(b1 & 0x7F);
-                            Serial.printf(" b0=0x%02x b2=0x%02x", b0, b2);
+                            // Class B: relay node, raw bytes
+                            if (!isDelta) {
+                                Serial.printf("  B relay=");
+                                printDevice(b1 & 0x7F);
+                                Serial.printf(" %02x ?? %02x\n", b0, b2);
+                            }
+                            nB++;
                         } else {
-                            // Unclassified: no 0x80 node flag in b0 or b1
-                            Serial.printf("? raw");
+                            // Unclassified
+                            if (!isDelta) Serial.printf("  ? %02x %02x %02x\n", b0, b1, b2);
+                            nUnk++;
                         }
-                        Serial.println();
                         i += 3;
                     }
-                    Serial.printf("  %d records parsed\n", recNum);
+                    if (!isDelta) Serial.printf("  (%d config, %d relay, %d unknown)\n", nA, nB, nUnk);
                 } else if (payloadLen > 0) {
-                    Serial.printf("P09: unexpected preamble 0x%02x\n", payload[0]);
+                    Serial.printf("P09 bad preamble: 0x%02x\n", payload[0]);
                 }
             }
             break;
