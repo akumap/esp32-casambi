@@ -827,21 +827,36 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 //                                    routing cost for config distribution)
                 //   Unclassified [b0][b1][b2]     — no 0x80 in b0 or b1; unknown
                 //
-                // Observed gateway split: scene records use gw=0x02 (unit2/air module);
-                //   unit/group records use gw=0x0a (unit10/air module). Air modules may
-                //   act as config-distribution hubs.
+                // Gateway split (confirmed): scene records use gw=0x02 (unit2/air module);
+                //   unit/group records use gw=0x0a (unit10/air module). Air modules act
+                //   as config-distribution hubs for their respective entity namespaces.
+                // Namespace collision: unit IDs and scene IDs share the same numeric space
+                //   (e.g. unit10 and scene10 both have ID=10). In Class A records, scene
+                //   takes priority because P09 primarily tracks config revisions; the gateway
+                //   field (b1) provides a secondary disambiguation signal.
+                // Seq counter is per-entity; increments by +2 per save operation (two P09
+                //   packets per edit session: one after member selection, one after property
+                //   adjustment). Counter persists across sessions.
                 // IDs with no matching unit/group/scene = likely deleted/expired entries.
-                // Reliability: MEDIUM — 3-byte structure confirmed; seq-counter hypothesis
-                //   based on +2 increment pattern during scene editing (not yet falsified).
+                // Reliability: MEDIUM — 3-byte structure and seq-counter pattern confirmed;
+                //   Class B and unclassified record semantics still unknown.
                 if (payloadLen > 1 && payload[0] == 0x02) {
                     Serial.printf("P09 config state (%s, EXPERIMENTAL):\n",
                                   payloadLen <= 8 ? "delta" : "full snapshot");
 
-                    // Helper: print node description (type + id + name) to Serial
-                    auto printNode = [this](uint8_t id) {
+                    // Class A entities: scene checked first to handle ID collisions
+                    // (e.g. scene10 and unit10 share ID=10; scene wins in this context).
+                    auto printEntity = [this](uint8_t id) {
+                        if (CasambiScene* s = _config->getSceneById(id)) { Serial.printf("scene%d(%s)", id, s->name.c_str()); return; }
+                        if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
+                        if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
+                        Serial.printf("?%d", id);
+                    };
+
+                    // Class B relays and gateway nodes: physical devices (unit or group first)
+                    auto printDevice = [this](uint8_t id) {
                         if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
                         if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
-                        if (CasambiScene* s = _config->getSceneById(id)) { Serial.printf("scene%d(%s)", id, s->name.c_str()); return; }
                         Serial.printf("?%d", id);
                     };
 
@@ -855,14 +870,16 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                         Serial.printf("  [%2d] %02x %02x %02x  ", recNum, b0, b1, b2);
 
                         if (b0 & 0x80) {
-                            // Class A: b0 = entity, b1 = gateway unit, b2 = sequence counter
+                            // Class A: entity=b0, gateway=b1, seq_counter=b2
                             Serial.printf("A entity=");
-                            printNode(b0 & 0x7F);
-                            Serial.printf(" gw=0x%02x seq=%d", b1, b2);
+                            printEntity(b0 & 0x7F);
+                            Serial.printf(" gw=");
+                            printDevice(b1);
+                            Serial.printf(" seq=%d", b2);
                         } else if (b1 & 0x80) {
-                            // Class B: b1 = relay node; b0/b2 semantics unknown
+                            // Class B: relay=b1; b0/b2 semantics unknown
                             Serial.printf("B relay=");
-                            printNode(b1 & 0x7F);
+                            printDevice(b1 & 0x7F);
                             Serial.printf(" b0=0x%02x b2=0x%02x", b0, b2);
                         } else {
                             // Unclassified: no 0x80 node flag in b0 or b1
