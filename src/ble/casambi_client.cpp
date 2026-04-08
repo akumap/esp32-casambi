@@ -802,22 +802,40 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
                 Serial.println();
 
-                // P09 = mesh topology snapshot. Confirmed structure:
+                // P09 = network config/scene state update. Confirmed structure:
                 //   Byte 0:     preamble 0x02
                 //   Bytes 1…:   3-byte records; stops when first byte of record is 0x00
                 //
-                // Record classes (distinguished by which byte carries the 0x80 node-ID flag):
-                //   Class A  [0x80|id][peer][metric]  — id is destination/subject of route
-                //   Class B  [raw][0x80|id][cost]     — id is next-hop relay node
-                //   Unclassified [b0][b1][b2]         — no 0x80 in b0 or b1; semantics unknown
+                // Two packet sizes observed:
+                //   Large (≥ ~20 B): full config snapshot of all entities, sent on connect.
+                //   Small (5 B):     single-entity update, fired each time a scene is saved
+                //                    in the app. Format: [preamble][0x80|scene][gw][seq][0x00]
                 //
-                // Node IDs (0x80 stripped) map to units, groups, or scenes (separate namespaces).
-                // For Class A scene records: b1/b2 may encode scene member IDs (hypothesis).
-                // IDs with no matching unit/group/scene are likely deleted/expired entries.
-                // Reliability: MEDIUM — 3-byte structure and two record classes confirmed;
-                //   byte semantics (peer/metric/cost) still partially hypothetical.
+                // "Mesh topology" was the initial hypothesis — REVISED after observing that
+                // small P09 packets fire during scene editing and the third field increments
+                // by exactly +2 per save operation, which matches a sequence counter, not
+                // a topology metric.
+                //
+                // Record classes (distinguished by which byte carries the 0x80 node-ID flag):
+                //   Class A  [0x80|id][gw][seq]   — id is the entity (scene/unit/group);
+                //                                    gw = config-distribution gateway unit;
+                //                                    seq = per-entity sequence/revision counter
+                //                                    (increments by 2 per save; monotonically
+                //                                    increasing across sessions)
+                //   Class B  [b0][0x80|id][b2]    — id = routing relay node; semantics of
+                //                                    b0/b2 not yet determined (possibly
+                //                                    routing cost for config distribution)
+                //   Unclassified [b0][b1][b2]     — no 0x80 in b0 or b1; unknown
+                //
+                // Observed gateway split: scene records use gw=0x02 (unit2/air module);
+                //   unit/group records use gw=0x0a (unit10/air module). Air modules may
+                //   act as config-distribution hubs.
+                // IDs with no matching unit/group/scene = likely deleted/expired entries.
+                // Reliability: MEDIUM — 3-byte structure confirmed; seq-counter hypothesis
+                //   based on +2 increment pattern during scene editing (not yet falsified).
                 if (payloadLen > 1 && payload[0] == 0x02) {
-                    Serial.printf("P09 mesh topology (EXPERIMENTAL):\n");
+                    Serial.printf("P09 config state (%s, EXPERIMENTAL):\n",
+                                  payloadLen <= 8 ? "delta" : "full snapshot");
 
                     // Helper: print node description (type + id + name) to Serial
                     auto printNode = [this](uint8_t id) {
@@ -837,22 +855,15 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                         Serial.printf("  [%2d] %02x %02x %02x  ", recNum, b0, b1, b2);
 
                         if (b0 & 0x80) {
-                            // Class A: b0 encodes destination/subject node
-                            uint8_t id = b0 & 0x7F;
-                            bool isScene = (_config->getSceneById(id) != nullptr);
-                            Serial.printf("A dest=");
-                            printNode(id);
-                            if (isScene) {
-                                // Hypothesis: b1/b2 are scene member IDs (unit or group)
-                                Serial.printf(" members=[0x%02x,0x%02x]", b1, b2);
-                            } else {
-                                Serial.printf(" peer=0x%02x metric=0x%02x", b1, b2);
-                            }
+                            // Class A: b0 = entity, b1 = gateway unit, b2 = sequence counter
+                            Serial.printf("A entity=");
+                            printNode(b0 & 0x7F);
+                            Serial.printf(" gw=0x%02x seq=%d", b1, b2);
                         } else if (b1 & 0x80) {
-                            // Class B: b1 encodes next-hop relay node
-                            Serial.printf("B hop=");
+                            // Class B: b1 = relay node; b0/b2 semantics unknown
+                            Serial.printf("B relay=");
                             printNode(b1 & 0x7F);
-                            Serial.printf(" from=0x%02x cost=0x%02x", b0, b2);
+                            Serial.printf(" b0=0x%02x b2=0x%02x", b0, b2);
                         } else {
                             // Unclassified: no 0x80 node flag in b0 or b1
                             Serial.printf("? raw");
