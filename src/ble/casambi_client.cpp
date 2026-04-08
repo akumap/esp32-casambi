@@ -802,51 +802,122 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
                 Serial.println();
 
-                // EXPERIMENTAL: P09 mesh topology parsing.
-                // Observed structure: after a 1-byte header (0x02), a sequence of
-                // triplets [0x80+nodeId][val1][val2]. Node IDs map to units, groups,
-                // or scenes. val1 may encode routing distance/metric; val2 may be
-                // signal quality or path weight. Bytes without 0x80 prefix between
-                // triplets are not yet understood (possibly edge definitions or padding).
-                // Order of triplets varies between sessions (likely reflects discovery
-                // recency). Content appears stable across reconnects = static mesh config.
-                // Reliability: LOW — reverse-engineered from two captures only.
-                if (payloadLen > 1) {
-                    Serial.printf("P09 mesh (EXPERIMENTAL):\n");
-                    size_t i = 1;  // skip header byte
-                    while (i < payloadLen) {
-                        uint8_t b = payload[i];
-                        if (b >= 0x80 && i + 2 < payloadLen) {
-                            uint8_t nodeId = b & 0x7F;
-                            uint8_t val1   = payload[i + 1];
-                            uint8_t val2   = payload[i + 2];
+                // P09 = scene/config revision tracker (confirmed). Structure:
+                //   [0x02] [3-byte records...] [0x00 terminator]
+                //
+                // Record classes (position of 0x80 node-flag determines class):
+                //   A  [0x80|id][gw][seq]       entity, config-gateway, revision seq
+                //   B  [b0][0x80|id][b2]         relay node; b0/b2 semantics unknown
+                //   C  chain record — b2 carries 0x80|next_entity (or 0x00 to end chain):
+                //        header:     [reporter][ctx][0x80|first]  no prior chain context
+                //        link:       [gw_prev][seq_prev][0x80|next]  encodes prev entity's gw/seq
+                //        terminator: [gw_last][seq_last][0x00]   ends chain, b0 != 0x00
+                //
+                // P09 tracks VERSIONS only — it does NOT encode scene membership.
+                // Scene membership must come from the cloud config (LittleFS).
+                //
+                // Entity lookup (Class A/C): scene before unit to resolve ID collisions
+                //   (scene10 and unit10 share ID=10; scene wins in P09 context).
+                // Gateway split: gw=unit2 → scene entities; gw=unit10 → unit/group entities.
+                //
+                // Seq counter semantics (confirmed):
+                //   - Per-entity, persists across sessions
+                //   - +2 per save screen: screen 1 (member list), screen 2 (properties)
+                //   - Even seq = active/committed entry
+                //   - Odd  seq = deleted/tombstone entry (scene was removed from network)
+                //     All deleted scene IDs (11,12,14,17) have seq=5 in the known snapshot,
+                //     suggesting they were at seq=4 when deleted (bumped to 5 as marker).
+                //
+                // Packet size: ≤8 B = single delta (one entity changed);
+                //              >8 B = full snapshot sent on connect.
+                if (payloadLen > 1 && payload[0] == 0x02) {
+                    // scene first: resolves ID collisions (e.g. scene10 vs unit10)
+                    auto printEntity = [this](uint8_t id) {
+                        if (CasambiScene* s = _config->getSceneById(id)) { Serial.printf("scene%d(%s)", id, s->name.c_str()); return; }
+                        if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
+                        if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
+                        Serial.printf("?%d", id);
+                    };
+                    // unit first: gateways and relay nodes are physical devices
+                    auto printDevice = [this](uint8_t id) {
+                        if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
+                        if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
+                        Serial.printf("?%d", id);
+                    };
 
-                            // Classify node by ID
-                            const char* kind = "?";
-                            const char* name = "";
-                            if (_config->getUnitById(nodeId)) {
-                                kind = "unit";
-                                name = _config->getUnitById(nodeId)->name.c_str();
-                            } else if (_config->getGroupById(nodeId)) {
-                                kind = "group";
-                                name = _config->getGroupById(nodeId)->name.c_str();
-                            } else if (_config->getSceneById(nodeId)) {
-                                kind = "scene";
-                                name = _config->getSceneById(nodeId)->name.c_str();
-                            } else {
-                                kind = "unknown";
+                    bool isDelta = (payloadLen <= 8);
+                    if (!isDelta) Serial.printf("P09 snapshot:\n");
+
+                    bool inChain = false;
+                    uint8_t chainPrev = 0;
+                    size_t i = 1;
+                    int nA = 0, nB = 0, nC = 0, nUnk = 0;
+                    while (i + 2 < payloadLen) {
+                        uint8_t b0 = payload[i], b1 = payload[i+1], b2 = payload[i+2];
+                        if (b0 == 0x00) break;
+                        if (b0 & 0x80) {
+                            // Class A: entity / gateway / seq
+                            inChain = false;
+                            Serial.printf(isDelta ? "P09 Δ " : "  A ");
+                            printEntity(b0 & 0x7F);
+                            Serial.printf(" seq=%d gw=", b2);
+                            printDevice(b1);
+                            Serial.println();
+                            nA++;
+                        } else if (b1 & 0x80) {
+                            // Class B: relay node, raw bytes
+                            inChain = false;
+                            if (!isDelta) {
+                                Serial.printf("  B relay=");
+                                printDevice(b1 & 0x7F);
+                                Serial.printf(" %02x ?? %02x\n", b0, b2);
                             }
-
-                            Serial.printf("  node=%d(%s", nodeId, kind);
-                            if (name[0]) Serial.printf("/%s", name);
-                            Serial.printf(") metric=%02x quality=%02x\n", val1, val2);
-                            i += 3;
+                            nB++;
+                        } else if (b2 & 0x80) {
+                            // Class C: chain header or chain link
+                            if (!isDelta) {
+                                if (!inChain) {
+                                    // header: b0=reporter, b1=ctx, b2&0x7F=first entity
+                                    Serial.printf("  C[ ");
+                                    printDevice(b0);
+                                    Serial.printf(" ctx=%02x → ", b1);
+                                    printEntity(b2 & 0x7F);
+                                    Serial.println();
+                                } else {
+                                    // link: b0=gw, b1=seq for chainPrev, b2&0x7F=next entity
+                                    Serial.printf("  C  ");
+                                    printEntity(chainPrev);
+                                    Serial.printf(" seq=%d gw=", b1);
+                                    printDevice(b0);
+                                    Serial.printf(" → ");
+                                    printEntity(b2 & 0x7F);
+                                    Serial.println();
+                                }
+                            }
+                            chainPrev = b2 & 0x7F;
+                            inChain = true;
+                            nC++;
+                        } else if (inChain) {
+                            // Class C terminator: b0=gw, b1=seq for chainPrev, b2=0x00
+                            if (!isDelta) {
+                                Serial.printf("  C  ");
+                                printEntity(chainPrev);
+                                Serial.printf(" seq=%d gw=", b1);
+                                printDevice(b0);
+                                Serial.printf(" [end]\n");
+                            }
+                            inChain = false;
+                            nC++;
                         } else {
-                            // Unrecognised byte — log and advance
-                            Serial.printf("  seq %02x [not decoded]\n", b);
-                            i++;
+                            // Unclassified
+                            if (!isDelta) Serial.printf("  ? %02x %02x %02x\n", b0, b1, b2);
+                            nUnk++;
                         }
+                        i += 3;
                     }
+                    if (!isDelta) Serial.printf("  (%d config, %d relay, %d chain, %d unknown)\n", nA, nB, nC, nUnk);
+                } else if (payloadLen > 0) {
+                    Serial.printf("P09 bad preamble: 0x%02x\n", payload[0]);
                 }
             }
             break;
