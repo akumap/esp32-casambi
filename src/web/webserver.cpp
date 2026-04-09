@@ -105,11 +105,16 @@ String CasambiWebServer::_buildHelloMessage() const {
     JsonArray units = doc["units"].to<JsonArray>();
     for (const auto& unit : _config->units) {
         JsonObject u = units.add<JsonObject>();
-        u["id"]      = unit.deviceId;
-        u["name"]    = unit.name;
-        u["online"]  = unit.online;
-        u["on"]      = unit.on;
-        u["level"]   = unit.level;
+        u["id"]          = unit.deviceId;
+        u["name"]        = unit.name;
+        u["address"]     = unit.address;     // BLE MAC address — stable identifier
+        u["uuid"]        = unit.uuid;
+        u["online"]      = unit.online;
+        u["on"]          = unit.on;
+        u["level"]       = unit.level;
+        u["hasCCT"]      = unit.hasCCT;
+        u["hasVertical"] = unit.hasVertical;
+        u["numChannels"] = unit.numChannels;
         if (unit.hasVertical) u["vertical"]  = unit.vertical;
         if (unit.hasCCT) {
             u["colorTemp"] = unit.colorTemp;
