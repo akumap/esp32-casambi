@@ -220,7 +220,7 @@ sub CasambiUnit_SetCapabilities {
 
     # --- homebridgeMapping ---
     # Primary Lightbulb service: on/off + brightness
-    my $hbMap = "on=state,valueOff=off,cmdOff=off,cmdOn=on"
+    my $hbMap = "On=state,valueOff=off,cmdOff=off,cmdOn=on"
               . " brightness=brightness,homekit=Brightness,cmd=brightness"
               .   ",minValue=0,maxValue=100";
 
@@ -239,7 +239,7 @@ sub CasambiUnit_SetCapabilities {
         # Second Lightbulb service for vertical light distribution control.
         # Named "<devicename>_vertical" so HomeKit shows it as a sibling accessory.
         my $vName = "${name}_vertical";
-        $hbMap .= " on_v=state,valueOff=off,cmdOff=off,cmdOn=on"
+        $hbMap .= " On_v=state,valueOff=off,cmdOff=off,cmdOn=on"
                .  ",service_name=$vName"
                .  " brightness_v=vertical,homekit=Brightness,cmd=vertical"
                .  ",minValue=0,maxValue=255,service_name=$vName";
