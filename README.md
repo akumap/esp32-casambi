@@ -204,13 +204,13 @@ The IP address is displayed in the serial console on boot.
 {
   "ble_connected": true,
   "ble_state": 3,
-  "network_name": "Wohnung",
+  "network_name": "My Home",
   "wifi_ssid": "MyNetwork",
-  "wifi_ip": "192.168.178.111",
+  "wifi_ip": "192.168.1.100",
   "wifi_rssi": -32,
   "uptime_ms": 123456,
   "free_heap": 56000,
-  "gateway_mac": "9e:d8:2b:33:15:44",
+  "gateway_mac": "aa:bb:cc:dd:ee:01",
   "connection_uptime_ms": 98765,
   "packets_received": 42
 }
@@ -225,7 +225,7 @@ The IP address is displayed in the serial console on boot.
       "id": 7,
       "name": "Mito sospeso",
       "type": 19425,
-      "address": "b0e0780c693a",
+      "address": "aa:bb:cc:dd:ee:02",
       "online": true,
       "on": true,
       "level": 200,
@@ -237,9 +237,9 @@ The IP address is displayed in the serial console on boot.
     },
     {
       "id": 2,
-      "name": "Più Spüle",
+      "name": "Sento pendant",
       "type": 1422,
-      "address": "c755032f4f9c",
+      "address": "aa:bb:cc:dd:ee:03",
       "online": true,
       "on": true,
       "level": 255,
@@ -320,7 +320,8 @@ ws://<esp32-ip>/ws
 
 #### `hello` — sent immediately on connect
 
-Full state snapshot of all units:
+Full state snapshot of all units, including stable BLE MAC address and
+capability flags used by the FHEM integration for device identification:
 
 ```json
 {
@@ -330,9 +331,14 @@ Full state snapshot of all units:
     {
       "id": 7,
       "name": "Mito sospeso",
+      "address": "aa:bb:cc:dd:ee:02",
+      "uuid": "1234abcd-...",
       "online": true,
       "on": true,
       "level": 200,
+      "hasCCT": true,
+      "hasVertical": true,
+      "numChannels": 3,
       "vertical": 127,
       "colorTemp": 58,
       "cctMin": 2700,
@@ -340,10 +346,15 @@ Full state snapshot of all units:
     },
     {
       "id": 2,
-      "name": "Più Spüle",
+      "name": "Sento pendant",
+      "address": "aa:bb:cc:dd:ee:03",
+      "uuid": "5678efgh-...",
       "online": true,
       "on": true,
-      "level": 255
+      "level": 255,
+      "hasCCT": false,
+      "hasVertical": false,
+      "numChannels": 1
     }
   ]
 }
@@ -483,7 +494,8 @@ esp32-casambi/
 │   └── web/
 │       └── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
 ├── FHEM/
-│   └── 99_OcchioControl.pm   # FHEM integration module (WebSocket push + REST fallback)
+│   ├── 98_CasambiGW.pm       # FHEM gateway module (WebSocket connection, unit sync)
+│   └── 98_CasambiUnit.pm     # FHEM unit module (one device per Casambi luminaire)
 ├── platformio.ini
 └── README.md
 ```
@@ -584,110 +596,146 @@ pio run -e debug -t upload        # Debug build with verbose BLE logging
 
 ## FHEM Integration
 
-The FHEM module `FHEM/99_OcchioControl.pm` serves as a reference integration showing how to connect a home automation system to the ESP32. It uses the WebSocket push interface for real-time state updates and the REST API for sending commands.
+Two FHEM modules provide a fully generic integration without any hardcoding of
+device names, IDs, or IP addresses.  Casambi unit devices are created
+automatically and identified by their stable BLE MAC address, so HomeKit
+associations (FUUID) survive network reconfigurations.
 
 ### Architecture
 
 ```
-ESP32                          FHEM
-─────                          ────
-WebSocket /ws  ──push──►  OcchioControl (DevIo device)
-                               │ unit_state, hello
-                               └──► readingsBulkUpdate(Occhio_*)
+ESP32                             FHEM
+─────                             ────
+WebSocket /ws  ──push──►  CasambiGW  (DevIo gateway device)
+                               │  hello → sync / pending detection
+                               │  unit_state → route to child device
+                               └──► CasambiUnit_UpdateFromState(Casambi_*)
 
-REST /api/units/*  ◄──POST──  OcchioControl_SendCommand
-                               called from notify rules
-
-REST /api/units    ◄──GET───  OcchioControl_UpdateStatus
-                               (optional fallback, via at-timer)
+REST /api/units/*  ◄──POST──  CasambiGW_SendCommand
+                               called from CasambiUnit SetFn
 ```
 
-State updates flow from the ESP32 to FHEM via WebSocket push. Commands flow from FHEM to the ESP32 via HTTP POST. A REST polling fallback is available for resilience but is not needed for normal operation.
+State updates flow from the ESP32 to FHEM via WebSocket push.
+Commands flow from FHEM to the ESP32 via HTTP POST.
 
 ### Installation
 
-Copy `FHEM/99_OcchioControl.pm` to your FHEM `FHEM/` directory and reload:
+Copy both module files to your FHEM modules directory and reload:
 
-```
-reload 99_OcchioControl
-```
-
-### WebSocket device
-
-Define one device per ESP32. This opens a persistent TCP connection and performs the WebSocket handshake automatically:
-
-```
-define OcchioWS OcchioControl
+```bash
+cp FHEM/98_CasambiGW.pm   /opt/fhem/FHEM/
+cp FHEM/98_CasambiUnit.pm /opt/fhem/FHEM/
 ```
 
-On successful connect, the ESP32 sends a `hello` message with the current state of all units. From that point on, every state change in the Casambi mesh is pushed as a `unit_state` message and applied to the corresponding FHEM device readings immediately.
+```
+reload 98_CasambiGW
+reload 98_CasambiUnit
+```
 
-The module reconnects automatically on link loss, including on FHEM startup.
+### Gateway device
 
-**Readings on `OcchioWS`:**
+Define one gateway device per ESP32, passing the IP address (and optionally port):
+
+```
+define MyCasambi CasambiGW 192.168.1.100
+```
+
+The gateway opens a persistent WebSocket connection, performs the handshake,
+and reconnects automatically on link loss or FHEM startup.
+
+**Readings on the gateway device:**
 
 | Reading | Values | Description |
 |---------|--------|-------------|
 | `state` | `connected` / `disconnected` | WebSocket connection state |
-| `ble_state` | `ble_connected` / `ble_disconnected` | BLE connection of the ESP32 |
+| `ble_state` | `ble_connected` / `ble_disconnected` | BLE link of the ESP32 |
+| `syncState` | `ok` / `changes_pending` | Whether structural changes are waiting |
+| `pendingSync` | text summary | e.g. `"2 new (Mito sospeso, Sento); 1 removed (Casambi_OldLight)"` |
+| `lastSync` | timestamp | Time of last successful hello sync |
+
+**Gateway attributes:**
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `autocreate` | `1` | Create new `CasambiUnit` devices when `applyChanges` is called |
+| `deleteRemovedUnits` | `1` | Delete the FHEM device (`1`) or only set `online false` (`0`) for units removed from the Casambi network |
+
+### Automatic unit sync
+
+On each (re-)connect the ESP32 sends a `hello` snapshot.  The gateway
+immediately applies state and capability updates to all already-known units.
+Structural changes — new or removed units — are held as **pending changes**
+and require explicit confirmation:
+
+```
+set MyCasambi applyChanges    # create new / remove deleted unit devices
+set MyCasambi discardChanges  # ignore the pending changes
+```
+
+This prevents unintended device creation or deletion caused by a transient
+network reconfiguration or gateway restart.
 
 ### Unit devices
 
-Each Casambi unit is represented as a separate FHEM device. Set the `casambiUnitId` attribute to link it to the correct Casambi unit ID (visible in `/api/units`):
+Each Casambi unit is represented as a `CasambiUnit` device, auto-created by
+the gateway (name prefix `Casambi_`, spaces replaced with underscores).
+Units are identified by their BLE MAC address (`casambiMac` attribute),
+so the FHEM device name and HomeKit associations remain stable even if
+Casambi reassigns unit IDs.
 
-```
-attr Occhio_Mito_Sospeso casambiUnitId 7
-attr Occhio_Mito_Sospeso cctMin 2700
-attr Occhio_Mito_Sospeso cctMax 4000
-```
-
-**Readings updated by push:**
+**Readings:**
 
 | Reading | Description |
 |---------|-------------|
 | `state` | `on` / `off` |
 | `brightness` | 0–100 (%) |
 | `online` | `true` / `false` |
-| `colorTemp` | Kelvin (only for CCT-capable units) |
-| `vertical` | 0–255 raw value (only for units with vertical control) |
+| `colorTemp` | Color temperature in **Kelvin** (CCT-capable units only) |
+| `vertical` | 0–255 light distribution (units with vertical control only) |
+| `casambiId` | Current Casambi unit ID (may change after network reconfiguration) |
+| `casambiName` | Unit name as configured in the Casambi network |
 
-### Command forwarding
-
-Commands are forwarded to the ESP32 via HTTP POST. The module is typically called from FHEM `notify` rules:
-
-```
-define n_occhio_mito notify Occhio_Mito_Sospeso {OcchioControl_Notify("Occhio_Mito_Sospeso", $EVENT)}
-```
-
-Supported events: `on`, `off`, `brightness <0-100>`, `colorTemp <kelvin>`, `vertical <0-255>`.
-
-Analog values (`brightness`, `colorTemp`, `vertical`) are debounced with a 300 ms delay to avoid flooding the BLE mesh during slider movement.
-
-The module includes a feedback-loop guard (`$_updatingStatus`) that suppresses outgoing commands while readings are being updated from incoming push or poll data. This prevents re-triggering when other systems (e.g. Homebridge) react to reading changes.
-
-ColorTemp accepts both Kelvin (≥ 500) and Mired (< 500, converted automatically). Values are clamped to the device's `cctMin`/`cctMax` range.
-
-### Polling fallback
-
-`OcchioControl_UpdateStatus()` performs a full REST poll of `/api/units` and updates all unit readings. It can be called via an `at`-timer as a fallback, e.g. every 5 minutes:
+**Set commands** (capability-dependent, generated automatically):
 
 ```
-define at_occhio_poll at +*00:05:00 {OcchioControl_UpdateStatus()}
+set Casambi_Mito_sospeso on
+set Casambi_Mito_sospeso off
+set Casambi_Mito_sospeso brightness 75
+set Casambi_Mito_sospeso colorTemp 3000      # Kelvin or Mired (<500) accepted
+set Casambi_Mito_sospeso vertical 200
 ```
 
-With WebSocket push active, this interval can be set very low-frequency (5–10 minutes) or omitted entirely.
+Analog values (`brightness`, `colorTemp`, `vertical`) are debounced by 300 ms
+to avoid flooding the BLE mesh during slider movement.
 
-### Unit ID map
+A feedback-loop guard suppresses outgoing commands while readings are being
+updated from incoming push data, preventing re-triggering when Homebridge or
+other systems react to reading changes.
 
-The module contains a hardcoded map of Casambi unit IDs to FHEM device names. Edit `%_deviceMap` in `99_OcchioControl.pm` to match your installation:
+### Managed attributes on unit devices
 
-```perl
-my %_deviceMap = (
-    7  => "Occhio_Mito_Sospeso",
-    8  => "Occhio_Mel_Luna",
-    # ...
-);
-```
+The gateway sets these attributes automatically on each (re-)connect;
+they are only written when the value actually changes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `casambiMac` | BLE MAC — stable identifier, set once on creation |
+| `cctMin` / `cctMax` | CCT range in Kelvin from the Casambi network |
+| `setList` | Capability-dependent set command list |
+| `webCmd` | Quick-access buttons in the FHEM WebUI |
+| `genericDeviceType` | Always `light` |
+| `homebridgeMapping` | HomeKit mapping including K→Mired conversion for `colorTemp` and an optional second Lightbulb service for `vertical` |
+
+### HomeKit / Homebridge integration
+
+`colorTemp` is stored in Kelvin (human-readable in the FHEM WebUI).
+The generated `homebridgeMapping` includes an `expr=int(1000000/$val)`
+conversion so HomeKit receives the expected Mired value.  Incoming Mired
+commands from Homebridge (values < 500) are automatically converted back
+to Kelvin by the SetFn.
+
+For units with vertical control, a second HomeKit Lightbulb service is
+added to the mapping, named `<devicename>_vertical`.
 
 -----
 
