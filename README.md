@@ -326,6 +326,7 @@ capability flags used by the FHEM integration for device identification:
 ```json
 {
   "type": "hello",
+  "build": 1,
   "ble_connected": true,
   "units": [
     {
@@ -495,7 +496,7 @@ esp32-casambi/
 │       └── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
 ├── FHEM/
 │   ├── 98_CasambiGW.pm       # FHEM gateway module (WebSocket connection, unit sync)
-│   └── 98_CasambiUnit.pm     # FHEM unit module (one device per Casambi luminaire)
+│   └── 98_CasambiUnit.pm     # FHEM unit + companion vertical dimmer modules
 ├── platformio.ini
 └── README.md
 ```
@@ -610,9 +611,12 @@ WebSocket /ws  ──push──►  CasambiGW  (DevIo gateway device)
                                │  hello → sync / pending detection
                                │  unit_state → route to child device
                                └──► CasambiUnit_UpdateFromState(Casambi_*)
+                                         │  vertical → CasambiVertical_UpdateFromParent
+                                         └──► Casambi_*_vertical  (companion dimmer)
 
 REST /api/units/*  ◄──POST──  CasambiGW_SendCommand
                                called from CasambiUnit SetFn
+                               and CasambiVertical SetFn
 ```
 
 State updates flow from the ESP32 to FHEM via WebSocket push.
@@ -631,6 +635,10 @@ cp FHEM/98_CasambiUnit.pm /opt/fhem/FHEM/
 reload 98_CasambiGW
 reload 98_CasambiUnit
 ```
+
+`98_CasambiUnit.pm` contains two module definitions: `CasambiUnit` (one per
+luminaire) and `CasambiVertical` (auto-created companion dimmer for units with
+vertical light distribution).  No separate file is needed for `CasambiVertical`.
 
 ### Gateway device
 
@@ -652,6 +660,8 @@ and reconnects automatically on link loss or FHEM startup.
 | `syncState` | `ok` / `changes_pending` | Whether structural changes are waiting |
 | `pendingSync` | text summary | e.g. `"2 new (Mito sospeso, Sento); 1 removed (Casambi_OldLight)"` |
 | `lastSync` | timestamp | Time of last successful hello sync |
+| `esp32Build` | integer | Build number reported by the ESP32 firmware |
+| `esp32BuildWarning` | `ok` / warning text | Set when ESP32 build is below `MIN_FIRMWARE_BUILD` |
 
 **Gateway attributes:**
 
@@ -695,6 +705,9 @@ Casambi reassigns unit IDs.
 | `casambiId` | Current Casambi unit ID (may change after network reconfiguration) |
 | `casambiName` | Unit name as configured in the Casambi network |
 
+Units with vertical capability automatically get a companion **`CasambiVertical`**
+device named `<unitName>_vertical`.  See [CasambiVertical](#casambivertical-companion-device) below.
+
 **Set commands** (capability-dependent, generated automatically):
 
 ```
@@ -724,18 +737,44 @@ they are only written when the value actually changes:
 | `setList` | Capability-dependent set command list |
 | `webCmd` | Quick-access buttons in the FHEM WebUI |
 | `genericDeviceType` | Always `light` |
-| `homebridgeMapping` | HomeKit mapping including K→Mired conversion for `colorTemp` and an optional second Lightbulb service for `vertical` |
+| `homebridgeMapping` | HomeKit mapping: `On=state,values=on:1;;off:0 Brightness=brightness,minValue=1,maxValue=100`; CCT units additionally include `ColorTemperature=colorTemp,...,expr=int(1000000/$val)` |
 
 ### HomeKit / Homebridge integration
 
 `colorTemp` is stored in Kelvin (human-readable in the FHEM WebUI).
-The generated `homebridgeMapping` includes an `expr=int(1000000/$val)`
-conversion so HomeKit receives the expected Mired value.  Incoming Mired
-commands from Homebridge (values < 500) are automatically converted back
-to Kelvin by the SetFn.
+The generated `homebridgeMapping` uses the
+[homebridge-platform-fhem](https://github.com/domos4/homebridge-platform-fhem)
+format.  It includes an `expr=int(1000000/$val)` conversion so HomeKit
+receives the expected Mired value.  Incoming Mired commands from Homebridge
+(values < 500) are automatically converted back to Kelvin by the SetFn.
 
-For units with vertical control, a second HomeKit Lightbulb service is
-added to the mapping, named `<devicename>_vertical`.
+Vertical light distribution is exposed via a separate `CasambiVertical`
+companion device (not as a second service on the main unit).
+
+### CasambiVertical companion device
+
+For units with vertical capability, a companion device `<unitName>_vertical`
+of type `CasambiVertical` is auto-created.  It exposes vertical light
+distribution as a standard dimmer so that Homebridge can map it to a
+Lightbulb Brightness characteristic:
+
+| Reading | Description |
+|---------|-------------|
+| `state` | `on` / `off` |
+| `pct` | 0–100 % — used by Homebridge (maps to raw vertical 0–255) |
+| `vertical` | 0–255 raw Casambi value |
+
+Direction convention:
+- `pct 0%` → vertical 0 — light directed fully **upward**
+- `pct 100%` → vertical 255 — light directed fully **downward**
+
+Set commands: `on`, `off`, `pct 0-100`.
+
+`genericDeviceType` is set to `dimmer`; `homebridgeMapping` is set to
+`On=state,values=on:1;;off:0 Brightness=pct,minValue=0,maxValue=100`.
+
+The companion device is deleted automatically alongside the parent unit
+when `set <gw> applyChanges` removes a unit.
 
 -----
 
