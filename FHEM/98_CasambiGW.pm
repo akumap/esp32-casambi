@@ -37,8 +37,9 @@ use MIME::Base64;
 #                            When 0: device stays but "online" is set to false
 # ============================================================================
 
-use constant WS_PING_INTERVAL => 30;   # seconds between WS keepalive pings
-use constant WS_PONG_TIMEOUT  => 60;   # seconds without pong → reconnect
+use constant WS_PING_INTERVAL    => 30;   # seconds between WS keepalive pings
+use constant WS_PONG_TIMEOUT     => 60;   # seconds without pong → reconnect
+use constant MIN_FIRMWARE_BUILD  => 1;    # minimum accepted ESP32 build number
 
 # ============================================================================
 # Module registration
@@ -303,6 +304,18 @@ sub CasambiGW_HandleHello {
     my ($hash, $msg) = @_;
     my $name = $hash->{NAME};
 
+    # Check ESP32 firmware build number
+    my $build = $msg->{build} // 0;
+    readingsSingleUpdate($hash, "esp32Build", $build, 1);
+    if ($build < MIN_FIRMWARE_BUILD) {
+        Log3 $name, 2, "$name: WARNING: ESP32 build $build < minimum " . MIN_FIRMWARE_BUILD
+                     . " — please update the ESP32 firmware";
+        readingsSingleUpdate($hash, "esp32BuildWarning",
+            "ESP32 build $build < minimum " . MIN_FIRMWARE_BUILD, 1);
+    } else {
+        readingsSingleUpdate($hash, "esp32BuildWarning", "ok", 1);
+    }
+
     # Build MAC→FHEM-name registry from all CasambiUnit devices of this GW
     my %byMac;
     for my $devName (sort keys %defs) {
@@ -426,6 +439,9 @@ sub CasambiGW_ApplyPendingChanges {
         next unless $defs{$devName};
         if (AttrVal($name, "deleteRemovedUnits", 1)) {
             Log3 $name, 3, "$name: Deleting '$devName' (MAC $mac — removed from Casambi network)";
+            # Also delete companion vertical device if it exists
+            my $vName = "${devName}_vertical";
+            fhem("delete $vName") if $defs{$vName};
             fhem("delete $devName");
         } else {
             readingsSingleUpdate($defs{$devName}, "online", "false", 1);
@@ -603,6 +619,9 @@ sub CasambiGW_Ready {
     <li><b>pendingSync</b> &mdash; human-readable summary of pending changes,
         e.g. "2 new (Kueche, Bad); 1 removed (Casambi_Old)"</li>
     <li><b>lastSync</b> &mdash; timestamp of the last hello sync</li>
+    <li><b>esp32Build</b> &mdash; build number reported by the ESP32 in the hello message</li>
+    <li><b>esp32BuildWarning</b> &mdash; "ok" or a human-readable warning when the ESP32
+        build is below the minimum required build</li>
   </ul>
 </ul>
 =end html

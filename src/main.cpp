@@ -65,6 +65,7 @@ void checkAndReconnectBLE();
 void checkAndReconnectWiFi();
 void monitorHeap();
 void printStatus();
+void checkCasambiVersions(const NetworkConfig& cfg);
 
 // ============================================================================
 // SETUP
@@ -104,6 +105,8 @@ void setup() {
             Serial.printf("Units: %d\n", networkConfig.units.size());
             Serial.printf("Groups: %d\n", networkConfig.groups.size());
             Serial.printf("Scenes: %d\n", networkConfig.scenes.size());
+
+            checkCasambiVersions(networkConfig);
 
             // Load debug settings
             bleDebugEnabled     = networkConfig.bleDebugEnabled;
@@ -437,6 +440,40 @@ void printStatus() {
 }
 
 // ============================================================================
+// VERSION CHECKS
+// ============================================================================
+
+// Warn on boot/refresh if protocol version or any unit firmware is below minimum.
+// Unit firmware format: "Evolution/48.2" — we parse the numeric part after '/'.
+void checkCasambiVersions(const NetworkConfig& cfg) {
+    // Check Casambi BLE protocol version
+    if (cfg.protocolVersion < MIN_PROTOCOL_VERSION) {
+        Serial.printf("*** WARNING: Casambi protocol v%d is below minimum v%d! ***\n",
+                      cfg.protocolVersion, MIN_PROTOCOL_VERSION);
+        Serial.println("*** Update Casambi firmware or check network configuration. ***");
+    } else if (cfg.protocolVersion > MAX_PROTOCOL_VERSION) {
+        Serial.printf("*** WARNING: Casambi protocol v%d exceeds maximum v%d — may be incompatible! ***\n",
+                      cfg.protocolVersion, MAX_PROTOCOL_VERSION);
+    }
+
+    // Check unit firmware versions
+    for (const auto& unit : cfg.units) {
+        if (unit.firmware.isEmpty()) continue;
+
+        // Parse "Evolution/48.2" — find '/' and take the part after it
+        int slashPos = unit.firmware.indexOf('/');
+        if (slashPos < 0) continue;
+
+        float fwVersion = unit.firmware.substring(slashPos + 1).toFloat();
+        if (fwVersion > 0.0f && fwVersion < MIN_UNIT_FIRMWARE_VERSION) {
+            Serial.printf("*** WARNING: Unit '%s' (id=%d) firmware %.1f < minimum %.1f ***\n",
+                          unit.name.c_str(), unit.deviceId,
+                          fwVersion, MIN_UNIT_FIRMWARE_VERSION);
+        }
+    }
+}
+
+// ============================================================================
 // BLE SCANNING (with memory leak fix)
 // ============================================================================
 
@@ -672,6 +709,9 @@ void handleCommand(const String& cmd) {
             Serial.printf("Units: %d\n", networkConfig.units.size());
             Serial.printf("Groups: %d\n", networkConfig.groups.size());
             Serial.printf("Scenes: %d\n", networkConfig.scenes.size());
+
+            checkCasambiVersions(networkConfig);
+
             Serial.println("\nConfiguration updated successfully!");
             Serial.println("Use 'list units/groups/scenes' to see changes.\n");
         }

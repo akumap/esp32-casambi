@@ -24,6 +24,12 @@
 #define MIN_PROTOCOL_VERSION      10
 #define MAX_PROTOCOL_VERSION      10
 
+// ESP32 firmware build number — increment on each release
+#define FIRMWARE_BUILD            1
+
+// Minimum Casambi unit firmware version (the numeric part of "Evolution/X.Y")
+#define MIN_UNIT_FIRMWARE_VERSION 48.0f
+
 // Device Name
 #define DEVICE_NAME               "ESP32 Casambi"
 

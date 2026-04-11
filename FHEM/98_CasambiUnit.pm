@@ -19,6 +19,11 @@ use JSON;
 # hello message and stored as attributes.  setList, webCmd, genericDeviceType
 # and homebridgeMapping are regenerated on each gateway (re-)connect.
 #
+# When a unit has vertical capability a companion CasambiVertical device
+# (named <unitName>_vertical) is auto-created.  The companion receives its
+# state from CasambiUnit_UpdateFromState and exposes a dedicated dimmer
+# interface for homebridge.
+#
 # Commands accepted by SetFn:
 #   on / off
 #   brightness  0-100
@@ -180,12 +185,21 @@ sub CasambiUnit_UpdateFromState {
 
     readingsEndUpdate($hash, 1);
     $hash->{UPDATING_STATUS} = 0;
+
+    # Forward vertical state to companion CasambiVertical device
+    if (defined $unit->{vertical}) {
+        my $vName = $hash->{NAME} . "_vertical";
+        if ($defs{$vName} && ($defs{$vName}->{TYPE} // "") eq "CasambiVertical") {
+            CasambiVertical_UpdateFromParent($defs{$vName}, $unit->{vertical}, $on);
+        }
+    }
 }
 
 # ============================================================================
 # SetCapabilities — called by CasambiGW on each hello.
 # Updates capability-derived attributes: cctMin/Max, setList, webCmd,
 # genericDeviceType, homebridgeMapping.
+# Auto-creates a CasambiVertical companion device when hasVertical is set.
 # ============================================================================
 
 sub CasambiUnit_SetCapabilities {
@@ -218,39 +232,191 @@ sub CasambiUnit_SetCapabilities {
     # --- genericDeviceType ---
     _CasambiUnit_SetAttrIfChanged($name, "genericDeviceType", "light");
 
-    # --- homebridgeMapping ---
-    # Primary Lightbulb service: on/off + brightness
-    my $hbMap = "On=state,valueOff=off,cmdOff=off,cmdOn=on"
-              . " brightness=brightness,homekit=Brightness,cmd=brightness"
-              .   ",minValue=0,maxValue=100";
+    # --- homebridgeMapping (homebridge-platform-fhem format) ---
+    # on/off: state reading carries "on"/"off" strings → values map
+    # brightness: 1-100 (homebridge sends 0 as off; minValue=1 avoids accidental off)
+    my $hbMap = "On=state,values=on:1;;off:0"
+              . " Brightness=brightness,minValue=1,maxValue=100";
 
     if ($hasCCT) {
         # FHEM stores Kelvin; HomeKit expects Mired.
-        # expr converts the Kelvin reading → Mired for HomeKit display.
-        # SetFn accepts Mired input from homebridge and converts back to Kelvin.
+        # expr converts the Kelvin reading → Mired for HomeKit.
+        # SetFn accepts Mired (<500) from homebridge and converts back to Kelvin.
         my $minMired = int(1000000 / $cctMax);   # higher K → lower Mired
         my $maxMired = int(1000000 / $cctMin);
-        $hbMap .= " colorTemperature=colorTemp,homekit=ColorTemperature"
-               .  ",cmd=colorTemp,minValue=$minMired,maxValue=$maxMired"
+        $hbMap .= " ColorTemperature=colorTemp"
+               .  ",minValue=$minMired,maxValue=$maxMired"
                .  ",expr=int(1000000/\$val)";
     }
 
-    if ($hasVertical) {
-        # Second Lightbulb service for vertical light distribution control.
-        # Named "<devicename>_vertical" so HomeKit shows it as a sibling accessory.
-        my $vName = "${name}_vertical";
-        $hbMap .= " On_v=state,valueOff=off,cmdOff=off,cmdOn=on"
-               .  ",service_name=$vName"
-               .  " brightness_v=vertical,homekit=Brightness,cmd=vertical"
-               .  ",minValue=0,maxValue=255,service_name=$vName";
-    }
-
     _CasambiUnit_SetAttrIfChanged($name, "homebridgeMapping", $hbMap);
+
+    # --- Companion CasambiVertical device ---
+    if ($hasVertical) {
+        my $vName = "${name}_vertical";
+        unless ($defs{$vName}) {
+            Log3 $name, 3, "$name: Auto-creating CasambiVertical '$vName'";
+            fhem("define $vName CasambiVertical $name");
+        }
+    }
 }
 
 # Set a FHEM attribute only when the value actually changed
 # (avoids spurious attr-change events on every gateway reconnect)
 sub _CasambiUnit_SetAttrIfChanged {
+    my ($name, $attr, $newVal) = @_;
+    return if AttrVal($name, $attr, "") eq $newVal;
+    CommandAttr(undef, "$name $attr $newVal");
+}
+
+1;
+
+# ============================================================================
+# ============================================================================
+# CasambiVertical — companion dimmer device for vertical light distribution
+#
+# Auto-created by CasambiUnit_SetCapabilities when a unit has vertical
+# capability.  It maps the 0-255 vertical value to a 0-100% dimmer pct
+# reading so that homebridge-platform-fhem can expose it as a second
+# Lightbulb accessory.
+#
+# Direction convention (matches Casambi):
+#   pct  0% → vertical   0  (light fully directed upward)
+#   pct 100% → vertical 255  (light fully directed downward)
+#
+# The device is named <parentUnit>_vertical.
+# It does NOT have its own webCmd — it is driven from the parent unit's
+# FHEM WebUI via the "vertical" slider or via homebridge.
+#
+# Define:
+#   define <name> CasambiVertical <parentUnitName>
+# ============================================================================
+
+package main;
+
+sub CasambiVertical_Initialize {
+    my $hash = shift;
+    $hash->{DefFn}    = "CasambiVertical_Define";
+    $hash->{UndefFn}  = "CasambiVertical_Undefine";
+    $hash->{SetFn}    = "CasambiVertical_Set";
+    $hash->{AttrList} = $readingFnAttributes;
+    return undef;
+}
+
+sub CasambiVertical_Define {
+    my ($hash, $def) = @_;
+    my @args = split /\s+/, $def;
+    return "Usage: define <name> CasambiVertical <parentUnitName>" if @args < 3;
+
+    my ($name, undef, $parentName) = @args;
+    $hash->{PARENT_NAME}     = $parentName;
+    $hash->{UPDATING_STATUS} = 0;
+
+    _CasambiVertical_SetAttrIfChanged($name, "genericDeviceType", "dimmer");
+    _CasambiVertical_SetAttrIfChanged($name, "homebridgeMapping",
+        "On=state,values=on:1;;off:0 Brightness=pct,minValue=0,maxValue=100");
+
+    readingsSingleUpdate($hash, "state", "initialized", 1);
+    return undef;
+}
+
+sub CasambiVertical_Undefine {
+    my ($hash, $name) = @_;
+    RemoveInternalTimer($hash);
+    return undef;
+}
+
+# ============================================================================
+# SetFn — pct command (0-100%) maps to vertical 0-255 on the parent unit
+# ============================================================================
+
+sub CasambiVertical_Set {
+    my ($hash, $name, $cmd, @args) = @_;
+
+    return undef if $hash->{UPDATING_STATUS};
+
+    if ($cmd eq "?") {
+        return "Unknown argument $cmd, choose one of on:noArg off:noArg pct:slider,0,1,100";
+    }
+
+    my $parentName = $hash->{PARENT_NAME};
+    my $parentHash = $defs{$parentName};
+    return "Parent unit '$parentName' not found" unless $parentHash;
+
+    my $gwName = $parentHash->{GW_NAME} // return "Parent unit has no GW_NAME";
+    my $unitId = ReadingsVal($parentName, "casambiId", "");
+    return "No casambiId on parent unit yet" unless $unitId;
+
+    if ($cmd eq "on") {
+        # Restore last pct or default to 50%
+        my $lastPct = ReadingsVal($name, "pct", 50);
+        $lastPct = 50 if $lastPct == 0;
+        my $vertical = int($lastPct * 2.55 + 0.5);
+        $vertical = 255 if $vertical > 255;
+        CasambiGW_SendCommand($gwName, $unitId, "vertical", $vertical);
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "pct",   $lastPct);
+        readingsBulkUpdate($hash, "state", "on");
+        readingsEndUpdate($hash, 1);
+
+    } elsif ($cmd eq "off") {
+        CasambiGW_SendCommand($gwName, $unitId, "vertical", 0);
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "pct",   0);
+        readingsBulkUpdate($hash, "state", "off");
+        readingsEndUpdate($hash, 1);
+
+    } elsif ($cmd eq "pct") {
+        my $pct = int($args[0] // 0);
+        $pct = 0   if $pct < 0;
+        $pct = 100 if $pct > 100;
+        my $vertical = int($pct * 2.55 + 0.5);
+        $vertical = 255 if $vertical > 255;
+        _CasambiVertical_Debounce($hash, sub {
+            CasambiGW_SendCommand($gwName, $unitId, "vertical", $vertical);
+        });
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "pct",   $pct);
+        readingsBulkUpdate($hash, "state", $pct > 0 ? "on" : "off");
+        readingsEndUpdate($hash, 1);
+
+    } else {
+        return "Unknown command '$cmd', choose one of on:noArg off:noArg pct:slider,0,1,100";
+    }
+
+    return undef;
+}
+
+# ============================================================================
+# UpdateFromParent — called by CasambiUnit_UpdateFromState
+# vertical: raw 0-255 from ESP32;  pct: 0-100 for homebridge
+# ============================================================================
+
+sub CasambiVertical_UpdateFromParent {
+    my ($hash, $vertical, $parentOn) = @_;
+
+    $hash->{UPDATING_STATUS} = 1;
+
+    my $pct = int($vertical / 2.55 + 0.5);
+    $pct = 100 if $pct > 100;
+
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "pct",      $pct);
+    readingsBulkUpdate($hash, "vertical", $vertical);
+    readingsBulkUpdate($hash, "state",    $pct > 0 ? "on" : "off");
+    readingsEndUpdate($hash, 1);
+
+    $hash->{UPDATING_STATUS} = 0;
+}
+
+sub _CasambiVertical_Debounce {
+    my ($hash, $action) = @_;
+    my $key = "debounce_" . $hash->{NAME} . "_vertical";
+    RemoveInternalTimer($key);
+    InternalTimer(gettimeofday() + 0.3, $action, $key);
+}
+
+sub _CasambiVertical_SetAttrIfChanged {
     my ($name, $attr, $newVal) = @_;
     return if AttrVal($name, $attr, "") eq $newVal;
     CommandAttr(undef, "$name $attr $newVal");
@@ -299,14 +465,57 @@ sub _CasambiUnit_SetAttrIfChanged {
   <br>
   <b>Managed attributes</b> (auto-set by CasambiGW, updated on each reconnect)
   <ul>
-    <li><b>casambiMac</b> BLE MAC — stable hardware identifier, set once on creation</li>
+    <li><b>casambiMac</b> BLE MAC &mdash; stable hardware identifier, set once on creation</li>
     <li><b>cctMin / cctMax</b> CCT range in Kelvin from the Casambi network config</li>
     <li><b>setList</b> capability-dependent set command list</li>
     <li><b>webCmd</b> capability-dependent WebUI quick buttons</li>
     <li><b>genericDeviceType</b> always "light"</li>
-    <li><b>homebridgeMapping</b> HomeKit mapping incl. K→Mired conversion for colorTemp
-        and optional second Lightbulb service for vertical</li>
+    <li><b>homebridgeMapping</b> HomeKit mapping incl. K&rarr;Mired conversion for colorTemp</li>
+  </ul>
+  <br>
+  Units with vertical capability automatically get a companion
+  <a href="#CasambiVertical">CasambiVertical</a> device (named
+  <em>&lt;unitName&gt;_vertical</em>).
+</ul>
+
+<a name="CasambiVertical"></a>
+<h3>CasambiVertical</h3>
+<ul>
+  Companion dimmer device for the vertical light-distribution channel of a
+  <a href="#CasambiUnit">CasambiUnit</a>.  Auto-created by the parent unit;
+  should not be defined manually.
+  <br><br>
+  The vertical raw value (0-255) is mapped to a percentage (0-100%) so that
+  homebridge-platform-fhem can expose it as a Lightbulb Brightness control.
+  <ul>
+    <li>pct &nbsp;0% &rarr; vertical &nbsp;&nbsp;0 (light fully upward)</li>
+    <li>pct 100% &rarr; vertical 255 (light fully downward)</li>
+  </ul>
+  <br>
+  <b>Define</b><br>
+  <code>define &lt;name&gt; CasambiVertical &lt;parentUnitName&gt;</code>
+  <br><br>
+  <b>Set commands</b>
+  <ul>
+    <li><b>on</b> &mdash; restores last non-zero pct (defaults to 50%)</li>
+    <li><b>off</b> &mdash; sets pct to 0 (vertical = 0, light fully upward)</li>
+    <li><b>pct</b> 0-100</li>
+  </ul>
+  <br>
+  <b>Readings</b>
+  <ul>
+    <li><b>state</b> on|off|initialized</li>
+    <li><b>pct</b> 0-100 (percentage, used by homebridge)</li>
+    <li><b>vertical</b> 0-255 (raw Casambi value)</li>
+  </ul>
+  <br>
+  <b>Managed attributes</b>
+  <ul>
+    <li><b>genericDeviceType</b> always "dimmer"</li>
+    <li><b>homebridgeMapping</b>
+        <code>On=state,values=on:1;;off:0 Brightness=pct,minValue=0,maxValue=100</code></li>
   </ul>
 </ul>
+
 =end html
 =cut

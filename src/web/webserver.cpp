@@ -100,6 +100,7 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
 String CasambiWebServer::_buildHelloMessage() const {
     JsonDocument doc;
     doc["type"] = "hello";
+    doc["build"] = FIRMWARE_BUILD;
     doc["ble_connected"] = _client->isAuthenticated();
 
     JsonArray units = doc["units"].to<JsonArray>();
