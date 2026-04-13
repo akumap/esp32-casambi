@@ -265,9 +265,12 @@ sub CasambiUnit_SetCapabilities {
     # --- Companion CasambiVertical device ---
     if ($hasVertical) {
         my $vName = "${name}_vertical";
-        unless ($defs{$vName}) {
-            Log3 $name, 3, "$name: Auto-creating CasambiVertical '$vName'";
-            fhem("define $vName CasambiVertical $name");
+        if ($defs{$vName}) {
+            Log3 $name, 1, "$name: CasambiVertical '$vName' already exists (type=" . ($defs{$vName}{TYPE}//"?") . ")";
+        } else {
+            Log3 $name, 1, "$name: Creating CasambiVertical '$vName'";
+            my $ret = fhem("define $vName CasambiVertical $name");
+            Log3 $name, 1, "$name: define '$vName' result: " . (defined $ret ? "'$ret'" : "ok");
         }
     }
 }
