@@ -41,7 +41,10 @@ sub CasambiUnit_Initialize {
 
     # CasambiVertical lives in the same file; FHEM only auto-calls the
     # Initialize function that matches the filename, so we register it here.
+    # Setting LOADED=1 prevents FHEM from searching for a _CasambiVertical.pm
+    # file when a device of this type is defined.
     CasambiVertical_Initialize($modules{CasambiVertical} //= {});
+    $modules{CasambiVertical}{LOADED} = 1;
 
     return undef;
 }
