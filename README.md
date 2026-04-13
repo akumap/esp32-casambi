@@ -593,6 +593,25 @@ pio run -e debug -t upload        # Debug build with verbose BLE logging
 
 **Note:** After structural changes to the config format, run `clearconfig` + `setup` on the ESP32 to repopulate the configuration with new fields.
 
+### Firmware build number
+
+The `esp32Build` reading reported by the gateway is a monotonically increasing
+integer injected at compile time by `scripts/build_number.py` (a PlatformIO
+pre-build script).  It counts the total number of commits reachable from
+`origin/main` via `git rev-list --count origin/main`.
+
+To get a non-zero build number after pulling updates:
+
+```bash
+git pull
+pio run -e devkit-v4 -t upload
+```
+
+The pre-build script writes a `-DFIRMWARE_BUILD=<n>` compiler flag that is
+picked up by `src/web/webserver.cpp`.  Because SCons tracks source-file
+timestamps rather than flag changes, `webserver.cpp` contains a comment that
+is updated with each release to force a recompile after `git pull`.
+
 -----
 
 ## FHEM Integration
@@ -612,7 +631,7 @@ WebSocket /ws  ──push──►  CasambiGW  (DevIo gateway device)
                                │  unit_state → route to child device
                                └──► CasambiUnit_UpdateFromState(Casambi_*)
                                          │  vertical → CasambiVertical_UpdateFromParent
-                                         └──► Casambi_*_vertical  (companion dimmer)
+                                         └──► Casambi_*_vertical  (companion light)
 
 REST /api/units/*  ◄──POST──  CasambiGW_SendCommand
                                called from CasambiUnit SetFn
@@ -637,7 +656,7 @@ reload 98_CasambiUnit
 ```
 
 `98_CasambiUnit.pm` contains two module definitions: `CasambiUnit` (one per
-luminaire) and `CasambiVertical` (auto-created companion dimmer for units with
+luminaire) and `CasambiVertical` (auto-created companion light for units with
 vertical light distribution).  No separate file is needed for `CasambiVertical`.
 
 ### Gateway device
@@ -680,6 +699,7 @@ and require explicit confirmation:
 ```
 set MyCasambi applyChanges    # create new / remove deleted unit devices
 set MyCasambi discardChanges  # ignore the pending changes
+set MyCasambi reconnect       # close and reopen the WebSocket connection
 ```
 
 This prevents unintended device creation or deletion caused by a transient
@@ -737,16 +757,22 @@ they are only written when the value actually changes:
 | `setList` | Capability-dependent set command list |
 | `webCmd` | Quick-access buttons in the FHEM WebUI |
 | `genericDeviceType` | Always `light` |
-| `homebridgeMapping` | HomeKit mapping: `On=state,values=on:1;;off:0 Brightness=brightness,minValue=1,maxValue=100`; CCT units additionally include `ColorTemperature=colorTemp,...,expr=int(1000000/$val)` |
+| `homebridgeMapping` | HomeKit mapping in classic homebridge-platform-fhem format: `On=state,valueOff=off,cmdOff=off,cmdOn=on Brightness=brightness,...`; CCT units additionally include `ColorTemperature=colorTemp,...,minValue=140,maxValue=500,expr=int(1000000/$val)`. These attributes are refreshed on every (re-)connect so they stay in sync after firmware or module updates. |
 
 ### HomeKit / Homebridge integration
 
 `colorTemp` is stored in Kelvin (human-readable in the FHEM WebUI).
-The generated `homebridgeMapping` uses the
+The generated `homebridgeMapping` uses the classic
 [homebridge-platform-fhem](https://github.com/domos4/homebridge-platform-fhem)
-format.  It includes an `expr=int(1000000/$val)` conversion so HomeKit
+format with `cmdOn`/`cmdOff`/`valueOff` fields for reliable on/off control.
+It includes an `expr=int(1000000/$val)` conversion so HomeKit
 receives the expected Mired value.  Incoming Mired commands from Homebridge
 (values < 500) are automatically converted back to Kelvin by the SetFn.
+
+The ColorTemperature slider is mapped to the full standard HomeKit range
+(**140–500 Mired**, i.e. ~2000–7143 K) regardless of the unit's actual CCT
+range.  The SetFn clamps commands to the unit's `cctMin`/`cctMax` limits, so
+the slider always fills the full width in the Home app.
 
 Vertical light distribution is exposed via a separate `CasambiVertical`
 companion device (not as a second service on the main unit).
@@ -770,8 +796,11 @@ Direction convention:
 
 Set commands: `on`, `off`, `pct 0-100`.
 
-`genericDeviceType` is set to `dimmer`; `homebridgeMapping` is set to
-`On=state,values=on:1;;off:0 Brightness=pct,minValue=0,maxValue=100`.
+`genericDeviceType` is set to `light`; `homebridgeMapping` is set to
+`On=state,valueOff=off,cmdOff=off,cmdOn=on Brightness=pct,homekit=Brightness,cmd=pct,minValue=0,maxValue=100`.
+
+Both attributes are refreshed on every (re-)connect alongside the parent unit
+so they stay current after module updates.
 
 The companion device is deleted automatically alongside the parent unit
 when `set <gw> applyChanges` removes a unit.
