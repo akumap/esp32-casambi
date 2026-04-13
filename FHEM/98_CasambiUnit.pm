@@ -265,13 +265,18 @@ sub CasambiUnit_SetCapabilities {
     # --- Companion CasambiVertical device ---
     if ($hasVertical) {
         my $vName = "${name}_vertical";
-        if ($defs{$vName}) {
-            Log3 $name, 1, "$name: CasambiVertical '$vName' already exists (type=" . ($defs{$vName}{TYPE}//"?") . ")";
-        } else {
-            Log3 $name, 1, "$name: Creating CasambiVertical '$vName'";
-            my $ret = fhem("define $vName CasambiVertical $name");
-            Log3 $name, 1, "$name: define '$vName' result: " . (defined $ret ? "'$ret'" : "ok");
+        unless ($defs{$vName}) {
+            Log3 $name, 3, "$name: Auto-creating CasambiVertical '$vName'";
+            fhem("define $vName CasambiVertical $name");
         }
+        # Keep capability attributes in sync on every reconnect
+        # (handles devices created before an attribute was added)
+        _CasambiUnit_SetAttrIfChanged($vName, "genericDeviceType", "light");
+        _CasambiUnit_SetAttrIfChanged($vName, "setList",
+            "on:noArg off:noArg pct:slider,0,1,100");
+        _CasambiUnit_SetAttrIfChanged($vName, "homebridgeMapping",
+            "On=state,valueOff=off,cmdOff=off,cmdOn=on"
+          . " Brightness=pct,homekit=Brightness,cmd=pct,minValue=0,maxValue=100");
     }
 }
 
@@ -326,7 +331,7 @@ sub CasambiVertical_Define {
     $hash->{PARENT_NAME}     = $parentName;
     $hash->{UPDATING_STATUS} = 0;
 
-    _CasambiVertical_SetAttrIfChanged($name, "genericDeviceType", "dimmer");
+    _CasambiVertical_SetAttrIfChanged($name, "genericDeviceType", "light");
     _CasambiVertical_SetAttrIfChanged($name, "setList",
         "on:noArg off:noArg pct:slider,0,1,100");
     _CasambiVertical_SetAttrIfChanged($name, "homebridgeMapping",
