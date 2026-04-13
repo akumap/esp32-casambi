@@ -252,11 +252,12 @@ sub CasambiUnit_SetCapabilities {
     if ($hasCCT) {
         # FHEM stores Kelvin; HomeKit expects Mired.
         # expr converts Kelvin → Mired for HomeKit display.
-        # SetFn accepts Mired (<500) from homebridge and converts back to Kelvin.
-        my $minMired = int(1000000 / $cctMax);   # higher K → lower Mired
-        my $maxMired = int(1000000 / $cctMin);
+        # SetFn accepts Mired (<500) from homebridge and clamps to cctMin/Max.
+        # Use the full HomeKit standard range (140-500 Mired = ~7100-2000K) so
+        # HomeKit renders the full colour-temperature picker; out-of-range values
+        # are clamped to the device limits inside SetFn.
         $hbMap .= " ColorTemperature=colorTemp,homekit=ColorTemperature"
-               .  ",cmd=colorTemp,minValue=$minMired,maxValue=$maxMired"
+               .  ",cmd=colorTemp,minValue=140,maxValue=500"
                .  ",expr=int(1000000/\$val)";
     }
 
