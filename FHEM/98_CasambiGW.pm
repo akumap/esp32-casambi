@@ -544,7 +544,7 @@ sub CasambiGW_SendCommand {
         $json = "{\"kelvin\":$value}";
     } elsif ($cmd eq "vertical") {
         $url  = "http://$ip:$port/api/units/$unitId/vertical";
-        $json = "{\"vertical\":$value}";
+        $json = "{\"value\":$value}";
     } else {
         return;
     }

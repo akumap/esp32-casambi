@@ -38,6 +38,11 @@ sub CasambiUnit_Initialize {
     $hash->{SetFn}    = "CasambiUnit_Set";
     $hash->{AttrList} = "casambiMac cctMin cctMax setList "
                       . $readingFnAttributes;
+
+    # CasambiVertical lives in the same file; FHEM only auto-calls the
+    # Initialize function that matches the filename, so we register it here.
+    CasambiVertical_Initialize($modules{CasambiVertical} //= {});
+
     return undef;
 }
 
@@ -232,20 +237,23 @@ sub CasambiUnit_SetCapabilities {
     # --- genericDeviceType ---
     _CasambiUnit_SetAttrIfChanged($name, "genericDeviceType", "light");
 
-    # --- homebridgeMapping (homebridge-platform-fhem format) ---
-    # on/off: state reading carries "on"/"off" strings → values map
-    # brightness: 1-100 (homebridge sends 0 as off; minValue=1 avoids accidental off)
-    my $hbMap = "On=state,values=on:1;;off:0"
-              . " Brightness=brightness,minValue=1,maxValue=100";
+    # --- homebridgeMapping (homebridge-platform-fhem classic format) ---
+    # cmdOn/cmdOff tell homebridge which set-command to use for the On
+    # characteristic; valueOff is the FHEM reading value that means "off".
+    # Brightness uses homekit= to name the HomeKit characteristic and cmd=
+    # for the FHEM set command.
+    my $hbMap = "On=state,valueOff=off,cmdOff=off,cmdOn=on"
+              . " Brightness=brightness,homekit=Brightness,cmd=brightness"
+              .   ",minValue=0,maxValue=100";
 
     if ($hasCCT) {
         # FHEM stores Kelvin; HomeKit expects Mired.
-        # expr converts the Kelvin reading → Mired for HomeKit.
+        # expr converts Kelvin → Mired for HomeKit display.
         # SetFn accepts Mired (<500) from homebridge and converts back to Kelvin.
         my $minMired = int(1000000 / $cctMax);   # higher K → lower Mired
         my $maxMired = int(1000000 / $cctMin);
-        $hbMap .= " ColorTemperature=colorTemp"
-               .  ",minValue=$minMired,maxValue=$maxMired"
+        $hbMap .= " ColorTemperature=colorTemp,homekit=ColorTemperature"
+               .  ",cmd=colorTemp,minValue=$minMired,maxValue=$maxMired"
                .  ",expr=int(1000000/\$val)";
     }
 
@@ -299,7 +307,7 @@ sub CasambiVertical_Initialize {
     $hash->{DefFn}    = "CasambiVertical_Define";
     $hash->{UndefFn}  = "CasambiVertical_Undefine";
     $hash->{SetFn}    = "CasambiVertical_Set";
-    $hash->{AttrList} = $readingFnAttributes;
+    $hash->{AttrList} = "setList " . $readingFnAttributes;
     return undef;
 }
 
@@ -313,8 +321,11 @@ sub CasambiVertical_Define {
     $hash->{UPDATING_STATUS} = 0;
 
     _CasambiVertical_SetAttrIfChanged($name, "genericDeviceType", "dimmer");
+    _CasambiVertical_SetAttrIfChanged($name, "setList",
+        "on:noArg off:noArg pct:slider,0,1,100");
     _CasambiVertical_SetAttrIfChanged($name, "homebridgeMapping",
-        "On=state,values=on:1;;off:0 Brightness=pct,minValue=0,maxValue=100");
+        "On=state,valueOff=off,cmdOff=off,cmdOn=on"
+      . " Brightness=pct,homekit=Brightness,cmd=pct,minValue=0,maxValue=100");
 
     readingsSingleUpdate($hash, "state", "initialized", 1);
     return undef;
