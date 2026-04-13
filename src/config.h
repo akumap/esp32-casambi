@@ -24,6 +24,17 @@
 #define MIN_PROTOCOL_VERSION      10
 #define MAX_PROTOCOL_VERSION      10
 
+// ESP32 firmware build number.
+// Normally injected at compile time by scripts/build_number.py
+// (git rev-list --count origin/main).  The fallback below is used only
+// when building outside of PlatformIO (e.g. Arduino IDE) or without git.
+#ifndef FIRMWARE_BUILD
+#define FIRMWARE_BUILD            0
+#endif
+
+// Minimum Casambi unit firmware version (the numeric part of "Evolution/X.Y")
+#define MIN_UNIT_FIRMWARE_VERSION 48.0f
+
 // Device Name
 #define DEVICE_NAME               "ESP32 Casambi"
 
