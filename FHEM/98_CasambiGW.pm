@@ -97,7 +97,16 @@ sub CasambiGW_Set {
 
     if ($cmd eq "?") {
         return "Unknown argument $cmd, choose one of "
-             . "applyChanges:noArg discardChanges:noArg";
+             . "applyChanges:noArg discardChanges:noArg reconnect:noArg";
+    }
+
+    if ($cmd eq "reconnect") {
+        Log3 $name, 3, "$name: reconnect requested";
+        $hash->{wsState} = "disconnected";
+        RemoveInternalTimer($hash, "CasambiGW_Ping");
+        DevIo_CloseDev($hash);
+        DevIo_OpenDev($hash, 0, "CasambiGW_WsHandshake");
+        return undef;
     }
 
     if ($cmd eq "applyChanges") {
