@@ -265,7 +265,13 @@ sub CasambiGW_Ping {
 
 sub _CasambiGW_WsSendPong {
     my ($hash, $payload) = @_;
-    my $len   = length($payload);
+    my $len = length($payload);
+    # RFC 6455 §5.5: control frames must not exceed 125 bytes.
+    # A ping with a larger payload is a protocol violation; drop it silently.
+    if ($len > 125) {
+        Log3 $hash->{NAME}, 2, "$hash->{NAME}: WS ping payload too large ($len bytes), dropping pong";
+        return;
+    }
     my @mask  = map { int(rand(256)) } 1..4;
     my $mdata = join("", map {
         chr(ord(substr($payload, $_, 1)) ^ $mask[$_ % 4])

@@ -28,6 +28,11 @@ bool webDebugEnabled     = true;
 bool parseDebugEnabled   = false;
 bool heapDebugEnabled    = false;
 
+// Cached WiFi credentials — loaded once at boot and updated by 'wifi set'.
+// Avoids repeated LittleFS reads in the 30 s reconnect loop.
+static WiFiCredentials g_wifiCreds;
+static bool g_wifiCredsLoaded = false;
+
 // BLE scan state
 struct ScannedDevice {
     String address;
@@ -167,6 +172,8 @@ void setup() {
             // Connect to WiFi after BLE is initialized
             WiFiCredentials wifiCreds;
             if (ConfigStore::loadWiFiCredentials(wifiCreds)) {
+                g_wifiCreds = wifiCreds;
+                g_wifiCredsLoaded = true;
                 Serial.printf("\nConnecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
                 WiFi.mode(WIFI_STA);
                 WiFi.setAutoReconnect(true);  // Enable WiFi auto-reconnect
@@ -326,14 +333,13 @@ void checkAndReconnectWiFi() {
 
     if (WiFi.status() == WL_CONNECTED) return;
 
-    // WiFi is disconnected
-    WiFiCredentials wifiCreds;
-    if (!ConfigStore::loadWiFiCredentials(wifiCreds)) return;
+    // WiFi is disconnected — use cached credentials (avoids repeated LittleFS reads)
+    if (!g_wifiCredsLoaded) return;
 
     Serial.println("WiFi: Connection lost, attempting reconnect...");
     WiFi.disconnect();
     delay(100);
-    WiFi.begin(wifiCreds.ssid.c_str(), wifiCreds.password.c_str());
+    WiFi.begin(g_wifiCreds.ssid.c_str(), g_wifiCreds.password.c_str());
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
@@ -607,6 +613,8 @@ void handleCommand(const String& cmd) {
                     Serial.println("ERROR: No WiFi credentials stored. Use 'wifi set' first.");
                     return;
                 }
+                g_wifiCreds = wifiCreds;
+                g_wifiCredsLoaded = true;
 
                 WiFi.mode(WIFI_STA);
                 WiFi.begin(wifiCreds.ssid.c_str(), wifiCreds.password.c_str());
@@ -822,6 +830,8 @@ void handleCommand(const String& cmd) {
                     newCreds.password = newPassword;
 
                     if (ConfigStore::saveWiFiCredentials(newCreds)) {
+                        g_wifiCreds = newCreds;
+                        g_wifiCredsLoaded = true;
                         Serial.printf("WiFi credentials updated (SSID: %s)\n", newSsid.c_str());
                         Serial.println("Reconnecting to WiFi...");
 

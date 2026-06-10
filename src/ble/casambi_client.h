@@ -185,6 +185,14 @@ private:
     // Thread safety for concurrent command line + web server access
     SemaphoreHandle_t _mutex;
 
+    // Protects _encryption lifetime across main-loop and BLE-stack tasks.
+    // Lock order: always _mutex before _encMutex (never the other way around).
+    SemaphoreHandle_t _encMutex;
+
+    // Cached transport key — set by _performKeyExchange, reused by _authenticate
+    // so deriveTransportKey() is only called once per connection attempt.
+    std::vector<uint8_t> _transportKey;
+
     // Callbacks
     UnitStateCallback _unitStateCallback;
     ConnectionStateCallback _connStateCallback;

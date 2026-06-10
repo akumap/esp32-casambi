@@ -8,6 +8,7 @@
 #include "casambi_client.h"
 #include "packet.h"
 #include <mbedtls/sha256.h>
+#include <esp_task_wdt.h>
 
 // Global instance pointer for static callback
 static CasambiClient* g_clientInstance = nullptr;
@@ -20,7 +21,8 @@ CasambiClient::CasambiClient(NetworkConfig* config)
       _totalReceivedPackets(0), _lastDisconnectReason(DisconnectReason::None),
       _unitStateCallback(nullptr), _connStateCallback(nullptr) {
     memset(_nonce, 0, NONCE_SIZE);
-    _mutex = xSemaphoreCreateMutex();
+    _mutex    = xSemaphoreCreateMutex();
+    _encMutex = xSemaphoreCreateMutex();
     g_clientInstance = this;
 }
 
@@ -29,7 +31,8 @@ CasambiClient::~CasambiClient() {
     disconnect();
     if (_keyExchange) delete _keyExchange;
     if (_encryption) delete _encryption;
-    if (_mutex) vSemaphoreDelete(_mutex);
+    if (_mutex)    vSemaphoreDelete(_mutex);
+    if (_encMutex) vSemaphoreDelete(_encMutex);
 }
 
 bool CasambiClient::connect(const String& address) {
@@ -133,8 +136,17 @@ void CasambiClient::_disconnectInternal(DisconnectReason reason) {
     _lastDisconnectReason = reason;
     _authChar = nullptr;
 
-    if (_encryption) {
-        delete _encryption;
+    // Acquire _encMutex so that any in-flight BLE-task notification handler
+    // finishes before we free the encryption object.
+    if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (_encryption) {
+            delete _encryption;
+            _encryption = nullptr;
+        }
+        xSemaphoreGive(_encMutex);
+    } else {
+        // Timeout: null the pointer so future callbacks see nullptr; object
+        // leaks but the alternative (use-after-free crash) is worse.
         _encryption = nullptr;
     }
 
@@ -386,6 +398,7 @@ bool CasambiClient::_performKeyExchange() {
     unsigned long startTime = millis();
     while (_state == ConnectionState::Connected && millis() - startTime < 5000) {
         delay(10);
+        esp_task_wdt_reset();
     }
 
     if (_state != ConnectionState::KeyExchanged) {
@@ -393,10 +406,15 @@ bool CasambiClient::_performKeyExchange() {
         return false;
     }
 
-    std::vector<uint8_t> transportKey = _keyExchange->deriveTransportKey();
+    // Derive transport key once and cache it; _authenticate reuses _transportKey
+    // so the expensive ECDH computation is only performed once per connection.
+    _transportKey = _keyExchange->deriveTransportKey();
 
-    if (_encryption) delete _encryption;
-    _encryption = new CasambiEncryption(transportKey.data());
+    if (xSemaphoreTake(_encMutex, portMAX_DELAY) == pdTRUE) {
+        if (_encryption) delete _encryption;
+        _encryption = new CasambiEncryption(_transportKey.data());
+        xSemaphoreGive(_encMutex);
+    }
     if (bleDebugEnabled) {
         Serial.println("BLE: Transport key derived, encryption initialized");
     }
@@ -439,12 +457,16 @@ bool CasambiClient::_authenticate() {
         return false;
     }
 
-    std::vector<uint8_t> transportKey = _keyExchange->deriveTransportKey();
+    // Reuse the transport key cached by _performKeyExchange; avoids a second ECDH computation.
+    if (_transportKey.size() < AES_KEY_SIZE) {
+        Serial.println("BLE: Transport key not available");
+        return false;
+    }
 
     uint8_t hashInput[AES_KEY_SIZE + NONCE_SIZE + AES_KEY_SIZE];
     memcpy(hashInput, key->key, AES_KEY_SIZE);
     memcpy(hashInput + AES_KEY_SIZE, _nonce, NONCE_SIZE);
-    memcpy(hashInput + AES_KEY_SIZE + NONCE_SIZE, transportKey.data(), AES_KEY_SIZE);
+    memcpy(hashInput + AES_KEY_SIZE + NONCE_SIZE, _transportKey.data(), AES_KEY_SIZE);
 
     uint8_t authDigest[32];
     mbedtls_sha256_context sha_ctx;
@@ -476,6 +498,7 @@ bool CasambiClient::_authenticate() {
            _state != ConnectionState::Error &&
            millis() - startTime < 5000) {
         delay(10);
+        esp_task_wdt_reset();
     }
 
     if (_state != ConnectionState::Authenticated) {
@@ -545,8 +568,14 @@ std::vector<uint8_t> CasambiClient::_buildOperation(uint8_t opcode, uint16_t tar
 }
 
 void CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uint32_t counter) {
+    if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        Serial.println("BLE: _sendEncryptedPacket: encMutex timeout");
+        return;
+    }
+
     if (!_encryption || !_authChar) {
         Serial.println("BLE: Encryption not initialized");
+        xSemaphoreGive(_encMutex);
         return;
     }
 
@@ -559,6 +588,7 @@ void CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uin
     }
 
     _authChar->writeValue(encrypted.data(), encrypted.size());
+    xSemaphoreGive(_encMutex);
 }
 
 std::vector<uint8_t> CasambiClient::_getNonce(uint32_t counter) {
@@ -653,14 +683,18 @@ void CasambiClient::_handleKeyExchangeNotification(uint8_t* data, size_t len) {
 }
 
 void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
+    if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+
     if (!_encryption) {
         Serial.println("BLE: Encryption not initialized");
+        xSemaphoreGive(_encMutex);
         _setState(ConnectionState::Error, DisconnectReason::InternalError);
         return;
     }
 
     if (len < CMAC_SIZE + 5) {
         Serial.printf("BLE: Auth response too short: %d\n", len);
+        xSemaphoreGive(_encMutex);
         _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
         return;
     }
@@ -677,6 +711,7 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
 
     std::vector<uint8_t> packet(data, data + len);
     std::vector<uint8_t> plaintext = _encryption->decryptAndVerify(packet, nonce, 4);
+    xSemaphoreGive(_encMutex);
 
     if (plaintext.size() == 0) {
         Serial.println("BLE: Auth response decryption failed");
@@ -701,15 +736,19 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
 }
 
 void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
-    if (!_encryption) {
-        Serial.println("BLE: Encryption not initialized");
-        return;
-    }
-
     if (len < CMAC_SIZE + 5) {
         if (bleDebugEnabled) {
             Serial.printf("BLE: Data packet too short: %d bytes\n", len);
         }
+        return;
+    }
+
+    // Hold _encMutex only for the decrypt call so _disconnectInternal cannot
+    // free _encryption while we are using it (use-after-free prevention).
+    if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+
+    if (!_encryption) {
+        xSemaphoreGive(_encMutex);
         return;
     }
 
@@ -721,6 +760,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
     std::vector<uint8_t> packet(data, data + len);
     std::vector<uint8_t> plaintext = _encryption->decryptAndVerify(packet, nonce, 4);
+    xSemaphoreGive(_encMutex);
 
     if (plaintext.size() == 0) {
         if (bleDebugEnabled) {
