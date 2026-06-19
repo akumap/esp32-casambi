@@ -582,13 +582,21 @@ void CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uin
     std::vector<uint8_t> nonce = _getNonce(counter);
     std::vector<uint8_t> encrypted = _encryption->encryptThenMac(packet, nonce);
 
+    // Release the mutex before writeValue: the BLE stack can fire the response
+    // notification synchronously during writeValue (same FreeRTOS tick), so
+    // _handleAuthNotification / _handleDataNotification must be able to acquire
+    // _encMutex immediately — holding it across writeValue would cause a 200 ms
+    // timeout and silently drop the notification.
+    xSemaphoreGive(_encMutex);
+
+    if (encrypted.empty()) return;
+
     if (bleDebugEnabled) {
         Serial.printf("BLE: Sending encrypted packet - counter=%u, plaintext_len=%d, encrypted_len=%d\n",
                       counter, packet.size(), encrypted.size());
     }
 
     _authChar->writeValue(encrypted.data(), encrypted.size());
-    xSemaphoreGive(_encMutex);
 }
 
 std::vector<uint8_t> CasambiClient::_getNonce(uint32_t counter) {
