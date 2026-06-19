@@ -245,6 +245,13 @@ void CasambiWebServer::_setupRoutes() {
             return;
         }
 
+        // Reject oversized bodies to prevent heap exhaustion from aborted connections.
+        // Our JSON payloads are tiny (< 64 bytes); 512 bytes is a generous upper bound.
+        if (total > 512) {
+            _sendJsonError(request, "Request body too large", 413);
+            return;
+        }
+
         String path = request->url();
 
         // Accumulate body for first chunk
@@ -496,15 +503,11 @@ void CasambiWebServer::_handleSceneLevel(AsyncWebServerRequest* request) {
     }
 
     if (!doc["level"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'level' parameter", 400);
+        _sendJsonError(request, "Missing 'level' parameter (0-255)", 400);
         return;
     }
 
     uint8_t level = doc["level"];
-    if (level > 255) {
-        _sendJsonError(request, "Level must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setSceneLevel(sceneId, level);
@@ -608,15 +611,11 @@ void CasambiWebServer::_handleUnitLevel(AsyncWebServerRequest* request) {
     }
 
     if (!doc["level"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'level' parameter", 400);
+        _sendJsonError(request, "Missing 'level' parameter (0-255)", 400);
         return;
     }
 
     uint8_t level = doc["level"];
-    if (level > 255) {
-        _sendJsonError(request, "Level must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setUnitLevel(unitId, level);
@@ -664,18 +663,13 @@ void CasambiWebServer::_handleUnitColor(AsyncWebServerRequest* request) {
     }
 
     if (!doc["r"].is<uint8_t>() || !doc["g"].is<uint8_t>() || !doc["b"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'r', 'g', or 'b' parameter", 400);
+        _sendJsonError(request, "Missing or out-of-range 'r', 'g', or 'b' parameter (0-255)", 400);
         return;
     }
 
     uint8_t r = doc["r"];
     uint8_t g = doc["g"];
     uint8_t b = doc["b"];
-
-    if (r > 255 || g > 255 || b > 255) {
-        _sendJsonError(request, "RGB values must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setUnitColor(unitId, r, g, b);
@@ -783,15 +777,11 @@ void CasambiWebServer::_handleGroupLevel(AsyncWebServerRequest* request) {
     }
 
     if (!doc["level"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'level' parameter", 400);
+        _sendJsonError(request, "Missing 'level' parameter (0-255)", 400);
         return;
     }
 
     uint8_t level = doc["level"];
-    if (level > 255) {
-        _sendJsonError(request, "Level must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setGroupLevel(groupId, level);
@@ -839,15 +829,11 @@ void CasambiWebServer::_handleUnitSlider(AsyncWebServerRequest* request) {
     }
 
     if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter", 400);
+        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
         return;
     }
 
     uint8_t value = doc["value"];
-    if (value > 255) {
-        _sendJsonError(request, "Value must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setUnitSlider(unitId, value);
@@ -895,15 +881,11 @@ void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
     }
 
     if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter", 400);
+        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
         return;
     }
 
     uint8_t value = doc["value"];
-    if (value > 255) {
-        _sendJsonError(request, "Value must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setUnitVertical(unitId, value);
@@ -951,15 +933,11 @@ void CasambiWebServer::_handleGroupSlider(AsyncWebServerRequest* request) {
     }
 
     if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter", 400);
+        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
         return;
     }
 
     uint8_t value = doc["value"];
-    if (value > 255) {
-        _sendJsonError(request, "Value must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setGroupSlider(groupId, value);
@@ -1007,15 +985,11 @@ void CasambiWebServer::_handleGroupVertical(AsyncWebServerRequest* request) {
     }
 
     if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter", 400);
+        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
         return;
     }
 
     uint8_t value = doc["value"];
-    if (value > 255) {
-        _sendJsonError(request, "Value must be 0-255", 400);
-        return;
-    }
 
     // Execute command
     _client->setGroupVertical(groupId, value);
