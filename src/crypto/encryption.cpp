@@ -215,8 +215,8 @@ std::vector<uint8_t> CasambiEncryption::_computeCMAC(const std::vector<uint8_t>&
     uint8_t X[16] = {0};
     size_t num_blocks = (data.size() + 15) / 16;
 
-    // Process all but last block
-    for (size_t i = 0; i < num_blocks - 1; i++) {
+    // Process all but last block (i + 1 < num_blocks avoids size_t underflow when num_blocks == 0)
+    for (size_t i = 0; i + 1 < num_blocks; i++) {
         for (int j = 0; j < 16; j++) {
             X[j] ^= data[i * 16 + j];
         }
