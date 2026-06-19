@@ -428,12 +428,30 @@ bool CasambiClient::_performKeyExchange() {
     memcpy(keyResponse + 33, pubKeyY.data(), 32);
     keyResponse[65] = 0x01;
 
+    uint32_t notifyCountBefore = _totalReceivedPackets;
     _authChar->writeValue(keyResponse, 66);
     if (bleDebugEnabled) {
         Serial.println("BLE: Sent our public key");
     }
 
-    delay(100);
+    // Wait for the device's acknowledgment notification (1-byte ACK for our public key)
+    // before proceeding to auth. Without this, we may send the auth packet while the
+    // device is still processing our public key and it will be ignored.
+    unsigned long ackWaitStart = millis();
+    while (_totalReceivedPackets == notifyCountBefore &&
+           _state != ConnectionState::Error &&
+           millis() - ackWaitStart < 2000) {
+        delay(10);
+        esp_task_wdt_reset();
+    }
+
+    if (bleDebugEnabled) {
+        if (_totalReceivedPackets > notifyCountBefore) {
+            Serial.println("BLE: Public key acknowledged by device");
+        } else {
+            Serial.println("BLE: No ack for public key (proceeding anyway)");
+        }
+    }
 
     if (_state == ConnectionState::Error) {
         Serial.println("BLE: Key exchange error");
