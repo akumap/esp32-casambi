@@ -6,11 +6,6 @@
 #include <ArduinoJson.h>
 
 CasambiAPIClient::CasambiAPIClient() {
-    // The Casambi cloud is reachable only over HTTPS. The ESP32 has no CA
-    // bundle baked in, so without a configured TLS transport every request
-    // fails the handshake and HTTPClient returns -1 (connection refused).
-    // Skip certificate validation so the secure client can connect.
-    _secureClient.setInsecure();
 }
 
 CasambiAPIClient::~CasambiAPIClient() {
@@ -57,7 +52,7 @@ bool CasambiAPIClient::getNetworkId(const String& uuid, String& networkId) {
 
     Serial.printf("API: GET %s\n", url.c_str());
 
-    _http.begin(_secureClient, url);
+    _http.begin(url);
     _http.setTimeout(API_REQUEST_TIMEOUT_MS);
 
     int httpCode = _http.GET();
@@ -111,7 +106,7 @@ bool CasambiAPIClient::createSession(const String& networkId, const String& pass
     String requestBody;
     serializeJson(doc, requestBody);
 
-    _http.begin(_secureClient, url);
+    _http.begin(url);
     _http.setTimeout(API_REQUEST_TIMEOUT_MS);
     _http.addHeader("Content-Type", "application/json");
 
@@ -172,7 +167,7 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
     String requestBody;
     serializeJson(doc, requestBody);
 
-    _http.begin(_secureClient, url);
+    _http.begin(url);
     _http.setTimeout(API_REQUEST_TIMEOUT_MS);
     _http.addHeader("Content-Type", "application/json");
     _http.addHeader("X-Casambi-Session", sessionToken);

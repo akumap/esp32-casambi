@@ -633,7 +633,7 @@ This re-downloads the full configuration from the Casambi cloud while preserving
 ### Setup Issues
 
 - **WiFi won’t connect:** Ensure 2.4 GHz network (ESP32 doesn’t support 5 GHz)
-- **`HTTP -1` during setup/refresh:** TLS connection failure. If it persists, verify the ESP32 has working internet access (DNS + outbound HTTPS) and that the system clock is set; transient drops can also cause it, so retry
+- **`HTTP -1` during setup/refresh:** TLS handshake failure, almost always caused by insufficient contiguous heap for mbedTLS while the BLE stack is active — both `setup` and `refresh` free BLE before downloading from the cloud and restart afterwards. If it still occurs, it usually means too little free heap; reboot and retry
 - **Network not found during scan:** Ensure Casambi devices are powered on and in BLE range
 
 ### Connection Issues
