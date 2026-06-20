@@ -9,6 +9,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "network_config.h"
@@ -70,6 +71,7 @@ public:
 private:
     String _lastError;
     HTTPClient _http;
+    WiFiClientSecure _secureClient;
 
     /**
      * Parse network configuration JSON

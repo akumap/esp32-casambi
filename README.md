@@ -633,7 +633,7 @@ This re-downloads the full configuration from the Casambi cloud while preserving
 ### Setup Issues
 
 - **WiFi won’t connect:** Ensure 2.4 GHz network (ESP32 doesn’t support 5 GHz)
-- **`HTTP -1` during setup:** TLS handshake failure — usually transient, retry
+- **`HTTP -1` during setup/refresh:** TLS connection failure. If it persists, verify the ESP32 has working internet access (DNS + outbound HTTPS) and that the system clock is set; transient drops can also cause it, so retry
 - **Network not found during scan:** Ensure Casambi devices are powered on and in BLE range
 
 ### Connection Issues
