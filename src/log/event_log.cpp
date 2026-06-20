@@ -258,18 +258,22 @@ static void writeEscaped(Print& out, const char* s, size_t len) {
 }
 
 static void writeEntryJson(Print& out, const LogEntry& e) {
-    bool synced = e.timestamp_ms > 0;
-    // For unsynced entries, report uptime as a positive value.
-    int64_t ts = synced ? e.timestamp_ms : -e.timestamp_ms;
+    // For synced entries timestamp_ms is Unix ms (UTC). For pre-sync entries it
+    // is -(uptime_ms); formatting that uptime as epoch yields a 1970 date, which
+    // is how clients can tell an entry was logged before NTP sync (year 1970,
+    // with the time-of-day portion encoding the uptime).
+    int64_t ms     = e.timestamp_ms > 0 ? e.timestamp_ms : -e.timestamp_ms;
+    time_t  secs   = (time_t)(ms / 1000);
+    int     msPart = (int)(ms % 1000);
+    struct tm tmv;
+    gmtime_r(&secs, &tmv);
+    char tsBuf[40];
+    size_t len = strftime(tsBuf, sizeof(tsBuf), "%Y-%m-%dT%H:%M:%S", &tmv);
+    snprintf(tsBuf + len, sizeof(tsBuf) - len, ".%03dZ", msPart);
 
-    char tsBuf[24];
-    snprintf(tsBuf, sizeof(tsBuf), "%lld", (long long)ts);
-
-    out.print("{\"ts\":");
+    out.print("{\"tsUtc\":\"");
     out.print(tsBuf);
-    out.print(",\"synced\":");
-    out.print(synced ? "true" : "false");
-    out.print(",\"boot\":");
+    out.print("\",\"boot\":");
     out.print((unsigned)e.bootId);
     out.print(",\"level\":");
     out.print((unsigned)e.level);

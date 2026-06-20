@@ -334,10 +334,13 @@ loss, low-heap restarts — can be diagnosed after the fact.
 
 ### Timestamps
 
-Times are **Unix milliseconds in UTC**, set via NTP after WiFi connects. Before
-the clock is synced, an entry's timestamp is stored as the device **uptime in
-ms** and flagged with `"synced": false` — combined with the `boot` counter this
-keeps pre-sync entries ordered and attributable to a specific boot. Clients
+Each entry carries a `tsUtc` timestamp: an **ISO 8601 UTC** string
+(`YYYY-MM-DDTHH:MM:SS.mmmZ`), set via NTP after WiFi connects. Before the clock
+is synced, the timestamp is derived from the device **uptime** instead, which
+renders as a **1970** date — so any entry whose year is 1970 was logged before
+NTP sync, with the time-of-day portion encoding the uptime (e.g.
+`1970-01-01T00:00:45.000Z` = 45 s after boot). Combined with the `boot` counter
+this keeps pre-sync entries ordered and attributable to a specific boot. Clients
 (e.g. FHEM) can convert UTC to local time for display.
 
 ### Endpoints
@@ -362,8 +365,7 @@ Each log entry:
 
 ```json
 {
-  "ts": 1781946942000,
-  "synced": true,
+  "tsUtc": "2026-06-20T09:15:42.000Z",
   "boot": 12,
   "level": 4,
   "levelName": "CRITICAL",
@@ -371,8 +373,8 @@ Each log entry:
 }
 ```
 
-Levels: `0=DEBUG 1=INFO 2=WARN 3=ERROR 4=CRITICAL`. When `synced` is `false`,
-`ts` is the device uptime in ms rather than wall-clock time.
+Levels: `0=DEBUG 1=INFO 2=WARN 3=ERROR 4=CRITICAL`. A `tsUtc` with year **1970**
+marks an entry logged before NTP sync (its time-of-day portion is the uptime).
 
 ### Serial commands
 
