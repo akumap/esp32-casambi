@@ -109,6 +109,14 @@ private:
     void _handleGetGroups(AsyncWebServerRequest* request);
     void _handleGetScenes(AsyncWebServerRequest* request);
 
+    // Event-log endpoints
+    void _handleGetLog(AsyncWebServerRequest* request);
+    void _handleDeleteLog(AsyncWebServerRequest* request);
+
+    // NTP / time configuration
+    void _handleGetNtp(AsyncWebServerRequest* request);
+    void _handleSetNtp(AsyncWebServerRequest* request);
+
     // Scene control endpoints
     void _handleSceneOn(AsyncWebServerRequest* request);
     void _handleSceneOff(AsyncWebServerRequest* request);

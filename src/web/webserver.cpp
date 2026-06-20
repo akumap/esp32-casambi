@@ -4,8 +4,11 @@
 
 #include "webserver.h"
 #include "../config.h"
+#include "../log/event_log.h"
+#include "../storage/config_store.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include <time.h>
 
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
 
@@ -177,7 +180,7 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
 void CasambiWebServer::_setupRoutes() {
     // Enable CORS for all endpoints
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
 
     // Status & discovery endpoints
@@ -195,6 +198,19 @@ void CasambiWebServer::_setupRoutes() {
 
     _server->on("/api/scenes", HTTP_GET, [this](AsyncWebServerRequest* request) {
         _handleGetScenes(request);
+    });
+
+    // Event-log endpoints
+    _server->on("/api/log", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        _handleGetLog(request);
+    });
+    _server->on("/api/log", HTTP_DELETE, [this](AsyncWebServerRequest* request) {
+        _handleDeleteLog(request);
+    });
+
+    // NTP / time configuration
+    _server->on("/api/ntp", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        _handleGetNtp(request);
     });
 
     // Reboot endpoint
@@ -283,6 +299,8 @@ void CasambiWebServer::_setupRoutes() {
                 if (path.endsWith("/level")) _handleGroupLevel(request);
                 else if (path.endsWith("/slider")) _handleGroupSlider(request);
                 else if (path.endsWith("/vertical")) _handleGroupVertical(request);
+            } else if (path == "/api/ntp") {
+                _handleSetNtp(request);
             } else {
                 // Unhandled endpoint - cleanup body
                 delete body;
@@ -300,6 +318,10 @@ void CasambiWebServer::_setupRoutes() {
         html += "<li>GET /api/units - List units</li>";
         html += "<li>GET /api/groups - List groups</li>";
         html += "<li>GET /api/scenes - List scenes</li>";
+        html += "<li>GET /api/log[?n=50] - Event log (newest first)</li>";
+        html += "<li>DELETE /api/log - Clear event log</li>";
+        html += "<li>GET /api/ntp - NTP server &amp; time status</li>";
+        html += "<li>POST /api/ntp - Set NTP server ({\"server\":\"...\"})</li>";
         html += "<li>POST /api/scenes/:id/on - Activate scene</li>";
         html += "<li>POST /api/scenes/:id/off - Deactivate scene</li>";
         html += "<li>POST /api/scenes/:id/level - Set scene level</li>";
@@ -329,6 +351,21 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["wifi_rssi"] = WiFi.RSSI();
     doc["uptime_ms"] = millis();
     doc["free_heap"] = ESP.getFreeHeap();
+    doc["boot_count"] = EventLog::bootCount();
+    doc["ntp_server"] = _config->ntpServer;
+
+    // Wall-clock time (UTC). Only meaningful once NTP has synced.
+    time_t nowSec = time(nullptr);
+    bool timeSynced = nowSec >= 1577836800;  // >= 2020-01-01
+    doc["time_synced"] = timeSynced;
+    if (timeSynced) {
+        doc["time_utc_ms"] = (int64_t)nowSec * 1000;
+        char ts[32];
+        struct tm tmUtc;
+        gmtime_r(&nowSec, &tmUtc);
+        strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmUtc);
+        doc["time_utc"] = ts;
+    }
 
 WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
 
@@ -406,6 +443,104 @@ void CasambiWebServer::_handleGetScenes(AsyncWebServerRequest* request) {
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
+}
+
+// ============================================================================
+// Event-Log Endpoints
+// ============================================================================
+
+void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
+    WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
+
+    // Optional ?n=<count> limits to the newest n entries.
+    int n = -1;
+    if (request->hasParam("n")) {
+        n = request->getParam("n")->value().toInt();
+        if (n < 0) n = 0;
+    }
+
+    // Stream the JSON array to avoid building a large String in heap.
+    AsyncResponseStream* response = request->beginResponseStream("application/json");
+    EventLog::writeJson(*response, n);
+    request->send(response);
+}
+
+void CasambiWebServer::_handleDeleteLog(AsyncWebServerRequest* request) {
+    WEB_LOG("Web: DELETE /api/log from %s\n", _getClientIP(request).c_str());
+    EventLog::clear();
+    _sendJsonSuccess(request);
+}
+
+// ============================================================================
+// NTP / Time Configuration Endpoints
+// ============================================================================
+
+void CasambiWebServer::_handleGetNtp(AsyncWebServerRequest* request) {
+    JsonDocument doc;
+    doc["ntp_server"] = _config->ntpServer;
+
+    time_t nowSec = time(nullptr);
+    bool timeSynced = nowSec >= 1577836800;
+    doc["time_synced"] = timeSynced;
+    if (timeSynced) {
+        char ts[32];
+        struct tm tmUtc;
+        gmtime_r(&nowSec, &tmUtc);
+        strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmUtc);
+        doc["time_utc"] = ts;
+    }
+
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+}
+
+void CasambiWebServer::_handleSetNtp(AsyncWebServerRequest* request) {
+    // Parse JSON body (stored as String* in _tempObject by body handler)
+    if (!request->_tempObject) {
+        _sendJsonError(request, "Missing request body", 400);
+        return;
+    }
+
+    String* bodyStr = (String*)request->_tempObject;
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, *bodyStr);
+
+    delete bodyStr;
+    request->_tempObject = nullptr;
+
+    if (error) {
+        _sendJsonError(request, "Invalid JSON", 400);
+        return;
+    }
+
+    if (!doc["server"].is<const char*>()) {
+        _sendJsonError(request, "Missing 'server' parameter", 400);
+        return;
+    }
+
+    String server = doc["server"].as<String>();
+    server.trim();
+    if (server.length() == 0 || server.length() > 64) {
+        _sendJsonError(request, "Invalid 'server' value", 400);
+        return;
+    }
+
+    _config->ntpServer = server;
+    ConfigStore::saveNetworkConfig(*_config);
+
+    // Re-arm NTP immediately (WiFi is up since the web server is running).
+    configTime(0, 0, server.c_str());
+
+    WEB_LOG("Web: NTP server set to %s from %s\n", server.c_str(), _getClientIP(request).c_str());
+    EventLog::log(LOG_INFO, "NTP server changed to %s", server.c_str());
+
+    JsonDocument resp;
+    resp["success"] = true;
+    resp["ntp_server"] = server;
+    String out;
+    serializeJson(resp, out);
+    request->send(200, "application/json", out);
 }
 
 // ============================================================================

@@ -46,6 +46,31 @@
 #define WIFI_FILE_PATH            "/wifi_config.json"
 
 // ============================================================================
+// EVENT LOG
+// ============================================================================
+
+// LittleFS ring-buffer files (ping-pong). Each is filled, then we switch to
+// the other and clear it — so the most recent 1–2 files of history survive.
+#define LOG_DIR                   "/log"
+#define LOG_FILE_A                "/log/log_a.bin"
+#define LOG_FILE_B                "/log/log_b.bin"
+#define LOG_META_FILE             "/log/log_meta.bin"
+
+// Maximum size of each ring-buffer file (bytes). Two files → up to 2× history.
+#define LOG_FILE_MAX_SIZE         16384
+
+// Maximum message length stored per entry (excluding NUL).
+#define LOG_MSG_MAX               120
+
+// Number of "last words" entries kept in RTC NOINIT RAM. These survive
+// WDT/panic/SW resets (not power-off) and are flushed to LittleFS on next boot.
+// Each LogEntry is 132 bytes → 28 × 132 = 3696 bytes (< 4 KB RTC budget).
+#define LOG_RTC_CAPACITY          28
+
+// Default NTP server (configurable at runtime via 'ntp set' / POST /api/ntp).
+#define NTP_SERVER_DEFAULT        "pool.ntp.org"
+
+// ============================================================================
 // CRYPTO CONSTANTS
 // ============================================================================
 

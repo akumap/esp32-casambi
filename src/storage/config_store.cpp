@@ -46,6 +46,9 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     doc["autoConnectEnabled"] = config.autoConnectEnabled;
     doc["autoConnectAddress"] = config.autoConnectAddress;
 
+    // NTP server
+    doc["ntpServer"] = config.ntpServer;
+
     // Debug settings (per category)
     doc["bleDebugEnabled"]     = config.bleDebugEnabled;
     doc["casambiDebugEnabled"] = config.casambiDebugEnabled;
@@ -171,6 +174,9 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
     // Load auto-connect settings (with defaults for backward compatibility)
     config.autoConnectEnabled = doc["autoConnectEnabled"] | false;
     config.autoConnectAddress = doc["autoConnectAddress"] | "";
+
+    // Load NTP server (with default for backward compatibility)
+    config.ntpServer = doc["ntpServer"] | NTP_SERVER_DEFAULT;
 
     // Load debug settings (with defaults for backward compatibility)
     config.bleDebugEnabled     = doc["bleDebugEnabled"]     | false;

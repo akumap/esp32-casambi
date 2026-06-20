@@ -96,6 +96,9 @@ struct NetworkConfig {
     bool autoConnectEnabled;
     String autoConnectAddress;
 
+    // NTP server used for time synchronisation (UTC). Configurable at runtime.
+    String ntpServer;
+
     // Debug settings (per category; persisted so debug on/off is non-destructive)
     bool bleDebugEnabled;
     bool casambiDebugEnabled;
@@ -106,6 +109,7 @@ struct NetworkConfig {
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
                       autoConnectEnabled(true), autoConnectAddress(""),
+                      ntpServer(NTP_SERVER_DEFAULT),
                       bleDebugEnabled(false), casambiDebugEnabled(true),
                       webDebugEnabled(true),
                       parseDebugEnabled(false), heapDebugEnabled(false) {}
