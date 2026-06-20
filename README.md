@@ -626,6 +626,8 @@ refresh
 
 This re-downloads the full configuration from the Casambi cloud while preserving local settings (auto-connect address, per-category debug flags).
 
+The network password entered during `setup` is stored and reused automatically, so `refresh` no longer prompts for it — just press Enter at the password prompt to keep the saved one, or type a new password if it changed in the Casambi app. To free the heap needed for the TLS download, `refresh` releases the BLE connection and restarts the device when it finishes. The password is stored in flash in plaintext, alongside the WiFi password and the BLE keys.
+
 -----
 
 ## Troubleshooting
@@ -633,7 +635,7 @@ This re-downloads the full configuration from the Casambi cloud while preserving
 ### Setup Issues
 
 - **WiFi won’t connect:** Ensure 2.4 GHz network (ESP32 doesn’t support 5 GHz)
-- **`HTTP -1` during setup:** TLS handshake failure — usually transient, retry
+- **`HTTP -1` during setup/refresh:** TLS handshake failure, almost always caused by insufficient contiguous heap for mbedTLS while the BLE stack is active — both `setup` and `refresh` free BLE before downloading from the cloud and restart afterwards. If it still occurs, it usually means too little free heap; reboot and retry
 - **Network not found during scan:** Ensure Casambi devices are powered on and in BLE range
 
 ### Connection Issues

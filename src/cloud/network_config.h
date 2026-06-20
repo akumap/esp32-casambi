@@ -99,6 +99,11 @@ struct NetworkConfig {
     // NTP server used for time synchronisation (UTC). Configurable at runtime.
     String ntpServer;
 
+    // Casambi network password, persisted so `refresh` can reuse it without
+    // re-prompting. Stored alongside the rest of the config in plaintext
+    // (same as the WiFi password and the BLE keyStore keys).
+    String casambiPassword;
+
     // Debug settings (per category; persisted so debug on/off is non-destructive)
     bool bleDebugEnabled;
     bool casambiDebugEnabled;
@@ -109,7 +114,7 @@ struct NetworkConfig {
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
                       autoConnectEnabled(true), autoConnectAddress(""),
-                      ntpServer(NTP_SERVER_DEFAULT),
+                      ntpServer(NTP_SERVER_DEFAULT), casambiPassword(""),
                       bleDebugEnabled(false), casambiDebugEnabled(true),
                       webDebugEnabled(true),
                       parseDebugEnabled(false), heapDebugEnabled(false) {}

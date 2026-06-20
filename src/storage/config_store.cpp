@@ -49,6 +49,9 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     // NTP server
     doc["ntpServer"] = config.ntpServer;
 
+    // Casambi network password (reused by `refresh`)
+    doc["casambiPassword"] = config.casambiPassword;
+
     // Debug settings (per category)
     doc["bleDebugEnabled"]     = config.bleDebugEnabled;
     doc["casambiDebugEnabled"] = config.casambiDebugEnabled;
@@ -177,6 +180,10 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
 
     // Load NTP server (with default for backward compatibility)
     config.ntpServer = doc["ntpServer"] | NTP_SERVER_DEFAULT;
+
+    // Load saved Casambi network password (empty for configs from before
+    // this field existed, in which case `refresh` will prompt for it)
+    config.casambiPassword = doc["casambiPassword"] | "";
 
     // Load debug settings (with defaults for backward compatibility)
     config.bleDebugEnabled     = doc["bleDebugEnabled"]     | false;

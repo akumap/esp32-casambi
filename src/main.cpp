@@ -702,18 +702,27 @@ void handleCommand(const String& cmd) {
                 Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
             }
 
-            // Get network password
-            Serial.println("\nEnter your Casambi network password:");
+            // Get network password: reuse the saved one if present (just press
+            // Enter), or type a new one (e.g. after the password was changed).
+            String password = networkConfig.casambiPassword;
+            if (password.length() > 0) {
+                Serial.println("\nUsing saved network password.");
+                Serial.println("Press Enter to keep it, or type a new password:");
+            } else {
+                Serial.println("\nEnter your Casambi network password:");
+            }
             Serial.print("> ");
             while (!Serial.available()) {
                 delay(10);
                 esp_task_wdt_reset();
             }
-            String password = Serial.readStringUntil('\n');
-            password.trim();
+            String enteredPassword = Serial.readStringUntil('\n');
+            enteredPassword.trim();
 
-            if (password.length() == 0) {
-                Serial.println("Cancelled.");
+            if (enteredPassword.length() > 0) {
+                password = enteredPassword;
+            } else if (password.length() == 0) {
+                Serial.println("Cancelled (no password available).");
                 return;
             }
 
@@ -726,13 +735,35 @@ void handleCommand(const String& cmd) {
             bool savedParseDebug   = networkConfig.parseDebugEnabled;
             bool savedHeapDebug    = networkConfig.heapDebugEnabled;
 
+            // Free the BLE stack before talking to the cloud. The TLS
+            // handshake needs a large contiguous heap block; while the BLE
+            // controller/host is allocated that block isn't available and
+            // every HTTPS request fails with HTTP -1. The setup wizard works
+            // precisely because it deinits BLE first (see runSetupWizard).
+            // We mirror that and restart afterwards to re-enter operation
+            // mode cleanly with the refreshed config loaded from flash.
+            Serial.println("--- Releasing BLE for cloud download ---");
+            if (webServer) {
+                webServer->stop();
+            }
+            if (casambiClient) {
+                casambiClient->disconnect();
+            }
+            BLEDevice::deinit(true);
+            delay(500);
+
+            // From here on the BLE stack is gone, so we can no longer just
+            // return to the command loop; every exit path restarts the ESP.
+
             // Get network ID from stored UUID
             Serial.println("--- Fetching network ID ---");
             String networkId;
             CasambiAPIClient tempClient;
             if (!tempClient.getNetworkId(networkConfig.networkUuid, networkId)) {
                 Serial.printf("ERROR: Failed to get network ID: %s\n", tempClient.getLastError().c_str());
-                return;
+                Serial.println("Restarting...");
+                delay(2000);
+                ESP.restart();
             }
 
             // Create session
@@ -740,7 +771,9 @@ void handleCommand(const String& cmd) {
             String sessionToken;
             if (!tempClient.createSession(networkId, password, sessionToken)) {
                 Serial.printf("ERROR: Authentication failed: %s\n", tempClient.getLastError().c_str());
-                return;
+                Serial.println("Restarting...");
+                delay(2000);
+                ESP.restart();
             }
 
             // Fetch fresh configuration
@@ -748,12 +781,17 @@ void handleCommand(const String& cmd) {
             NetworkConfig freshConfig;
             if (!tempClient.fetchNetworkConfig(networkId, sessionToken, freshConfig)) {
                 Serial.printf("ERROR: Failed to fetch config: %s\n", tempClient.getLastError().c_str());
-                return;
+                Serial.println("Restarting...");
+                delay(2000);
+                ESP.restart();
             }
 
             // Restore network identifiers
             freshConfig.networkUuid = networkConfig.networkUuid;
             freshConfig.networkId = networkId;
+
+            // Persist the password used for this refresh (saved or newly typed)
+            freshConfig.casambiPassword = password;
 
             // Restore local settings
             freshConfig.autoConnectEnabled    = savedAutoConnect;
@@ -768,28 +806,23 @@ void handleCommand(const String& cmd) {
             Serial.println("--- Saving to flash ---");
             if (!ConfigStore::saveNetworkConfig(freshConfig)) {
                 Serial.println("ERROR: Failed to save configuration");
-                return;
+                Serial.println("Restarting...");
+                delay(2000);
+                ESP.restart();
             }
 
-            // Update in-memory config
-            networkConfig       = freshConfig;
-            bleDebugEnabled     = freshConfig.bleDebugEnabled;
-            casambiDebugEnabled = freshConfig.casambiDebugEnabled;
-            webDebugEnabled     = freshConfig.webDebugEnabled;
-            parseDebugEnabled   = freshConfig.parseDebugEnabled;
-            heapDebugEnabled    = freshConfig.heapDebugEnabled;
-
             Serial.println("\n=== Refresh Complete! ===");
-            Serial.printf("Network: %s\n", networkConfig.networkName.c_str());
-            Serial.printf("Protocol: v%d (revision %d)\n", networkConfig.protocolVersion, networkConfig.revision);
-            Serial.printf("Units: %d\n", networkConfig.units.size());
-            Serial.printf("Groups: %d\n", networkConfig.groups.size());
-            Serial.printf("Scenes: %d\n", networkConfig.scenes.size());
+            Serial.printf("Network: %s\n", freshConfig.networkName.c_str());
+            Serial.printf("Protocol: v%d (revision %d)\n", freshConfig.protocolVersion, freshConfig.revision);
+            Serial.printf("Units: %d\n", freshConfig.units.size());
+            Serial.printf("Groups: %d\n", freshConfig.groups.size());
+            Serial.printf("Scenes: %d\n", freshConfig.scenes.size());
 
-            checkCasambiVersions(networkConfig);
+            checkCasambiVersions(freshConfig);
 
-            Serial.println("\nConfiguration updated successfully!");
-            Serial.println("Use 'list units/groups/scenes' to see changes.\n");
+            Serial.println("\nConfiguration updated. Restarting to apply...");
+            delay(2000);
+            ESP.restart();
         }
         else if (cmd == "clearconfig") {
             ConfigStore::clearAll();
@@ -1397,6 +1430,9 @@ void runSetupWizard() {
     // Store network UUID and ID
     networkConfig.networkUuid = networkUuid;
     networkConfig.networkId = networkId;
+
+    // Persist the network password so `refresh` can reuse it later
+    networkConfig.casambiPassword = password;
 
     // Step 5: Save configuration
     Serial.println("\nStep 5: Saving configuration");
