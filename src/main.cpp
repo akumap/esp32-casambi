@@ -597,7 +597,7 @@ void handleCommand(const String& cmd) {
             Serial.println("log [n]       - Show newest n event-log entries (default 30)");
             Serial.println("log clear     - Erase the event log");
             Serial.println("ntp status    - Show NTP server and sync state");
-            Serial.println("ntp set <srv> - Set NTP server (UTC)");
+            Serial.println("ntp set <host|ip> - Set NTP server hostname or IP (UTC)");
             Serial.println();
 
             if (!ConfigStore::hasValidConfig()) {
@@ -819,7 +819,7 @@ void handleCommand(const String& cmd) {
                 String server = sub.substring(4);
                 server.trim();
                 if (server.length() == 0) {
-                    Serial.println("Usage: ntp set <server>");
+                    Serial.println("Usage: ntp set <hostname|ip>  (e.g. pool.ntp.org or 192.168.1.1)");
                 } else {
                     networkConfig.ntpServer = server;
                     ConfigStore::saveNetworkConfig(networkConfig);

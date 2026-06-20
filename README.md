@@ -377,10 +377,11 @@ Levels: `0=DEBUG 1=INFO 2=WARN 3=ERROR 4=CRITICAL`. When `synced` is `false`,
 ### Serial commands
 
 ```
-log [n]       - Show newest n event-log entries (default 30)
-log clear     - Erase the event log
-ntp status    - Show NTP server and sync state
-ntp set <srv> - Set the NTP server (UTC)
+log [n]            - Show newest n event-log entries (default 30)
+log clear          - Erase the event log
+ntp status         - Show NTP server and sync state
+ntp set <host|ip>  - Set the NTP server hostname or IP, e.g.
+                     pool.ntp.org or 192.168.1.1 (time is always UTC)
 ```
 
 -----
