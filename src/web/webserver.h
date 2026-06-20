@@ -28,6 +28,11 @@
 #ifndef HTTP_POST
 #define HTTP_POST 2
 #endif
+// Value must match ESPAsyncWebServer's WebRequestMethod enum (HTTP_DELETE = 0b100),
+// since defining HTTP_ANY above suppresses that enum in the library header.
+#ifndef HTTP_DELETE
+#define HTTP_DELETE 4
+#endif
 
 #include <ESPAsyncWebServer.h>
 #include "../ble/casambi_client.h"
@@ -108,6 +113,14 @@ private:
     void _handleGetUnits(AsyncWebServerRequest* request);
     void _handleGetGroups(AsyncWebServerRequest* request);
     void _handleGetScenes(AsyncWebServerRequest* request);
+
+    // Event-log endpoints
+    void _handleGetLog(AsyncWebServerRequest* request);
+    void _handleDeleteLog(AsyncWebServerRequest* request);
+
+    // NTP / time configuration
+    void _handleGetNtp(AsyncWebServerRequest* request);
+    void _handleSetNtp(AsyncWebServerRequest* request);
 
     // Scene control endpoints
     void _handleSceneOn(AsyncWebServerRequest* request);

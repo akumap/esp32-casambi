@@ -210,11 +210,19 @@ The IP address is displayed in the serial console on boot.
   "wifi_rssi": -32,
   "uptime_ms": 123456,
   "free_heap": 56000,
+  "boot_count": 12,
+  "ntp_server": "pool.ntp.org",
+  "time_synced": true,
+  "time_utc": "2026-06-20T09:15:42Z",
+  "time_utc_ms": 1781946942000,
   "gateway_mac": "aa:bb:cc:dd:ee:01",
   "connection_uptime_ms": 98765,
   "packets_received": 42
 }
 ```
+
+`boot_count` is a power-loss-surviving counter (stored in NVS). `time_synced`
+is `false` until NTP has set the clock; `time_utc*` fields appear only once synced.
 
 **GET /api/units** — List all units with current state
 
@@ -303,6 +311,80 @@ curl -X POST http://<ip>/api/groups/4/slider \
 **Success:** `{"success": true}`
 
 **Error:** `{"success": false, "error": "Unit not found"}`
+
+-----
+
+## Event Log & Time Synchronization
+
+The controller keeps a **non-volatile, time-stamped event log** so that fatal
+system events — crashes, watchdog resets, brownouts, BLE auth failures, WiFi
+loss, low-heap restarts — can be diagnosed after the fact.
+
+### Storage layers
+
+1. **RTC NOINIT RAM** (`LOG_RTC_CAPACITY` entries): every event is written here
+   first. RTC RAM survives watchdog, panic, and software resets (but **not**
+   power-off or brownout), so the "last words" right before a crash are
+   captured even if they never reach flash. On the next boot these entries are
+   flushed into LittleFS.
+2. **LittleFS ping-pong ring buffer** (`2 × 16 KB`, `/log/log_a.bin` and
+   `/log/log_b.bin`): the active file is filled, then the other file is cleared
+   and becomes active, bounding flash usage and wear while retaining the most
+   recent history.
+
+### Timestamps
+
+Each entry carries a `tsUtc` timestamp: an **ISO 8601 UTC** string
+(`YYYY-MM-DDTHH:MM:SS.mmmZ`), set via NTP after WiFi connects. Before the clock
+is synced, the timestamp is derived from the device **uptime** instead, which
+renders as a **1970** date — so any entry whose year is 1970 was logged before
+NTP sync, with the time-of-day portion encoding the uptime (e.g.
+`1970-01-01T00:00:45.000Z` = 45 s after boot). Combined with the `boot` counter
+this keeps pre-sync entries ordered and attributable to a specific boot. Clients
+(e.g. FHEM) can convert UTC to local time for display.
+
+### Endpoints
+
+```bash
+# Newest entries first (full log)
+curl http://<ip>/api/log
+
+# Limit to the newest 50 entries
+curl "http://<ip>/api/log?n=50"
+
+# Clear the log
+curl -X DELETE http://<ip>/api/log
+
+# Show / change the NTP server (UTC)
+curl http://<ip>/api/ntp
+curl -X POST http://<ip>/api/ntp \
+  -H "Content-Type: application/json" -d '{"server": "192.168.1.1"}'
+```
+
+Each log entry:
+
+```json
+{
+  "tsUtc": "2026-06-20T09:15:42.000Z",
+  "boot": 12,
+  "level": 4,
+  "levelName": "CRITICAL",
+  "msg": "Boot #12, reset reason: task watchdog (6)"
+}
+```
+
+Levels: `0=DEBUG 1=INFO 2=WARN 3=ERROR 4=CRITICAL`. A `tsUtc` with year **1970**
+marks an entry logged before NTP sync (its time-of-day portion is the uptime).
+
+### Serial commands
+
+```
+log [n]            - Show newest n event-log entries (default 30)
+log clear          - Erase the event log
+ntp status         - Show NTP server and sync state
+ntp set <host|ip>  - Set the NTP server hostname or IP, e.g.
+                     pool.ntp.org or 192.168.1.1 (time is always UTC)
+```
 
 -----
 

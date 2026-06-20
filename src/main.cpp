@@ -10,12 +10,14 @@
 #include <BLEScan.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
+#include <time.h>
 #include "config.h"
 #include "cloud/network_config.h"
 #include "cloud/api_client.h"
 #include "storage/config_store.h"
 #include "ble/casambi_client.h"
 #include "web/webserver.h"
+#include "log/event_log.h"
 
 // Global state
 NetworkConfig networkConfig;
@@ -71,6 +73,26 @@ void checkAndReconnectWiFi();
 void monitorHeap();
 void printStatus();
 void checkCasambiVersions(const NetworkConfig& cfg);
+void syncTime();
+
+// Tracks whether NTP has reported a valid wall-clock time yet.
+static bool g_timeSynced = false;
+// True while WiFi is known-up, so we only log the WiFi-loss event once per drop.
+static bool g_wifiWasConnected = false;
+
+// ============================================================================
+// TIME SYNCHRONISATION (NTP, UTC)
+// ============================================================================
+
+// Kick off SNTP using the configured server. Non-blocking: the first call from
+// setup() starts the query; the loop re-checks and logs once time is valid.
+void syncTime() {
+    const char* server = networkConfig.ntpServer.length() > 0
+                             ? networkConfig.ntpServer.c_str()
+                             : NTP_SERVER_DEFAULT;
+    configTime(0, 0, server);  // UTC (no offset, no DST)
+    Serial.printf("NTP: time sync requested from %s (UTC)\n", server);
+}
 
 // ============================================================================
 // SETUP
@@ -98,6 +120,10 @@ void setup() {
         Serial.println("ERROR: Failed to initialize storage");
         return;
     }
+
+    // Initialize the non-volatile event log. This flushes any RTC "last words"
+    // from a previous crash into LittleFS and records this boot's reset reason.
+    EventLog::begin();
 
     // Check if we have configuration
     if (ConfigStore::hasValidConfig()) {
@@ -132,6 +158,13 @@ void setup() {
                     if (newState == ConnectionState::None &&
                         reason != DisconnectReason::UserRequested) {
                         Serial.printf("*** BLE connection lost (reason: %d) - will auto-reconnect ***\n",
+                                      static_cast<int>(reason));
+                        // Auth/key-exchange failures are errors; a plain link
+                        // loss is a warning.
+                        bool authIssue = (reason == DisconnectReason::AuthFailed ||
+                                          reason == DisconnectReason::KeyExchangeFailed);
+                        EventLog::log(authIssue ? LOG_ERROR : LOG_WARN,
+                                      "BLE connection lost (reason=%d)",
                                       static_cast<int>(reason));
                         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;
                         lastBLEReconnectAttempt = millis();
@@ -188,6 +221,8 @@ void setup() {
 
                 if (WiFi.status() == WL_CONNECTED) {
                     Serial.printf("WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+                    g_wifiWasConnected = true;
+                    syncTime();  // start NTP (UTC)
                 } else {
                     Serial.println("WiFi connection failed - will retry in background");
                 }
@@ -258,6 +293,19 @@ void loop() {
     // Check WiFi connection
     checkAndReconnectWiFi();
 
+    // Detect first successful NTP sync and log it with the real wall-clock time.
+    if (!g_timeSynced && WiFi.status() == WL_CONNECTED) {
+        time_t nowSec = time(nullptr);
+        if (nowSec >= 1577836800) {  // >= 2020-01-01 → NTP has set the clock
+            g_timeSynced = true;
+            char ts[32];
+            struct tm tmUtc;
+            gmtime_r(&nowSec, &tmUtc);
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmUtc);
+            EventLog::log(LOG_INFO, "Time synced via NTP: %s UTC", ts);
+        }
+    }
+
     // Monitor heap usage
     monitorHeap();
 
@@ -316,6 +364,8 @@ void checkAndReconnectBLE() {
         // If too many failures, restart the ESP32
         if (consecutiveReconnectFailures >= MAX_RECONNECT_FAILURES) {
             Serial.println("*** Too many BLE reconnect failures! Restarting ESP32 ***");
+            EventLog::log(LOG_CRITICAL, "Restart: %d BLE reconnect failures",
+                          consecutiveReconnectFailures);
             delay(1000);
             ESP.restart();
         }
@@ -331,10 +381,19 @@ void checkAndReconnectWiFi() {
     if (now - lastWiFiCheck < WIFI_RECONNECT_INTERVAL_MS) return;
     lastWiFiCheck = now;
 
-    if (WiFi.status() == WL_CONNECTED) return;
+    if (WiFi.status() == WL_CONNECTED) {
+        g_wifiWasConnected = true;
+        return;
+    }
 
     // WiFi is disconnected — use cached credentials (avoids repeated LittleFS reads)
     if (!g_wifiCredsLoaded) return;
+
+    // Log the drop once per disconnect episode.
+    if (g_wifiWasConnected) {
+        EventLog::log(LOG_WARN, "WiFi connection lost (SSID %s)", g_wifiCreds.ssid.c_str());
+        g_wifiWasConnected = false;
+    }
 
     Serial.println("WiFi: Connection lost, attempting reconnect...");
     WiFi.disconnect();
@@ -349,6 +408,8 @@ void checkAndReconnectWiFi() {
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
+        g_wifiWasConnected = true;
+        syncTime();  // re-arm NTP after reconnect
 
         // Restart web server
         if (casambiClient && !webServer) {
@@ -391,6 +452,8 @@ void monitorHeap() {
         Serial.printf("*** CRITICAL: Free heap %d bytes < %d threshold! ***\n",
                       freeHeap, HEAP_CRITICAL_THRESHOLD);
         Serial.println("*** Restarting ESP32 to prevent crash ***");
+        EventLog::log(LOG_CRITICAL, "Restart: low heap %u < %u bytes",
+                      (unsigned)freeHeap, (unsigned)HEAP_CRITICAL_THRESHOLD);
         delay(1000);
         ESP.restart();
     }
@@ -531,6 +594,10 @@ void handleCommand(const String& cmd) {
             Serial.println("refresh       - Refresh config from Casambi cloud");
             Serial.println("clearconfig   - Clear configuration (factory reset)");
             Serial.println("restart       - Restart ESP32");
+            Serial.println("log [n]       - Show newest n event-log entries (default 30)");
+            Serial.println("log clear     - Erase the event log");
+            Serial.println("ntp status    - Show NTP server and sync state");
+            Serial.println("ntp set <host|ip> - Set NTP server hostname or IP (UTC)");
             Serial.println();
 
             if (!ConfigStore::hasValidConfig()) {
@@ -592,6 +659,7 @@ void handleCommand(const String& cmd) {
         }
         else if (cmd == "restart") {
             Serial.println("Restarting...");
+            EventLog::log(LOG_INFO, "Restart: requested via serial command");
             delay(500);
             ESP.restart();
         }
@@ -726,8 +794,53 @@ void handleCommand(const String& cmd) {
         else if (cmd == "clearconfig") {
             ConfigStore::clearAll();
             Serial.println("Configuration cleared. Restarting...");
+            EventLog::log(LOG_INFO, "Restart: configuration cleared (factory reset)");
             delay(1000);
             ESP.restart();
+        }
+        else if (cmd == "log" || cmd.startsWith("log ")) {
+            String sub = cmd.length() > 3 ? cmd.substring(4) : "";
+            sub.trim();
+            if (sub == "clear") {
+                EventLog::clear();
+                Serial.println("Event log cleared.");
+            } else {
+                int n = sub.length() > 0 ? sub.toInt() : 30;
+                if (n <= 0) n = 30;
+                Serial.printf("\n=== Event Log (newest %d) ===\n", n);
+                EventLog::writeJson(Serial, n);
+                Serial.println("\n");
+            }
+        }
+        else if (cmd.startsWith("ntp")) {
+            String sub = cmd.length() > 3 ? cmd.substring(4) : "";
+            sub.trim();
+            if (sub.startsWith("set ")) {
+                String server = sub.substring(4);
+                server.trim();
+                if (server.length() == 0) {
+                    Serial.println("Usage: ntp set <hostname|ip>  (e.g. pool.ntp.org or 192.168.1.1)");
+                } else {
+                    networkConfig.ntpServer = server;
+                    ConfigStore::saveNetworkConfig(networkConfig);
+                    Serial.printf("NTP server set to: %s\n", server.c_str());
+                    if (WiFi.status() == WL_CONNECTED) {
+                        g_timeSynced = false;
+                        syncTime();
+                    }
+                }
+            } else {
+                Serial.printf("NTP server: %s\n", networkConfig.ntpServer.c_str());
+                Serial.printf("Time synced: %s\n", g_timeSynced ? "yes" : "no");
+                if (g_timeSynced) {
+                    time_t nowSec = time(nullptr);
+                    char ts[32];
+                    struct tm tmUtc;
+                    gmtime_r(&nowSec, &tmUtc);
+                    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmUtc);
+                    Serial.printf("Current UTC: %s\n", ts);
+                }
+            }
         }
         else if (cmd == "setup") {
             if (apiClient) {
