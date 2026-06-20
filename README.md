@@ -626,6 +626,8 @@ refresh
 
 This re-downloads the full configuration from the Casambi cloud while preserving local settings (auto-connect address, per-category debug flags).
 
+The network password entered during `setup` is stored and reused automatically, so `refresh` no longer prompts for it — just press Enter at the password prompt to keep the saved one, or type a new password if it changed in the Casambi app. To free the heap needed for the TLS download, `refresh` releases the BLE connection and restarts the device when it finishes. The password is stored in flash in plaintext, alongside the WiFi password and the BLE keys.
+
 -----
 
 ## Troubleshooting

@@ -702,18 +702,27 @@ void handleCommand(const String& cmd) {
                 Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
             }
 
-            // Get network password
-            Serial.println("\nEnter your Casambi network password:");
+            // Get network password: reuse the saved one if present (just press
+            // Enter), or type a new one (e.g. after the password was changed).
+            String password = networkConfig.casambiPassword;
+            if (password.length() > 0) {
+                Serial.println("\nUsing saved network password.");
+                Serial.println("Press Enter to keep it, or type a new password:");
+            } else {
+                Serial.println("\nEnter your Casambi network password:");
+            }
             Serial.print("> ");
             while (!Serial.available()) {
                 delay(10);
                 esp_task_wdt_reset();
             }
-            String password = Serial.readStringUntil('\n');
-            password.trim();
+            String enteredPassword = Serial.readStringUntil('\n');
+            enteredPassword.trim();
 
-            if (password.length() == 0) {
-                Serial.println("Cancelled.");
+            if (enteredPassword.length() > 0) {
+                password = enteredPassword;
+            } else if (password.length() == 0) {
+                Serial.println("Cancelled (no password available).");
                 return;
             }
 
@@ -780,6 +789,9 @@ void handleCommand(const String& cmd) {
             // Restore network identifiers
             freshConfig.networkUuid = networkConfig.networkUuid;
             freshConfig.networkId = networkId;
+
+            // Persist the password used for this refresh (saved or newly typed)
+            freshConfig.casambiPassword = password;
 
             // Restore local settings
             freshConfig.autoConnectEnabled    = savedAutoConnect;
@@ -1418,6 +1430,9 @@ void runSetupWizard() {
     // Store network UUID and ID
     networkConfig.networkUuid = networkUuid;
     networkConfig.networkId = networkId;
+
+    // Persist the network password so `refresh` can reuse it later
+    networkConfig.casambiPassword = password;
 
     // Step 5: Save configuration
     Serial.println("\nStep 5: Saving configuration");
