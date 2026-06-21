@@ -287,29 +287,59 @@ static void writeEntryJson(Print& out, const LogEntry& e) {
 void EventLog::writeJson(Print& out, int maxEntries) {
     bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
 
-    // Load all entries chronologically: inactive file (older) then active.
-    std::vector<LogEntry> entries;
-    const char* paths[2] = { _inactivePath(), _activePath() };
+    const size_t recSize = sizeof(LogEntry);
+    const char* paths[2] = { _inactivePath(), _activePath() };  // older, newer
+
+    // Count records per file from their sizes (no allocation).
+    size_t counts[2] = { 0, 0 };
     for (int p = 0; p < 2; p++) {
         if (!LittleFS.exists(paths[p])) continue;
         File f = LittleFS.open(paths[p], "r");
         if (!f) continue;
+        counts[p] = f.size() / recSize;
+        f.close();
+    }
+    size_t total = counts[0] + counts[1];
+
+    // Only buffer the newest `limit` entries — reading the whole log into RAM
+    // can exhaust the heap when WiFi/BLE/web are active (each LogEntry is large).
+    size_t limit = (maxEntries >= 0 && (size_t)maxEntries < total)
+                       ? (size_t)maxEntries : total;
+    size_t start = total - limit;   // global index of first entry to keep
+
+    std::vector<LogEntry> entries;
+    entries.reserve(limit);
+
+    size_t globalIdx = 0;
+    for (int p = 0; p < 2; p++) {
+        size_t fileCount = counts[p];
+        if (fileCount == 0) continue;
+
+        // Skip whole file if it lies entirely before the wanted range.
+        if (start >= globalIdx + fileCount) { globalIdx += fileCount; continue; }
+
+        File f = LittleFS.open(paths[p], "r");
+        if (!f) { globalIdx += fileCount; continue; }
+
+        size_t skipInFile = (start > globalIdx) ? (start - globalIdx) : 0;
+        if (skipInFile) f.seek(skipInFile * recSize);
+
         LogEntry e;
-        while (f.read((uint8_t*)&e, sizeof(e)) == sizeof(e)) {
+        while (f.read((uint8_t*)&e, recSize) == (int)recSize) {
             entries.push_back(e);
         }
         f.close();
+        globalIdx += fileCount;
     }
 
     if (locked) xSemaphoreGive(_mutex);
 
-    // Emit newest-first, limited to maxEntries if requested.
+    // Emit newest-first.
     out.print('[');
-    size_t total = entries.size();
-    size_t limit = (maxEntries >= 0 && (size_t)maxEntries < total) ? (size_t)maxEntries : total;
+    size_t kept = entries.size();
     bool first = true;
-    for (size_t i = 0; i < limit; i++) {
-        const LogEntry& e = entries[total - 1 - i];  // reverse → newest first
+    for (size_t i = 0; i < kept; i++) {
+        const LogEntry& e = entries[kept - 1 - i];  // reverse → newest first
         if (!first) out.print(',');
         first = false;
         writeEntryJson(out, e);
