@@ -183,6 +183,19 @@ void CasambiWebServer::_setupRoutes() {
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
 
+    // Discovery: lets FHEM tell a configured gateway apart from one still in
+    // setup mode (the portal serves the same path with configured:false).
+    _server->on("/api/info", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        JsonDocument d;
+        d["configured"] = true;
+        d["build"]      = FIRMWARE_BUILD;
+        d["network"]    = _config->networkName;
+        d["mac"]        = WiFi.macAddress();
+        d["ip"]         = WiFi.localIP().toString();
+        String out; serializeJson(d, out);
+        request->send(200, "application/json", out);
+    });
+
     // Status & discovery endpoints
     _server->on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* request) {
         _handleGetStatus(request);

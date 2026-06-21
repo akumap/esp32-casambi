@@ -17,13 +17,16 @@
 #include "storage/config_store.h"
 #include "ble/casambi_client.h"
 #include "web/webserver.h"
+#include "web/setup_portal.h"
 #include "log/event_log.h"
+#include <ESPmDNS.h>
 
 // Global state
 NetworkConfig networkConfig;
 CasambiClient* casambiClient = nullptr;
 CasambiAPIClient* apiClient = nullptr;
 CasambiWebServer* webServer = nullptr;
+SetupPortal* setupPortal = nullptr;
 bool bleDebugEnabled     = false;
 bool casambiDebugEnabled = true;
 bool webDebugEnabled     = true;
@@ -74,6 +77,32 @@ void monitorHeap();
 void printStatus();
 void checkCasambiVersions(const NetworkConfig& cfg);
 void syncTime();
+void startMDNS();
+
+// Short, stable per-device suffix (last 16 bits of the eFuse MAC) used for the
+// mDNS hostname and the setup-AP SSID so several gateways stay distinguishable.
+static String deviceSuffix() {
+    uint64_t mac = ESP.getEfuseMac();
+    char buf[5];
+    sprintf(buf, "%04x", (unsigned)(mac & 0xFFFF));
+    return String(buf);
+}
+
+// Advertise the configured gateway as casambi-XXXX.local so FHEM can find it.
+void startMDNS() {
+    String host = "casambi-" + deviceSuffix();
+    if (MDNS.begin(host.c_str())) {
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addServiceTxt("http", "tcp", "configured", "1");
+        char build[12];
+        sprintf(build, "%d", FIRMWARE_BUILD);
+        MDNS.addServiceTxt("http", "tcp", "build", build);
+        MDNS.addServiceTxt("http", "tcp", "network", networkConfig.networkName);
+        Serial.printf("mDNS: http://%s.local/\n", host.c_str());
+    } else {
+        Serial.println("mDNS: failed to start");
+    }
+}
 
 // Tracks whether NTP has reported a valid wall-clock time yet.
 static bool g_timeSynced = false;
@@ -236,6 +265,7 @@ void setup() {
                 if (webServer->begin()) {
                     Serial.printf("\nWeb API available at: http://%s/api\n", WiFi.localIP().toString().c_str());
                 }
+                startMDNS();
             }
 
             Serial.println("\nReady. Type 'help' for commands.\n");
@@ -244,8 +274,14 @@ void setup() {
         }
     } else {
         Serial.println("No configuration found - entering setup mode");
-        Serial.println("Type 'help' for setup commands.\n");
+
+        // Primary path: open SoftAP + captive portal for browser-based setup.
+        setupPortal = new SetupPortal();
+        setupPortal->begin();
+
+        // Serial wizard remains available as a fallback ('setup' command).
         apiClient = new CasambiAPIClient();
+        Serial.println("(Serial fallback: type 'setup' to use the wizard instead.)\n");
     }
 }
 
@@ -264,6 +300,11 @@ void loop() {
         if (cmd.length() > 0) {
             handleCommand(cmd);
         }
+    }
+
+    // === Setup mode: drive the provisioning portal ===
+    if (setupPortal) {
+        setupPortal->loop();
     }
 
     // === Periodic tasks (only in operation mode) ===

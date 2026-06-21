@@ -1,6 +1,8 @@
 # Konzept: ESP32-Casambi-Provisionierung ohne Serial
 
-Status: Konzept (noch keine Implementierung)
+Status: in Umsetzung — SoftAP-Portal + Cloud-Provisionierung + mDNS + `/api/info`
+implementiert; **Auto-Hangeln (Abschnitt 7) bewusst zurückgestellt** (Reconnect
+bleibt vorerst auf fester MAC wie bisher).
 Branch: `claude/esp32-ap-rest-config-hejbf7`
 
 ## 1. Ziel
@@ -343,7 +345,35 @@ einziges Risiko ist der kurze Setup-Peak, abgesichert durch das BLE-Deinit.
 8. `98_CasambiGW.pm` — optional `/api/info`-Auswertung; sonst unverändert.
 9. README aktualisieren.
 
-## 12. Umsetzungsreihenfolge
+## 12. Risiko-Einschätzung (Debugging-Aufwand)
+
+| Bereich | Risiko | Wo Debugging anfällt |
+|---|---|---|
+| `provisionFromCloud()` herauslösen (Refactor) | Niedrig | verhaltensneutral, gegen Serial-Wizard testbar |
+| SoftAP + DNSServer + Portal-HTML | Niedrig | Standard-Muster, ohne Casambi testbar |
+| `wifi-scan`, mDNS, Scan-Struct | Niedrig | gut isoliert testbar |
+| Lange Ops in `loop()` statt Async-Handler | Mittel | Nebenläufigkeit/WDT, Muster klar |
+| BLE-Scan → `deinit` → Cloud-Fetch | Mittel | bekannt empfindlich; Wizard beweist Machbarkeit |
+| **AP+STA + TLS-Heap-Peak** | Mittel | Heap-Messung (9.4); Fallback „AP vor TLS schließen" |
+| **Auto-Hangeln im Betrieb** | Höher (hardwareabh.) | Mesh-/Advertising-Verhalten nur am echten Netz prüfbar (9.1/9.2) |
+| Setup-Disambiguierung (6.5) | Niedrig–Mittel | Edge Cases (9.3) nur mit echtem Account; Fehlerpfade gutmütig |
+
+**Gesamtbild:** Die Firmware-Mechanik ist niedriges bis mittleres Risiko und
+kein architektonisches Neuland — der bestehende Wizard demonstriert die harten
+Teile (BLE-vor-Cloud, TLS, Auth) bereits funktionierend. Der echte
+Debugging-Aufwand konzentriert sich auf zwei On-Hardware-Themen: den
+Heap-Peak im AP+STA+TLS-Moment (messbar, mit Fallback) und das
+Casambi-Mesh-/Advertising-Verhalten beim Auto-Hangeln (iteratives Testen).
+
+**Risiko-Minimierung:**
+- Serial-Wizard bleibt als Fallback erhalten.
+- Gestaffelte Umsetzung (Abschnitt 13): Refactor zuerst, dann Portal, dann
+  Auto-Hangeln **separat** und **nachgelagert** — so liegt das größte
+  Einzelrisiko nicht im kritischen Pfad der Erstinbetriebnahme.
+- Vorhandene Werkzeuge nutzen: `heapDebug`, `bleDebug`, nichtflüchtiges
+  Event-Log.
+
+## 13. Umsetzungsreihenfolge
 
 1. `provisionFromCloud()` aus dem Wizard herauslösen (Refactor, verhaltensneutral).
 2. `ScanCallbacks` erweitern + gemeinsame Scan-Struktur.
