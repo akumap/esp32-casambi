@@ -10,10 +10,15 @@ sein. Die **gesamte interaktive Erstkonfiguration** findet in **einer**
 Weboberfläche statt — dem **offenen SoftAP-Portal** des ESP32:
 
 - WLAN-Auswahl + WLAN-Passwort
-- Casambi-Gateway-Auswahl (BLE-Scan) + Casambi-Netzwerk-Passwort
+- Casambi-Netzwerk-Passwort (BLE-Scan im Hintergrund; eine **Gateway-Auswahl**
+  ist nur nötig, wenn mehrere Casambi-Netze gefunden werden — siehe 6.5)
 
 Der Casambi-Cloud-Abruf läuft direkt im Anschluss mit **Live-Fortschritt**.
 FHEM verbindet sich danach nur noch mit dem **fertig konfigurierten** Gerät.
+
+Im Betrieb wählt der ESP das Gateway **automatisch** und wechselt bei Bedarf zur
+nächsten erreichbaren Einheit desselben Netzes (siehe 7) — eine feste
+GW-Auswahl durch den Nutzer entfällt damit.
 
 Der bestehende Serial-Wizard bleibt als **Fallback** erhalten.
 
@@ -123,14 +128,44 @@ Portal-Seite pollt den Status.
 2. **`BLEDevice::deinit(true)`** (BLE-Scan fertig → Heap frei).
 3. `WiFi.mode(WIFI_AP_STA)`, STA-Verbindung zum Heim-WLAN aufbauen — der **AP
    bleibt aktiv**, die Fortschrittsseite im Browser bleibt erreichbar.
-4. Cloud: `getNetworkId(uuid)` → `createSession(pw)` → `fetchNetworkConfig()`.
+4. Cloud: `getNetworkId(uuid)` → `createSession(pw)` → `fetchNetworkConfig()`
+   (Auswahl des `uuid` siehe 6.5 — bei nur einem Netz automatisch).
 5. `networkUuid/networkId/casambiPassword` setzen;
-   **`autoConnectAddress` = MAC aus `uuid`** (Doppelpunkte einfügen),
-   `autoConnectEnabled = true`; `saveNetworkConfig()`.
-6. Status → **done**, Portal zeigt Erfolg → Reboot in Zustand C.
+   **`autoConnectAddress` = MAC aus `uuid`** (Doppelpunkte einfügen) als
+   *bevorzugter* erster Versuch, `autoConnectEnabled = true`;
+   `saveNetworkConfig()` (enthält über `unit.address` die MAC-Liste **aller**
+   Einheiten → Grundlage für das Auto-Hangeln im Betrieb, siehe 7).
+6. Status → **done**, Portal zeigt den cloud-bestätigten `networkName` →
+   Reboot in Zustand C.
 7. **Fehler** an jeder Stelle (falsches Casambi-PW, Cloud nicht erreichbar,
    falsches WLAN-PW) → Status **error** mit Meldung; zurück in den reinen
    AP-Modus, Seite bleibt erreichbar, Nutzer korrigiert und sendet erneut.
+
+### 6.5 Das richtige Netz wählen (Disambiguierung beim Setup)
+Beim Erst-Setup hat der ESP die Unit-MAC-Liste noch **nicht** (die kommt erst
+mit der Cloud-Config), also greift der Netz-Filter aus Abschnitt 7 hier noch
+nicht. Stattdessen:
+
+- **Ein** gefundener Casambi-Advertiser → kein Auswählen, direkt Cloud-Versuch.
+- **Mehrere** Advertiser → das **Passwort ist die eindeutige Probe**: Der ESP
+  probiert die Kandidaten der Reihe nach (`getNetworkId` → `createSession`).
+  `createSession` liefert nur beim passenden Netz `200`, sonst `401/403`
+  („Invalid password", `api_client.cpp:117`). Der authentifizierende Kandidat
+  gewinnt; sein über `fetchNetworkConfig` bestätigter `networkName` wird im
+  Portal angezeigt.
+- Zusätzlich wird der advertiste **Name** (BLE „Complete Local Name",
+  `main.cpp:557`) in der Liste angezeigt, damit der Nutzer den wahrscheinlich
+  richtigen vorab wählen und Versuche sparen kann.
+
+Vorbehalte (Hardware-Prüfpunkte, siehe 9):
+- **Zwei Netze mit identischem Passwort** → beide authentifizieren → echte
+  Mehrdeutigkeit; dann beide `networkName` anzeigen und wählen lassen (selten).
+- **Zwei Einheiten desselben Netzes** als Kandidaten → ob beide Unit-MACs im
+  Cloud-Lookup `getNetworkId` auflösen, ist offen; eine nicht auflösende MAC
+  scheidet einfach aus, der funktionierende Kandidat bleibt.
+
+Kosten: jeder Versuch = ein Cloud-Roundtrip (BLE hier ohnehin aus → Heap frei),
+bei wenigen Advertisern unkritisch.
 
 ### 6.4 Scan-Ergebnis (pro Gerät)
 ```json
@@ -145,26 +180,71 @@ Portal-Seite pollt den Status.
 ```
 `ScanCallbacks::onResult` wird dafür erweitert (heute nur address/name/rssi).
 
-## 7. Mehrere Casambi-Geräte / Robustheit
+## 7. Automatisches Gateway-Hangeln im Betrieb
 
-### 7.1 Warum oft nur ein Gerät erscheint
-Primär eine **Casambi-Mesh-Eigenschaft**, kein Firmware-Limit: Die Teilnehmer
-eines Casambi-Netzes handeln aus, **welche Einheit gerade als BLE-Gateway
-„connectable" advertised** — meist nur eine zur Zeit. Der Scan sammelt aber
-bereits **alle** advertisenden Casambi-Geräte (dedupliziert per MAC); mehrere
-Einträge erscheinen, sobald mehrere gleichzeitig advertisen. Das Portal stellt
-alle gefundenen Geräte zur Auswahl.
+### 7.1 Grundlage: netzweite Keys + bekannte MAC-Liste
+Zwei Eigenschaften machen automatisches Umschalten möglich:
 
-### 7.2 Robustheitsproblem mit fester MAC
-Die Firmware merkt sich Identität **und** Auto-Connect-Ziel als **eine feste
-MAC** (`networkUuid` = `autoConnectAddress` = MAC). Schaltet man diese Einheit
-aus, übernimmt eine andere Einheit das Advertising — **mit anderer MAC** — und
-der Reconnect auf die feste MAC schlägt fehl, obwohl das Netz erreichbar wäre.
+1. **Netzweite Authentifizierung.** `connect()` nutzt den über
+   `_config->getBestKey()` geladenen **Netzwerk-Key** (`casambi_client.cpp:112`),
+   nicht gerätespezifische Keys; der ECDH-Austausch ist pro Verbindung frisch.
+   Mit demselben Key kann man sich gegen **jede** Einheit des Netzes
+   authentifizieren — die MAC ist kryptografisch nicht besonders.
+2. **Bekannte MAC-Liste.** Nach dem Setup kennt der ESP über `unit.address`
+   (`api_client.cpp:299`, persistiert `config_store.cpp:87`) die MACs **aller**
+   Einheiten seines Netzes.
 
-### 7.3 Verbesserung (separat, abhängig von 9.1)
-Beim Verbinden nicht strikt an die MAC pinnen, sondern auf **irgendeine gerade
-advertisende Einheit desselben Netzes** gehen. Dafür müsste das Netz über die
-**Service-Data im Advertisement** identifiziert werden statt über die MAC.
+### 7.2 Verfahren
+Statt an eine feste MAC zu pinnen, hangelt sich der ESP zur nächsten
+erreichbaren Einheit:
+
+```
+Verbindung weg
+   → BLE-Scan (Service-UUID 0xFE4D)
+   → schneiden mit bekannter Unit-MAC-Liste        ← Netz-Filter, kein Fremdnetz
+   → besten verfügbaren Kandidaten verbinden
+   → ECDH + Auth mit Netzwerk-Key
+```
+
+- **Priorisierung:** zuletzt genutzter GW (`autoConnectAddress`) zuerst, dann
+  zuletzt-online + stärkstes RSSI.
+- **Netz-Filter ohne Service-Data:** Der Schnitt mit der bekannten MAC-Liste
+  schließt fremde Casambi-Netze automatisch aus — Punkt 9.1 wird damit für den
+  Betrieb **gegenstandslos** (er bleibt nur für die Setup-Disambiguierung
+  relevant, siehe 6.5).
+- **Proaktiver Scan:** Online/Offline-Events kommen über den
+  Unit-State-Callback (`unit.online`, `main.cpp:182`). Sie helfen, Kandidaten zu
+  priorisieren und bei Topologie-Änderungen früher zu scannen (kürzere
+  Detektion). Einschränkung: Diese Events laufen über die **aktuelle**
+  Verbindung — fällt der aktuelle GW weg, ist das der Transportweg selbst; für
+  *andere* Einheiten funktioniert es, sonst dient die volle MAC-Liste als
+  Fallback.
+
+### 7.3 Warum oft nur ein Gerät erscheint / Wechseldauer
+Es ist eine **Casambi-Mesh-Eigenschaft**: Die Teilnehmer handeln aus, **welche
+Einheit gerade als „connectable" advertised** — meist nur eine zur Zeit. Der
+ESP kann nur zu einer **gerade connectable** advertisenden Einheit verbinden;
+die MAC-Liste sagt ihm nur, *welche* dazugehören und online sind, kann aber
+keine Einheit zwingen, GW zu werden.
+
+Wechseldauer (aus dem Code abgeschätzt):
+
+| Phase | Zeit | Quelle |
+|---|---|---|
+| Verlust erkennen | sauber ~0–10 s (Callback / `CONNECTION_CHECK_INTERVAL_MS`), stiller Hänger bis ~30 s (Keepalive) | `config.h:111`, `main.cpp:285` |
+| Neuen Advertiser finden | Sekunden Scan **+ Mesh-Neuwahl (variabel, Casambi-seitig)** | unbekannt |
+| Connect + Key-Exchange + Auth | typ. ~1–3 s | `config.h:94` |
+
+- **Mehrere Einheiten gleichzeitig connectable:** Umschalten quasi sofort
+  → **~3–8 s**.
+- **Nur eine zur Zeit:** Warten auf Mesh-Neuwahl → variabel, der Flaschenhals.
+- Worst Case (stiller Hänger + träge Neuwahl): bis ~30–60 s; zusätzlich greifen
+  Backoff (`BLE_RECONNECT_INTERVAL_MS`=5 s → max 60 s) und nach
+  `MAX_RECONNECT_FAILURES`=10 der Neustart.
+
+Ob mehrere Einheiten gleichzeitig connectable advertisen, ist der eine Punkt,
+der sich nur an echter Hardware messen lässt (siehe 9) — er entscheidet zwischen
+„nahezu unterbrechungsfrei" und „spürbare Pause".
 
 ## 8. mDNS / FHEM-Anbindung
 
@@ -184,14 +264,24 @@ advertisende Einheit desselben Netzes** gehen. Dafür müsste das Netz über die
 
 ## 9. Offene Verifikationspunkte
 
-1. **`networkUuid` = MAC oder Service-Data?** Aktuell wird die Geräte-MAC als
-   `networkUuid` genutzt und funktioniert für den Cloud-Lookup. Ob die Cloud
-   stattdessen einen aus der Service-Data abgeleiteten Netz-Identifier
-   akzeptiert (was MAC-unabhängigen Reconnect ermöglichen würde), ist an echter
-   Hardware zu prüfen. Davon hängt Abschnitt 7.3 ab.
-2. **AP+STA + TLS heapseitig:** Mit deinitialisiertem BLE sollte der TLS-Heap
+1. **Advertisende MAC == `unit.address`?** Das Auto-Hangeln (7) schneidet
+   gescannte Advertiser mit der bekannten Unit-MAC-Liste. Dafür muss die im
+   Scan sichtbare BLE-MAC gleich der gespeicherten `unit.address` sein
+   (Casambi nutzt normalerweise statische Public-Adressen → wahrscheinlich ja).
+   An Hardware bestätigen.
+2. **Mehrere Einheiten gleichzeitig connectable?** Entscheidet die Wechseldauer
+   (7.3): nahezu unterbrechungsfrei vs. Warten auf Mesh-Neuwahl. Nur an echter
+   Hardware messbar.
+3. **Setup-Disambiguierung (6.5):** ob bei mehreren Einheiten desselben Netzes
+   beide Unit-MACs im Cloud-`getNetworkId` auflösen; und Verhalten bei zwei
+   Netzen mit identischem Passwort.
+4. **AP+STA + TLS heapseitig:** Mit deinitialisiertem BLE sollte der TLS-Heap
    verfügbar sein; AP+STA selbst braucht wenig Heap. An Hardware bestätigen.
-3. **Scan-Dauer:** fester 10-s-BLE-Scan, auf Knopfdruck im Portal — vorgeschlagen.
+5. **Scan-Dauer:** fester 10-s-BLE-Scan im Portal — vorgeschlagen.
+
+> Hinweis: Der frühere Punkt „networkUuid = MAC oder Service-Data?" ist für den
+> **Betrieb gegenstandslos**, da der Netz-Filter über die bekannte MAC-Liste
+> läuft (7.2), nicht über Service-Data.
 
 ## 10. ESP-Firmware-Änderungen im Überblick
 
@@ -203,18 +293,25 @@ advertisende Einheit desselben Netzes** gehen. Dafür müsste das Netz über die
 3. `ScanCallbacks` erweitern (mfg/svc-Data); Scan-Ergebnis als gemeinsame
    Struktur für Serial- und Portal-Pfad.
 4. Cloud-Schritte aus `runSetupWizard()` in `provisionFromCloud(uuid, pw, &cfg)`
-   herauslösen (von Portal **und** Serial genutzt).
-5. `webserver.{h,cpp}` — mDNS im Betriebsmodus, optional `/api/info`.
-6. `config.h` — Präfixe/Konstanten (AP-SSID, mDNS-Hostname).
-7. `98_CasambiGW.pm` — optional `/api/info`-Auswertung; sonst unverändert.
-8. README aktualisieren.
+   herauslösen (von Portal **und** Serial genutzt); Mehr-Netz-Disambiguierung
+   per Passwort-Probe (6.5).
+5. **Auto-Hangeln im Betrieb** (`main.cpp` `checkAndReconnectBLE` +
+   `casambi_client`): Reconnect von „feste MAC" auf „Scan → Schnitt mit bekannter
+   Unit-MAC-Liste → besten Kandidaten verbinden" umstellen; `autoConnectAddress`
+   nur noch als bevorzugter Erstversuch; Online/RSSI-Priorisierung.
+6. `webserver.{h,cpp}` — mDNS im Betriebsmodus, optional `/api/info`.
+7. `config.h` — Präfixe/Konstanten (AP-SSID, mDNS-Hostname).
+8. `98_CasambiGW.pm` — optional `/api/info`-Auswertung; sonst unverändert.
+9. README aktualisieren.
 
 ## 11. Umsetzungsreihenfolge
 
 1. `provisionFromCloud()` aus dem Wizard herauslösen (Refactor, verhaltensneutral).
 2. `ScanCallbacks` erweitern + gemeinsame Scan-Struktur.
 3. SoftAP-/Captive-Portal-Modul mit Single-Page + Portal-Endpunkten.
-4. Provisionierungs-Zustandsmaschine in `loop()` (inkl. AP+STA + Cloud-Fetch).
+4. Provisionierungs-Zustandsmaschine in `loop()` (inkl. AP+STA + Cloud-Fetch +
+   Disambiguierung 6.5).
 5. 2-Zustands-`setup()`; mDNS im Betriebsmodus.
-6. Optional `/api/info` + FHEM-Auswertung.
-7. README aktualisieren.
+6. Auto-Hangeln im Reconnect (7) umsetzen.
+7. Optional `/api/info` + FHEM-Auswertung.
+8. README aktualisieren.
