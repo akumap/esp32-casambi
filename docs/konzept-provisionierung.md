@@ -283,7 +283,46 @@ der sich nur an echter Hardware messen lässt (siehe 9) — er entscheidet zwisc
 > **Betrieb gegenstandslos**, da der Netz-Filter über die bekannte MAC-Liste
 > läuft (7.2), nicht über Service-Data.
 
-## 10. ESP-Firmware-Änderungen im Überblick
+## 10. Ressourcenbedarf (überschlägig)
+
+**Keine neuen externen Libraries:** `DNSServer` und `ESPmDNS` sind Teil des
+ESP32-Arduino-Cores; `ESPAsyncWebServer`/`AsyncTCP` sind bereits eingebunden.
+
+### 10.1 Flash (Programm)
+
+| Komponente | grob |
+|---|---|
+| DNSServer (Captive Portal) | ~2–5 KB |
+| ESPmDNS | ~5–10 KB |
+| Portal-HTML in `PROGMEM` | ~3–8 KB |
+| Setup-Zustandsmaschine, Refactor, Auto-Hangeln | wenige KB |
+| **Summe** | **~15–30 KB** |
+
+Unkritisch: Die Partition ist `huge_app.csv` (`platformio.ini`), Flash-Platz ist
+reichlich vorhanden.
+
+### 10.2 RAM/Heap
+Der sensible Posten (kein PSRAM, `HEAP_CRITICAL_THRESHOLD` = 20 KB):
+
+| Situation | Zusatzbedarf | Bewertung |
+|---|---|---|
+| Betrieb (Zustand C): mDNS dauerhaft | ~2–4 KB | unkritisch |
+| Auto-Hangeln: BLE-Scan nur bei Verbindungsverlust | transient, bestehende Scan-Infrastruktur | unkritisch |
+| Setup: AP + Portal + BLE-Scan | moderat, **kein TLS gleichzeitig** | unkritisch |
+| **Setup-Peak: AP+STA + TLS-Handshake (BLE aus)** | AP_STA ~10–30 KB **+** TLS ~30–50 KB | **kritisch prüfen** |
+
+Einziger realer Engpass ist der **transiente Peak beim Cloud-Fetch im
+AP+STA-Modus**. Weil BLE dann deinitialisiert ist (6.3), sollte es passen — das
+ist Verifikationspunkt 9.4 und an Hardware zu messen.
+
+> Ausweg, falls der Peak zu knapp wird: den AP **vor** dem TLS-Schritt schließen
+> (reines STA), Fortschritt dann erst nach Reboot zeigen — opfert das
+> Live-Feedback gegen ~10–30 KB Heap.
+
+Insgesamt: moderater Flash-Zuwachs, im Betrieb vernachlässigbarer RAM-Zuwachs;
+einziges Risiko ist der kurze Setup-Peak, abgesichert durch das BLE-Deinit.
+
+## 11. ESP-Firmware-Änderungen im Überblick
 
 1. `main.cpp` — `setup()` als 2-Zustands-Maschine (Setup-Portal / Betrieb);
    Provisionierungs-Zustandsmaschine (idle/wifi-scan/ble-scan/connecting/
@@ -304,7 +343,7 @@ der sich nur an echter Hardware messen lässt (siehe 9) — er entscheidet zwisc
 8. `98_CasambiGW.pm` — optional `/api/info`-Auswertung; sonst unverändert.
 9. README aktualisieren.
 
-## 11. Umsetzungsreihenfolge
+## 12. Umsetzungsreihenfolge
 
 1. `provisionFromCloud()` aus dem Wizard herauslösen (Refactor, verhaltensneutral).
 2. `ScanCallbacks` erweitern + gemeinsame Scan-Struktur.
