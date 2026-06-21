@@ -4,22 +4,6 @@
 
 #include "setup_portal.h"
 
-// HTTP method macros must be defined before ESPAsyncWebServer.h (see webserver.h)
-#ifndef HTTP_ANY
-#define HTTP_ANY 0
-#endif
-#ifndef HTTP_GET
-#define HTTP_GET 1
-#endif
-#ifndef HTTP_POST
-#define HTTP_POST 2
-#endif
-// Defining HTTP_ANY/GET/POST suppresses ESPAsyncWebServer's WebRequestMethod
-// enum, so provide HTTP_DELETE too (matches webserver.h's WebRequestMethod).
-#ifndef HTTP_DELETE
-#define HTTP_DELETE 4
-#endif
-
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
 #include <BLEDevice.h>

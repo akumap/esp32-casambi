@@ -94,9 +94,7 @@ void startMDNS() {
     if (MDNS.begin(host.c_str())) {
         MDNS.addService("http", "tcp", 80);
         MDNS.addServiceTxt("http", "tcp", "configured", "1");
-        char build[12];
-        sprintf(build, "%d", FIRMWARE_BUILD);
-        MDNS.addServiceTxt("http", "tcp", "build", build);
+        MDNS.addServiceTxt("http", "tcp", "build", String(FIRMWARE_BUILD));
         MDNS.addServiceTxt("http", "tcp", "network", networkConfig.networkName);
         Serial.printf("mDNS: http://%s.local/\n", host.c_str());
     } else {
