@@ -5,12 +5,15 @@ Branch: `claude/esp32-ap-rest-config-hejbf7`
 
 ## 1. Ziel
 
-Nach dem Flashen soll **keine Konfiguration per Serial-Eingabe** mehr nötig sein:
+Nach dem Flashen soll **keine Konfiguration per Serial-Eingabe** mehr nötig
+sein. Die **gesamte interaktive Erstkonfiguration** findet in **einer**
+Weboberfläche statt — dem **offenen SoftAP-Portal** des ESP32:
 
-1. **WiFi** wird per **offenem SoftAP + Captive Portal** eingerichtet.
-2. Die übrigen Konfigurationsdaten (Casambi-Netz + Passwort) liefert das
-   **FHEM-Modul** über die **Web-/REST-API**, sobald es den ESP32 im Heimnetz
-   erreichen kann.
+- WLAN-Auswahl + WLAN-Passwort
+- Casambi-Gateway-Auswahl (BLE-Scan) + Casambi-Netzwerk-Passwort
+
+Der Casambi-Cloud-Abruf läuft direkt im Anschluss mit **Live-Fortschritt**.
+FHEM verbindet sich danach nur noch mit dem **fertig konfigurierten** Gerät.
 
 Der bestehende Serial-Wizard bleibt als **Fallback** erhalten.
 
@@ -20,22 +23,21 @@ Der bestehende Serial-Wizard bleibt als **Fallback** erhalten.
   BLE-Scan → Auswahl → Casambi-Passwort → WiFi-SSID/Passwort → Cloud-Download →
   speichern → Reboot.
 - WiFi (STA) und Webserver starten erst, **wenn** bereits eine gültige Config
-  vorliegt. Ohne Config gibt es kein WiFi und damit keine Web-/REST-Oberfläche.
-- Das FHEM-Modul `98_CasambiGW.pm` verbindet sich per WebSocket zu einer fest
+  vorliegt.
+- FHEM-Modul `98_CasambiGW.pm` verbindet sich per WebSocket zu einer fest
   einkonfigurierten IP (`define <name> CasambiGW <ip>`) und steuert über
   HTTP-POST an `/api/units/...`.
 
 Die Cloud-Schritte sind bereits Serial-unabhängig gekapselt
-(`api_client.cpp`: `getNetworkId`, `createSession`, `fetchNetworkConfig`) und
-lassen sich hinter REST-Endpunkte hängen.
+(`api_client.cpp`: `getNetworkId`, `createSession`, `fetchNetworkConfig`).
 
 ## 3. Randbedingungen
 
 ### 3.1 Heap vs. BLE beim Cloud-Zugriff
 Der TLS-Handshake zur Casambi-Cloud braucht einen großen zusammenhängenden
 Heap-Block, der nur frei ist, wenn der BLE-Stack **nicht** initialisiert ist
-(siehe Kommentare bei `refresh`, `main.cpp:738`, und im Wizard). Während der
-Cloud-Schritt läuft, muss BLE also deinitialisiert sein.
+(siehe Kommentare bei `refresh`, `main.cpp:738`, und im Wizard). Während des
+Cloud-Schritts muss BLE also deinitialisiert sein.
 
 ### 3.2 Woher kommt die `networkUuid`?
 Der Cloud-Zugriff braucht aus dem BLE-Scan **genau eine** Information: die
@@ -43,84 +45,94 @@ Der Cloud-Zugriff braucht aus dem BLE-Scan **genau eine** Information: die
 (`main.cpp:1353`, Doppelpunkte entfernt, lowercase). Der erste Cloud-Call
 `GET /networks/uuid/<networkUuid>` (`api_client.cpp:45`) nimmt diese UUID als
 Eingabe. Es gibt keine andere Quelle für die UUID als den Scan.
-
 → Daraus folgt zwingend die Reihenfolge **Scan vor Cloud**.
 
-## 4. Korrigierte Reihenfolge
+### 3.3 Was im AP-Modus geht und was nicht
+
+| Aktivität | reiner AP-Modus | Grund |
+|---|---|---|
+| WLAN-Liste (`WiFi.scanNetworks`) | ✅ | kein Internet nötig |
+| **BLE-Scan** (Casambi-GW-Liste) | ✅ | BLE + WiFi-AP koexistieren; **kein TLS → kein Heap-Konflikt** |
+| WLAN-PW + Casambi-PW eingeben/speichern | ✅ | reine Eingabe |
+| **Casambi-Cloud-Fetch** | ❌ | braucht Internet (STA) **und** BLE aus (Heap) |
+
+Konsequenz: **Eingaben einsammeln** geht komplett im AP-Portal; der **Cloud-
+Fetch** braucht zusätzlich eine STA-Verbindung und freien Heap. Lösung:
+**AP+STA-Modus** (siehe 6.3).
+
+## 4. Reihenfolge (Prinzip)
 
 ```
-1. WiFi            (Phase 1, offener SoftAP + Captive Portal)
-2. BLE-SCAN        (Discovery → networkUuid-Kandidaten zur Auswahl)   ← BLE an
-   → BLEDevice::deinit()                                              ← BLE aus (Heap frei)
-3. CASAMBI-CLOUD   (uuid + Passwort → Keys/Config)                    ← BLE aus, TLS braucht Heap
+1. WLAN-Auswahl    (AP-Portal)
+2. BLE-SCAN        (im AP-Modus → networkUuid-Kandidaten zur Auswahl)   ← BLE an
+   → BLEDevice::deinit()                                                ← BLE aus (Heap frei)
+3. CASAMBI-CLOUD   (uuid + Passwort → Keys/Config; AP+STA)              ← BLE aus, TLS braucht Heap
    → save + reboot
-4. BLE-VERBINDUNG  (authentifiziert, mit Cloud-Keys)                  ← Betriebsmodus
+4. BLE-VERBINDUNG  (authentifiziert, mit Cloud-Keys)                    ← Betriebsmodus
 ```
 
 Wichtige Unterscheidung: **BLE-Scan ≠ BLE-Verbindung.**
 
 | BLE-Aktivität | braucht | liefert | Zeitpunkt |
 |---|---|---|---|
-| **Scan** (Discovery, passiv) | nichts | `networkUuid` (+ Name/RSSI zur Auswahl) | **vor** Cloud |
+| **Scan** (Discovery, passiv) | nichts | `networkUuid` (+ Name/RSSI) | **vor** Cloud (im AP) |
 | **Verbindung** (authentifiziert) | Cloud-**Keys** | Steuerung der Lampen | **nach** Cloud (Betrieb) |
 
-Scan und Verbindung liegen bewusst um den Cloud-Schritt herum: Scan davor
-(liefert die UUID), Verbindung danach (braucht die Keys). Das entspricht der
-Sequenz, die der heutige Serial-Wizard bereits nutzt.
+## 5. Boot-Zustandsmaschine (2 Zustände)
 
-## 5. Boot-Zustandsmaschine (3 Zustände)
-
-`setup()` entscheidet anhand des Speicherzustands:
+`setup()` entscheidet anhand von `ConfigStore::hasValidConfig()`:
 
 | Zustand | Bedingung | Modus | BLE |
 |---|---|---|---|
-| **A. Unprovisioniert** | keine WiFi-Credentials | SoftAP (offen) + Captive Portal | aus |
-| **B. WiFi ok, keine Casambi-Config** | WiFi vorhanden, `!hasValidConfig()` | Setup-Modus (STA) + mDNS + REST | temporär an (nur Scan) |
-| **C. Vollständig** | WiFi + gültige Config | Betriebsmodus (heute) | an |
+| **A. Setup** | `!hasValidConfig()` | offenes SoftAP-Portal (AP, bei Bedarf AP+STA) | für Scan an, für Cloud aus |
+| **C. Betrieb** | gültige Config | Betriebsmodus (heute) + mDNS | an |
 
-## 6. Phase 1 — WiFi per offenem SoftAP + Captive Portal
+Es gibt **keinen** separaten „WiFi-ok-aber-keine-Casambi-Config"-Zustand mehr:
+Die Config gilt erst als gültig, wenn der gesamte Portal-Ablauf inklusive
+Cloud-Fetch erfolgreich war. Bricht der Vorgang ab (z. B. Stromausfall mitten
+im Setup), startet das Gerät wieder im Portal; bereits gespeicherte
+WLAN-Credentials werden im Formular vorausgefüllt.
 
-Trigger: keine `wifi.json` vorhanden.
+## 6. Setup-Portal (Zustand A)
 
+### 6.1 Start
 1. `WiFi.softAP("Casambi-Setup-XXXX")` **ohne Passwort** (offener AP).
    XXXX = 4 Hex-Ziffern aus `ESP.getEfuseMac()`.
-2. `DNSServer` auf Port 53 → alle Anfragen auf `192.168.4.1` umleiten
-   (Captive-Portal-Effekt).
-3. HTML-Formular (`PROGMEM`, kein LittleFS-Upload nötig):
-   - `GET /` → WLAN-Liste via `WiFi.scanNetworks()` + Passwortfeld.
-   - `POST /wifi` `{ssid, password}` → `ConfigStore::saveWiFiCredentials()`
-     → „gespeichert, Neustart" → `ESP.restart()`.
-4. Nach Reboot: WiFi-Creds vorhanden → Zustand B.
+2. `DNSServer` auf Port 53 → Captive-Portal-Umleitung auf `192.168.4.1`.
+3. AsyncWebServer liefert die Single-Page (HTML in `PROGMEM`, kein
+   LittleFS-Upload nötig).
 
-Neue Dateien: `src/web/setup_portal.{h,cpp}`.
+### 6.2 Endpunkte des Portals
 
-## 7. Phase 2 — Casambi-Setup über REST, getrieben von FHEM
+| Methode | Pfad | Zweck |
+|---|---|---|
+| `GET` | `/` | Single-Page mit beiden Bereichen (WLAN, Casambi) |
+| `GET` | `/api/wifi-scan` | WLAN-Liste (`WiFi.scanNetworks`) als JSON |
+| `POST` | `/api/ble-scan` | BLE-Scan anstoßen (Antwort `202`) |
+| `GET` | `/api/ble-scan` | `{state:"scanning\|done", devices:[…]}` |
+| `POST` | `/api/provision` | `{ssid, wifiPassword, networkUuid, casambiPassword}` (Antwort `202`) |
+| `GET` | `/api/provision/status` | `{state, msg, networkName?}` für Live-Fortschritt |
 
-Trigger: WiFi verbunden, aber `!ConfigStore::hasValidConfig()`. BLE startet
-**nicht** automatisch — nur kurz für den Scan.
+Lange Operationen (BLE-Scan ~10 s, STA-Connect, Cloud-Fetch) laufen **nicht**
+im AsyncTCP-Handler, sondern in einer **Zustandsmaschine in `loop()`** (mit
+`esp_task_wdt_reset()`); die Handler setzen nur Auftrag + Parameter, die
+Portal-Seite pollt den Status.
 
-### 7.1 Lange Operationen laufen in `loop()`, nicht im Async-Handler
-BLE-Scan (~10 s) und Cloud-Fetch (mehrere Sekunden HTTPS) dürfen den
-AsyncTCP-Task der Webserver-Handler nicht blockieren. Daher:
+### 6.3 Ablauf nach „Absenden" (AP+STA mit Live-Fortschritt)
+1. WLAN-Credentials speichern.
+2. **`BLEDevice::deinit(true)`** (BLE-Scan fertig → Heap frei).
+3. `WiFi.mode(WIFI_AP_STA)`, STA-Verbindung zum Heim-WLAN aufbauen — der **AP
+   bleibt aktiv**, die Fortschrittsseite im Browser bleibt erreichbar.
+4. Cloud: `getNetworkId(uuid)` → `createSession(pw)` → `fetchNetworkConfig()`.
+5. `networkUuid/networkId/casambiPassword` setzen;
+   **`autoConnectAddress` = MAC aus `uuid`** (Doppelpunkte einfügen),
+   `autoConnectEnabled = true`; `saveNetworkConfig()`.
+6. Status → **done**, Portal zeigt Erfolg → Reboot in Zustand C.
+7. **Fehler** an jeder Stelle (falsches Casambi-PW, Cloud nicht erreichbar,
+   falsches WLAN-PW) → Status **error** mit Meldung; zurück in den reinen
+   AP-Modus, Seite bleibt erreichbar, Nutzer korrigiert und sendet erneut.
 
-- REST-Handler setzen nur ein **Auftrags-Flag** + Parameter und kehren sofort
-  zurück.
-- Eine **Setup-Zustandsmaschine in `loop()`** erledigt die Arbeit (mit
-  `esp_task_wdt_reset()`).
-- FHEM **pollt** den Fortschritt über `/api/setup/status`.
-
-### 7.2 REST-Endpunkte (Setup-Modus)
-
-| Methode | Pfad | Body / Antwort | Zweck |
-|---|---|---|---|
-| `GET` | `/api/info` | `{configured:false, build, hostname, mac, ip}` | Gerät identifizieren / Setup-Status |
-| `POST` | `/api/setup/scan` | `202 Accepted` | BLE-Scan anstoßen |
-| `GET` | `/api/setup/scan` | `{state:"scanning\|done", devices:[…]}` | Scan-Ergebnis abholen |
-| `POST` | `/api/setup/network` | `{networkUuid, casambiPassword}` → `202` | Cloud-Fetch anstoßen |
-| `GET` | `/api/setup/status` | `{state, msg, networkName?}` | Fortschritt / Ergebnis |
-
-### 7.3 Scan-Ergebnis (pro gefundenem Gerät)
-
+### 6.4 Scan-Ergebnis (pro Gerät)
 ```json
 {
   "uuid": "a1b2c3d4e5f6",      // MAC ohne Doppelpunkte = networkUuid-Kandidat
@@ -131,51 +143,44 @@ AsyncTCP-Task der Webserver-Handler nicht blockieren. Daher:
   "svcData": "..."             // Service Data (hex), falls vorhanden
 }
 ```
+`ScanCallbacks::onResult` wird dafür erweitert (heute nur address/name/rssi).
 
-`ScanCallbacks::onResult` wird dafür erweitert (heute nur address/name/rssi) um
-`getManufacturerData()` / `getServiceData()`. Name/RSSI helfen bei der Auswahl,
-mfg/svc-Data als zusätzliches Unterscheidungsmerkmal.
+## 7. Mehrere Casambi-Geräte / Robustheit
 
-### 7.4 Ablauf der Setup-Zustandsmaschine
-1. **idle** → Webserver + mDNS aktiv, BLE aus.
-2. `POST /api/setup/scan` → **scanning**: `BLEDevice::init()` → 10 s Scan →
-   Liste füllen → **`BLEDevice::deinit(true)`** → **scan_done**.
-3. FHEM holt Ergebnis (`GET /api/setup/scan`), Nutzer wählt Gateway.
-4. `POST /api/setup/network {networkUuid, casambiPassword}` → **fetching**
-   (BLE ist aus → Heap frei):
-   - `getNetworkId(uuid)` → `createSession(pw)` → `fetchNetworkConfig()`
-   - `networkUuid/networkId/casambiPassword` setzen
-   - **`autoConnectAddress` = MAC aus `uuid`** (Doppelpunkte einfügen),
-     `autoConnectEnabled = true`
-   - `saveNetworkConfig()` → **done** → Antwort → `ESP.restart()` → Zustand C
-5. Fehler → **error** mit Meldung in `/api/setup/status`; BLE bleibt aus, kein
-   Reboot, FHEM kann erneut scannen/senden.
+### 7.1 Warum oft nur ein Gerät erscheint
+Primär eine **Casambi-Mesh-Eigenschaft**, kein Firmware-Limit: Die Teilnehmer
+eines Casambi-Netzes handeln aus, **welche Einheit gerade als BLE-Gateway
+„connectable" advertised** — meist nur eine zur Zeit. Der Scan sammelt aber
+bereits **alle** advertisenden Casambi-Geräte (dedupliziert per MAC); mehrere
+Einträge erscheinen, sobald mehrere gleichzeitig advertisen. Das Portal stellt
+alle gefundenen Geräte zur Auswahl.
 
-## 8. Mehrere Casambi-Geräte / Robustheit
-
-### 8.1 Warum oft nur ein Gerät erscheint
-Es ist **primär eine Casambi-Mesh-Eigenschaft**, kein Firmware-Limit: Die
-Teilnehmer eines Casambi-Netzes handeln aus, **welche Einheit gerade als BLE-
-Gateway „connectable" advertised** — meist nur eine zur Zeit. Der Scan sammelt
-aber bereits **alle** advertisenden Casambi-Geräte in `scannedDevices`
-(dedupliziert per MAC); mehrere Einträge erscheinen, sobald mehrere gleichzeitig
-advertisen.
-
-### 8.2 Robustheitsproblem mit fester MAC
+### 7.2 Robustheitsproblem mit fester MAC
 Die Firmware merkt sich Identität **und** Auto-Connect-Ziel als **eine feste
-MAC** (`networkUuid` = `autoConnectAddress` = MAC). Schaltet man genau diese
-Einheit aus, übernimmt eine andere Einheit das Advertising — **mit anderer
-MAC** — und der Reconnect auf die feste MAC schlägt fehl, obwohl das Netz noch
-erreichbar wäre.
+MAC** (`networkUuid` = `autoConnectAddress` = MAC). Schaltet man diese Einheit
+aus, übernimmt eine andere Einheit das Advertising — **mit anderer MAC** — und
+der Reconnect auf die feste MAC schlägt fehl, obwohl das Netz erreichbar wäre.
 
-### 8.3 Geplante Maßnahmen
-- **Auswahl:** Im Setup alle gefundenen Casambi-Geräte an FHEM melden (Liste
-  existiert bereits), nicht nur das erste.
-- **Robusterer Reconnect (Verbesserung):** Beim Verbinden nicht strikt an die
-  gespeicherte MAC pinnen, sondern auf **irgendeine gerade advertisende Einheit
-  desselben Netzes** gehen. Dafür müsste das Netz über die **Service-Data im
-  Advertisement** identifiziert werden statt über die MAC (siehe offener Punkt
-  9.1).
+### 7.3 Verbesserung (separat, abhängig von 9.1)
+Beim Verbinden nicht strikt an die MAC pinnen, sondern auf **irgendeine gerade
+advertisende Einheit desselben Netzes** gehen. Dafür müsste das Netz über die
+**Service-Data im Advertisement** identifiziert werden statt über die MAC.
+
+## 8. mDNS / FHEM-Anbindung
+
+- **Betriebsmodus (Zustand C):** mDNS-Hostname `casambi-XXXX` (XXXX = 4 Hex aus
+  `ESP.getEfuseMac()`) → `casambi-a1b2.local`, Service `_http._tcp` (Port 80)
+  mit TXT-Records `configured=1`, `build=<n>`, `network=<name>`. So sind
+  **mehrere Gateways** im WLAN eindeutig unterscheidbar.
+- **FHEM-Define** akzeptiert Hostname **oder** IP:
+  - `define gw1 CasambiGW casambi-a1b2.local`
+  - `define gw1 CasambiGW 192.168.178.111` (empfohlen mit DHCP-Reservierung am
+    Router über die ESP-MAC)
+- **FHEM-Modul-Änderungen sind minimal:** keine `scanNetworks`/`casambiSetup`-
+  Befehle, kein Status-Polling — die gesamte Einrichtung passiert im Portal.
+  Optional: `GET /api/info` (`{configured, build, hostname, mac, ip}`), damit
+  FHEM erkennt und meldet, falls es auf ein noch nicht konfiguriertes Gerät
+  zeigt.
 
 ## 9. Offene Verifikationspunkte
 
@@ -183,66 +188,33 @@ erreichbar wäre.
    `networkUuid` genutzt und funktioniert für den Cloud-Lookup. Ob die Cloud
    stattdessen einen aus der Service-Data abgeleiteten Netz-Identifier
    akzeptiert (was MAC-unabhängigen Reconnect ermöglichen würde), ist an echter
-   Hardware zu prüfen. Davon hängt ab, ob Abschnitt 8.3 (robuster Reconnect)
-   vollständig umsetzbar ist.
-2. **Scan-Dauer/Trigger:** fester 10-s-Scan mit Polling — vorgeschlagen.
-3. **Setup-Endpunkte nach Abschluss:** in Zustand C deaktivieren (nur
-   `/api/info` behalten) plus optional `set <gw> reconfigure`, das ohne
-   `clearconfig` zurück in den Setup-Modus schaltet.
+   Hardware zu prüfen. Davon hängt Abschnitt 7.3 ab.
+2. **AP+STA + TLS heapseitig:** Mit deinitialisiertem BLE sollte der TLS-Heap
+   verfügbar sein; AP+STA selbst braucht wenig Heap. An Hardware bestätigen.
+3. **Scan-Dauer:** fester 10-s-BLE-Scan, auf Knopfdruck im Portal — vorgeschlagen.
 
-## 10. mDNS / Discovery (mehrere Gateways)
+## 10. ESP-Firmware-Änderungen im Überblick
 
-- **Eindeutiger Hostname:** `casambi-XXXX` (XXXX = 4 Hex aus
-  `ESP.getEfuseMac()`) → `casambi-a1b2.local`.
-- mDNS-Service `_http._tcp` (Port 80) mit TXT-Records: `configured=0|1`,
-  `build=<n>`, `network=<name>` (nach Config) → mehrere ESPs klar
-  unterscheidbar.
-- **FHEM-Define** akzeptiert Hostname **oder** IP:
-  - `define gw1 CasambiGW casambi-a1b2.local`
-  - `define gw1 CasambiGW 192.168.178.111` (empfohlen mit DHCP-Reservierung am
-    Router über die ESP-MAC)
-- Gleicher Präfix für SoftAP-SSID (`Casambi-Setup-XXXX`).
-
-## 11. FHEM-Modul-Erweiterungen (`98_CasambiGW.pm`)
-
-1. **Statuserkennung:** Beim Verbindungsaufbau zuerst `GET /api/info`. Bei
-   `configured:false` → Setup-Zustand statt WebSocket-Handshake; Reading
-   `setupState`.
-2. **Neue Set-Befehle:**
-   - `set <gw> scanNetworks` → `POST /api/setup/scan`, dann Polling von
-     `GET /api/setup/scan`; Ergebnis als Reading `casambiNetworks`
-     (Liste „uuid – name (rssi)").
-   - `set <gw> casambiSetup <uuid> <password>` → `POST /api/setup/network`,
-     danach Polling `GET /api/setup/status`; bei `done` Reboot abwarten und
-     automatisch auf WebSocket umschalten.
-3. **Mehrere Gateways:** über getrennte FHEM-Devices mit je eigener
-   IP/Hostname; keine Sonderlogik nötig.
-4. Nach `done` + Reboot erkennt FHEM `configured:true` und baut die
-   WebSocket-Verbindung wie gehabt auf.
-
-## 12. ESP-Firmware-Änderungen im Überblick
-
-1. `main.cpp` — `setup()` als 3-Zustands-Maschine; Setup-Zustandsmaschine
-   (idle/scanning/scan_done/fetching/done/error) in `loop()`. Serial-Wizard
-   bleibt als Fallback.
-2. `src/web/setup_portal.{h,cpp}` (neu) — offener SoftAP, DNSServer, HTML.
-3. `webserver.{h,cpp}` — Setup-Modus (Client darf `null` sein), neue
-   `/api/info` + `/api/setup/*`-Routen, mDNS.
-4. `ScanCallbacks` erweitern (mfg/svc-Data); Scan-Ergebnis als gemeinsame
-   Struktur für Serial- und REST-Pfad.
-5. Cloud-Schritte aus `runSetupWizard()` in
-   `provisionFromCloud(uuid, pw, &cfg)` herauslösen (von REST **und** Serial
-   genutzt).
+1. `main.cpp` — `setup()` als 2-Zustands-Maschine (Setup-Portal / Betrieb);
+   Provisionierungs-Zustandsmaschine (idle/wifi-scan/ble-scan/connecting/
+   fetching/done/error) in `loop()`. Serial-Wizard bleibt als Fallback.
+2. `src/web/setup_portal.{h,cpp}` (neu) — offener SoftAP, DNSServer,
+   Single-Page-HTML, Portal-Endpunkte, AP+STA-Umschaltung.
+3. `ScanCallbacks` erweitern (mfg/svc-Data); Scan-Ergebnis als gemeinsame
+   Struktur für Serial- und Portal-Pfad.
+4. Cloud-Schritte aus `runSetupWizard()` in `provisionFromCloud(uuid, pw, &cfg)`
+   herauslösen (von Portal **und** Serial genutzt).
+5. `webserver.{h,cpp}` — mDNS im Betriebsmodus, optional `/api/info`.
 6. `config.h` — Präfixe/Konstanten (AP-SSID, mDNS-Hostname).
-7. `98_CasambiGW.pm` — `/api/info`-Erkennung, `scanNetworks` + `casambiSetup`,
-   neue Readings.
+7. `98_CasambiGW.pm` — optional `/api/info`-Auswertung; sonst unverändert.
 8. README aktualisieren.
 
-## 13. Umsetzungsreihenfolge
+## 11. Umsetzungsreihenfolge
 
 1. `provisionFromCloud()` aus dem Wizard herauslösen (Refactor, verhaltensneutral).
-2. Zustandsmaschine in `setup()`.
-3. Setup-REST-Endpunkte + mDNS in `webserver.cpp`.
-4. SoftAP-/Captive-Portal-Modul.
-5. FHEM-Modul: `/api/info`-Erkennung + Setup-Set-Befehle.
-6. README aktualisieren.
+2. `ScanCallbacks` erweitern + gemeinsame Scan-Struktur.
+3. SoftAP-/Captive-Portal-Modul mit Single-Page + Portal-Endpunkten.
+4. Provisionierungs-Zustandsmaschine in `loop()` (inkl. AP+STA + Cloud-Fetch).
+5. 2-Zustands-`setup()`; mDNS im Betriebsmodus.
+6. Optional `/api/info` + FHEM-Auswertung.
+7. README aktualisieren.
