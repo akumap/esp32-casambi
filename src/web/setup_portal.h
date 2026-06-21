@@ -48,6 +48,7 @@ private:
 
     AsyncWebServer* _server;
     DNSServer       _dns;
+    bool            _bleInited;       // BLE stack currently initialised?
 
     // BLE scan
     volatile bool _scanRequested;

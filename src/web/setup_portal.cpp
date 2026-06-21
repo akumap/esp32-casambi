@@ -135,7 +135,7 @@ async function provision(){
 // ---------------------------------------------------------------------------
 
 SetupPortal::SetupPortal()
-    : _server(nullptr),
+    : _server(nullptr), _bleInited(false),
       _scanRequested(false), _scan(ScanState::Idle),
       _provisionRequested(false), _prov(ProvState::Idle),
       _rebootAt(0) {}
@@ -297,9 +297,15 @@ void SetupPortal::_runScan() {
     _scan = ScanState::Running;
     Serial.println("Portal: BLE scan...");
 
-    BLEDevice::init("Casambi-Setup");
+    // Keep BLE initialised across repeated scans. Releasing the controller
+    // memory (deinit(true)) cannot be undone within the same boot, so doing it
+    // here would make every scan after the first one find nothing. The memory
+    // is released later, once, right before the cloud TLS handshake.
+    if (!_bleInited) {
+        BLEDevice::init("Casambi-Setup");
+        _bleInited = true;
+    }
     CasambiScan::run(PORTAL_BLE_SCAN_SECONDS, _scanResults);
-    BLEDevice::deinit(true);            // free heap for the upcoming cloud TLS
 
     Serial.printf("Portal: BLE scan done, %d device(s)\n", _scanResults.size());
     _scan = ScanState::Done;
@@ -314,7 +320,15 @@ void SetupPortal::_runProvision() {
     wc.password = _wifiPw;
     ConfigStore::saveWiFiCredentials(wc);
 
-    // BLE is already deinitialised after the scan → heap is free for TLS.
+    // Release the BLE controller memory now (once) so the TLS handshake has a
+    // large enough contiguous heap block. After this BLE is unusable until the
+    // next reboot — fine, we reboot into operation mode on success.
+    if (_bleInited) {
+        BLEDevice::deinit(true);
+        _bleInited = false;
+        delay(100);
+    }
+
     // Bring up STA alongside the AP so the portal page stays reachable.
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(_ssid.c_str(), _wifiPw.c_str());
