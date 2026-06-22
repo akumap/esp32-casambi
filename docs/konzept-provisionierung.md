@@ -195,6 +195,26 @@ Auto-Hangeln implementiert ist.
 
 ## 7. Automatisches Gateway-Hangeln im Betrieb
 
+> 🔎 **Hardware-Befund — Hopping ist evtl. überflüssig (Casambi macht es selbst).**
+> Beobachtung: Es werden mehrere Advertiser gefunden (z. B. ein benanntes
+> `air_module` und ein unbenannter Teilnehmer `9ed82b331544`), aber die
+> **tatsächliche Verbindungs-MAC ist in beiden Fällen dieselbe**
+> (`9e:d8:2b:33:15:44`). Das deutet stark darauf hin, dass das Casambi-Netz
+> **einen stabilen, netzweiten Gateway-Endpunkt** (random static Adresse)
+> präsentiert und die Weiterleitung ins Mesh sowie einen Rollenwechsel
+> **intern selbst** erledigt. Folge: ESP-seitiges Hangeln wäre **redundant** —
+> der vorhandene Reconnect auf die feste `autoConnectAddress` würde genügen,
+> sofern dieser Endpunkt stabil bleibt.
+>
+> **Entscheidender Test (offen):** Das aktuell verbundene Gateway-Gerät stromlos
+> machen und beobachten, ob der ESP über dieselbe `autoConnectAddress`
+> automatisch wieder verbindet (Casambi hat die Rolle intern verschoben) →
+> dann ist Hopping **nicht nötig**. Verliert der ESP dauerhaft die Verbindung →
+> Hopping (oder ein Advertisement-/Auth-basiertes Re-Discovery) wird doch
+> gebraucht. Bis dahin ist Abschnitt 7 **zurückgestellt** und die folgenden
+> Unterabschnitte sind nur die ursprüngliche (MAC-Listen-)Idee, die durch den
+> Random-Adress-Befund (siehe Kasten in 7.1) ohnehin nicht trägt.
+
 ### 7.1 Grundlage: netzweite Keys + bekannte MAC-Liste
 Zwei Eigenschaften machen automatisches Umschalten möglich:
 

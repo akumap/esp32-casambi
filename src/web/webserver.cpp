@@ -111,14 +111,15 @@ String CasambiWebServer::_gatewayName(const String& mac) const {
         if (a == want) return u.name;
     }
 
-    // Fallback: the name captured at provisioning time for the stored gateway.
+    // Fallback: the advertised name captured at provisioning for this gateway.
     String ac = _config->autoConnectAddress; ac.replace(":", ""); ac.toLowerCase();
     if (!ac.isEmpty() && ac == want && _config->gatewayName.length())
         return _config->gatewayName;
 
-    // Last resort: the BLE advertisement carries the network name (which is
-    // what the user saw during setup), so show that rather than nothing.
-    return _config->networkName;
+    // No reliable name: the connection endpoint is typically a random network
+    // gateway address that maps to no named unit. Leave empty rather than
+    // mislabeling it (gatewayMac is the meaningful identifier).
+    return String("");
 }
 
 String CasambiWebServer::_buildHelloMessage() const {
