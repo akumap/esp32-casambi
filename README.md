@@ -11,6 +11,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 ## Features
 
 - ✅ **Hybrid WiFi/BLE Operation** — One-time WiFi setup, then fully offline BLE control
+- ✅ **Browser-Based Setup (no serial needed)** — On first boot the device opens an open Wi-Fi access point with a captive-portal page for Wi-Fi + Casambi provisioning; the serial wizard remains as a fallback
 - ✅ **HTTP REST API** — Control and monitor lights from any home automation system
 - ✅ **WebSocket Push** — Real-time state push to connected clients; no polling required
 - ✅ **Real-Time State Tracking** — Receives status broadcasts from the Casambi mesh; current brightness, color temperature, and vertical distribution always up to date, even when lights are controlled via the Casambi app or other controllers
@@ -84,9 +85,27 @@ The controller should work with any Casambi-enabled luminaire. Capabilities are 
    pio device monitor --filter esp32_exception_decoder --filter time
    ```
 
-### Initial Setup
+### Initial Setup (Wi-Fi access point + web page)
 
-On first boot, the device enters setup mode. Run the setup wizard:
+On first boot (no stored configuration) the device opens an **open Wi-Fi access point** with a captive-portal web page — **no serial input required**.
+
+1. Connect a phone/laptop to the open Wi-Fi network **`Casambi-Setup-XXXX`** (XXXX = last 4 hex digits of the chip MAC).
+1. A setup page should open automatically (captive portal). If not, browse to **`http://192.168.4.1/`**.
+1. **Scan Wi-Fi**, select your home network and enter its password.
+1. **Scan Casambi gateways**, select your network and enter the Casambi network password. With several gateways you can just enter the password — only the matching network authenticates.
+1. Press **Set up**. The device joins your Wi-Fi, downloads the network configuration from the Casambi Cloud (unit capabilities included), saves it and reboots into operation mode.
+
+The page shows live progress and any error (wrong password, cloud unreachable), so you can correct it and retry.
+
+After provisioning the controller auto-connects to the Casambi gateway, serves the REST API + WebSocket once Wi-Fi is up, and advertises itself via mDNS as **`casambi-XXXX.local`**.
+
+> **Tip:** The Casambi mesh rotates which unit advertises as connectable, so repeating **Scan Casambi gateways** may reveal different devices. Pick one that stays powered. (The ESP connects to a stable network-level gateway endpoint; Casambi handles the mesh internally, so no gateway selection is critical for normal operation.)
+
+A factory reset (`clearconfig` over serial) wipes the configuration and returns the device to this setup portal on the next boot.
+
+#### Serial setup (fallback)
+
+The serial wizard is still available. Open the serial monitor and run:
 
 ```
 > setup
@@ -101,14 +120,7 @@ The wizard will:
 1. Save everything to flash
 1. Reboot into operation mode
 
-Then connect to a BLE gateway:
-
-```
-> scan
-> connect 0
-```
-
-The MAC address is saved automatically. On subsequent boots, the controller reconnects automatically.
+On subsequent boots the controller reconnects automatically using the saved gateway address.
 
 -----
 
@@ -197,6 +209,17 @@ http://<esp32-ip>/api
 The IP address is displayed in the serial console on boot.
 
 ### Status & Discovery
+
+**GET /api/info** — Lightweight discovery endpoint (used by the FHEM module)
+
+```json
+{ "configured": true, "build": 42, "network": "My Home", "mac": "aa:bb:cc:dd:ee:01", "ip": "192.168.1.100" }
+```
+
+Served in both modes: while the device is still in the setup portal it returns
+`"configured": false` (plus `hostname`/`ip` of the access point); once provisioned
+it returns `"configured": true`. A client can poll this to tell a ready gateway
+apart from one still in setup, and connect automatically once it becomes ready.
 
 **GET /api/status**
 
@@ -565,6 +588,7 @@ esp32-casambi/
 │   ├── config.h              # Configuration constants, timeouts, debug flags
 │   ├── ble/
 │   │   ├── casambi_client.*  # BLE connection, encryption, state tracking
+│   │   ├── casambi_scan.*    # Shared BLE discovery (used by the setup portal)
 │   │   └── packet.*          # Packet building, 0x06/0x07/0x08/0x09 parsing
 │   ├── cloud/
 │   │   ├── api_client.*      # Casambi Cloud API client
@@ -575,7 +599,8 @@ esp32-casambi/
 │   ├── storage/
 │   │   └── config_store.*    # LittleFS persistence (config + debug flags)
 │   └── web/
-│       └── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
+│       ├── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
+│       └── setup_portal.*    # First-boot SoftAP + captive portal provisioning
 ├── FHEM/
 │   ├── 98_CasambiGW.pm       # FHEM gateway module (WebSocket connection, unit sync)
 │   └── 98_CasambiUnit.pm     # FHEM unit + companion vertical dimmer modules
@@ -745,21 +770,36 @@ vertical light distribution).  No separate file is needed for `CasambiVertical`.
 
 ### Gateway device
 
-Define one gateway device per ESP32, passing the IP address (and optionally port):
+Define one gateway device per ESP32, passing its IP address or mDNS hostname
+(and optionally a port):
 
 ```
 define MyCasambi CasambiGW 192.168.1.100
+define MyCasambi CasambiGW casambi-24f0.local
 ```
 
-The gateway opens a persistent WebSocket connection, performs the handshake,
-and reconnects automatically on link loss or FHEM startup.
+A fixed IP (DHCP reservation on the router) or the `casambi-XXXX.local` hostname
+keeps the definition stable; the hostname suffix also distinguishes multiple
+gateways.
+
+Before opening the WebSocket the module queries `GET /api/info` and only
+connects once the ESP reports `configured: true`. While the device is still in
+the setup portal (`configured: false`) or unreachable, it polls periodically and
+connects automatically once provisioning finishes — no manual reconnect needed.
+The gateway then opens a persistent WebSocket connection and reconnects
+automatically on link loss or FHEM startup.
 
 **Readings on the gateway device:**
 
 | Reading | Values | Description |
 |---------|--------|-------------|
-| `state` | `connected` / `disconnected` | WebSocket connection state |
+| `state` | `connected` / `disconnected` / `setup_required` / `unreachable` / `initializing` | Connection / setup state |
+| `configured` | `true` / `false` | Whether the ESP32 has a valid configuration (from `/api/info`) |
+| `network` | text | Casambi network name reported by the ESP32 |
 | `ble_state` | `ble_connected` / `ble_disconnected` | BLE link of the ESP32 |
+| `gatewayState` | `connected` / `disconnected` | BLE gateway link state |
+| `gatewayMac` | MAC | BLE address of the current gateway endpoint (empty while disconnected) |
+| `gatewayName` | text | Advertised name of the current gateway, if known (often empty: the endpoint is a network-level address) |
 | `syncState` | `ok` / `changes_pending` | Whether structural changes are waiting |
 | `pendingSync` | text summary | e.g. `"2 new (Mito sospeso, Sento); 1 removed (Casambi_OldLight)"` |
 | `lastSync` | timestamp | Time of last successful hello sync |
