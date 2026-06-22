@@ -284,7 +284,10 @@ static void writeEntryJson(Print& out, const LogEntry& e) {
     out.print("\"}");
 }
 
-void EventLog::writeJson(Print& out, int maxEntries) {
+// Load the newest `maxEntries` records (chronological, oldest→newest) into
+// `entries`. Only the requested tail is read — loading the whole log into RAM
+// can exhaust the heap when WiFi/BLE/web are active (each LogEntry is large).
+void EventLog::_loadNewest(std::vector<LogEntry>& entries, int maxEntries) {
     bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
 
     const size_t recSize = sizeof(LogEntry);
@@ -301,13 +304,10 @@ void EventLog::writeJson(Print& out, int maxEntries) {
     }
     size_t total = counts[0] + counts[1];
 
-    // Only buffer the newest `limit` entries — reading the whole log into RAM
-    // can exhaust the heap when WiFi/BLE/web are active (each LogEntry is large).
     size_t limit = (maxEntries >= 0 && (size_t)maxEntries < total)
                        ? (size_t)maxEntries : total;
     size_t start = total - limit;   // global index of first entry to keep
 
-    std::vector<LogEntry> entries;
     entries.reserve(limit);
 
     size_t globalIdx = 0;
@@ -333,8 +333,12 @@ void EventLog::writeJson(Print& out, int maxEntries) {
     }
 
     if (locked) xSemaphoreGive(_mutex);
+}
 
-    // Emit newest-first.
+void EventLog::writeJson(Print& out, int maxEntries) {
+    std::vector<LogEntry> entries;
+    _loadNewest(entries, maxEntries);
+
     out.print('[');
     size_t kept = entries.size();
     bool first = true;
@@ -345,4 +349,48 @@ void EventLog::writeJson(Print& out, int maxEntries) {
         writeEntryJson(out, e);
     }
     out.print(']');
+}
+
+// One aligned, human-readable line per entry (for the serial 'log' command).
+static void writeEntryText(Print& out, const LogEntry& e) {
+    char ts[40];
+    if (e.timestamp_ms > 0) {
+        time_t secs = (time_t)(e.timestamp_ms / 1000);
+        int    msPart = (int)(e.timestamp_ms % 1000);
+        struct tm tmv;
+        gmtime_r(&secs, &tmv);
+        size_t len = strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+        snprintf(ts + len, sizeof(ts) - len, ".%03dZ", msPart);
+    } else {
+        // Pre-NTP: magnitude of the timestamp is the uptime in ms.
+        unsigned long s = (unsigned long)((-e.timestamp_ms) / 1000);
+        int msPart = (int)((-e.timestamp_ms) % 1000);
+        snprintf(ts, sizeof(ts), "[up %lu:%02lu:%02lu.%03d]",
+                 s / 3600, (s / 60) % 60, s % 60, msPart);
+    }
+
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "%-25s %-8s b%-3u  ",
+             ts, EventLog::levelName(e.level), (unsigned)e.bootId);
+    out.print(prefix);
+
+    // msg is not necessarily NUL-terminated → print exactly msgLen bytes.
+    for (uint8_t i = 0; i < e.msgLen && i < LOG_MSG_MAX; i++) out.print(e.msg[i]);
+    out.print('\n');
+}
+
+void EventLog::writeText(Print& out, int maxEntries) {
+    std::vector<LogEntry> entries;
+    _loadNewest(entries, maxEntries);
+
+    size_t kept = entries.size();
+    if (kept == 0) {
+        out.println("(no entries)");
+        return;
+    }
+    out.println("time (UTC)                level    boot  message");
+    out.println("------------------------------------------------------------");
+    for (size_t i = 0; i < kept; i++) {
+        writeEntryText(out, entries[kept - 1 - i]);   // newest first
+    }
 }

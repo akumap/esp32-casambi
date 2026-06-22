@@ -880,8 +880,8 @@ void handleCommand(const String& cmd) {
                 int n = sub.length() > 0 ? sub.toInt() : 30;
                 if (n <= 0) n = 30;
                 Serial.printf("\n=== Event Log (newest %d) ===\n", n);
-                EventLog::writeJson(Serial, n);
-                Serial.println("\n");
+                EventLog::writeText(Serial, n);
+                Serial.println();
             }
         }
         else if (cmd.startsWith("ntp")) {

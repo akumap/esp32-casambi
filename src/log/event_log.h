@@ -28,6 +28,7 @@
 #define EVENT_LOG_H
 
 #include <Arduino.h>
+#include <vector>
 #include "../config.h"
 
 // ----------------------------------------------------------------------------
@@ -81,6 +82,13 @@ public:
     static void writeJson(Print& out, int maxEntries = -1);
 
     /**
+     * Stream the log as aligned, human-readable text (newest entry first) to
+     * the given Print sink — used by the serial 'log' command. If
+     * maxEntries >= 0, only the newest maxEntries are emitted.
+     */
+    static void writeText(Print& out, int maxEntries = -1);
+
+    /**
      * Current boot counter (incremented once per begin()).
      */
     static uint16_t bootCount() { return _bootId; }
@@ -97,6 +105,7 @@ private:
     static size_t _activeSize;     // bytes currently in active file
     static SemaphoreHandle_t _mutex;
 
+    static void   _loadNewest(std::vector<LogEntry>& entries, int maxEntries);  // newest tail, oldest→newest
     static int64_t _nowTimestamp();                 // signed timestamp per above
     static const char* _activePath();
     static const char* _inactivePath();
