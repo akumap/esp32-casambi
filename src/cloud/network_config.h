@@ -96,6 +96,12 @@ struct NetworkConfig {
     bool autoConnectEnabled;
     String autoConnectAddress;
 
+    // Advertised name of the gateway chosen at provisioning time. The BLE
+    // address we connect to is often a random static address that does NOT
+    // match any unit's hardware `address`, so the name cannot be resolved from
+    // the unit list — we keep the scanned name here for display instead.
+    String gatewayName;
+
     // NTP server used for time synchronisation (UTC). Configurable at runtime.
     String ntpServer;
 
@@ -114,6 +120,7 @@ struct NetworkConfig {
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
                       autoConnectEnabled(true), autoConnectAddress(""),
+                      gatewayName(""),
                       ntpServer(NTP_SERVER_DEFAULT), casambiPassword(""),
                       bleDebugEnabled(false), casambiDebugEnabled(true),
                       webDebugEnabled(true),

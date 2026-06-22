@@ -394,6 +394,12 @@ void SetupPortal::_runProvision() {
     cfg.autoConnectAddress = macFromUuid(usedUuid);   // preferred first target
     cfg.autoConnectEnabled = true;
 
+    // Remember the advertised name of the chosen gateway (the connected BLE
+    // address is usually a random static address and won't resolve to a unit).
+    for (const auto& r : _scanResults) {
+        if (r.uuid == usedUuid) { cfg.gatewayName = r.name; break; }
+    }
+
     if (!ConfigStore::saveNetworkConfig(cfg)) {
         _prov = ProvState::Error;
         _provMsg = "Speichern fehlgeschlagen";

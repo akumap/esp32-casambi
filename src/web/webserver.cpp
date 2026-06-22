@@ -103,11 +103,22 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
 String CasambiWebServer::_gatewayName(const String& mac) const {
     if (mac.isEmpty()) return String("");
     String want = mac; want.replace(":", ""); want.toLowerCase();
+
+    // Try to resolve via the unit list (works only if the gateway advertises
+    // its hardware MAC rather than a random static address).
     for (const auto& u : _config->units) {
         String a = u.address; a.replace(":", ""); a.toLowerCase();
         if (a == want) return u.name;
     }
-    return String("");
+
+    // Fallback: the name captured at provisioning time for the stored gateway.
+    String ac = _config->autoConnectAddress; ac.replace(":", ""); ac.toLowerCase();
+    if (!ac.isEmpty() && ac == want && _config->gatewayName.length())
+        return _config->gatewayName;
+
+    // Last resort: the BLE advertisement carries the network name (which is
+    // what the user saw during setup), so show that rather than nothing.
+    return _config->networkName;
 }
 
 String CasambiWebServer::_buildHelloMessage() const {

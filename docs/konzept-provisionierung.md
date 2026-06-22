@@ -207,6 +207,17 @@ Zwei Eigenschaften machen automatisches Umschalten möglich:
    (`api_client.cpp:299`, persistiert `config_store.cpp:87`) die MACs **aller**
    Einheiten seines Netzes.
 
+> ⚠ **Hardware-Befund (widerlegt Annahme 2 teilweise):** Die tatsächlich
+> verbundene Gateway-Adresse ist eine **zufällige (random static) BLE-Adresse**
+> (beobachtet z. B. `9e:d8:2b:33:15:44` — oberste zwei Bits `10`) und **stimmt
+> nicht** mit `unit.address` aus der Cloud überein. Damit funktioniert der
+> geplante **Netz-Filter über die bekannte Unit-MAC-Liste NICHT** (Punkt 9.1
+> ist also negativ beantwortet). Zudem kann sich die Adresse nach einem
+> Geräte-Neustart ändern — was sogar den heutigen Reconnect über die feste
+> `autoConnectAddress` brechen kann. Konsequenz für das Hopping: Netz-Zuordnung
+> muss über das **Advertisement (Service-Data / advertisten Namen)** oder über
+> einen **Auth-Versuch mit dem Netzwerk-Key** erfolgen, nicht über Unit-MACs.
+
 ### 7.2 Verfahren
 Statt an eine feste MAC zu pinnen, hangelt sich der ESP zur nächsten
 erreichbaren Einheit:
@@ -277,11 +288,15 @@ der sich nur an echter Hardware messen lässt (siehe 9) — er entscheidet zwisc
 
 ## 9. Offene Verifikationspunkte
 
-1. **Advertisende MAC == `unit.address`?** Das Auto-Hangeln (7) schneidet
-   gescannte Advertiser mit der bekannten Unit-MAC-Liste. Dafür muss die im
-   Scan sichtbare BLE-MAC gleich der gespeicherten `unit.address` sein
-   (Casambi nutzt normalerweise statische Public-Adressen → wahrscheinlich ja).
-   An Hardware bestätigen.
+1. **Advertisende MAC == `unit.address`? → NEIN (an Hardware geklärt).** Die
+   verbundene Gateway-Adresse ist eine **random static** BLE-Adresse (z. B.
+   `9e:d8:2b:33:15:44`) und matcht **keine** `unit.address`. Der geplante
+   Netz-Filter über die Unit-MAC-Liste (7.1/7.2) ist damit hinfällig; die
+   Namensauflösung Gateway-MAC → Unit-Name funktioniert ebenfalls nicht
+   (Workaround: advertisten Namen beim Provisionieren merken + Netzname als
+   Fallback, umgesetzt). **Offen/neu:** Wechselt diese Adresse bei einem
+   Geräte-Neustart? Falls ja, bricht auch der Reconnect über die feste
+   `autoConnectAddress` → Hopping muss übers Advertisement/Auth-Probe gehen.
 2. **Mehrere Einheiten gleichzeitig connectable?** Entscheidet die Wechseldauer
    (7.3): nahezu unterbrechungsfrei vs. Warten auf Mesh-Neuwahl. Nur an echter
    Hardware messbar.
