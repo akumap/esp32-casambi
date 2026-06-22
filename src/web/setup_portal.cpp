@@ -46,7 +46,7 @@ static String macFromUuid(const String& uuid) {
 // ---------------------------------------------------------------------------
 
 static const char PORTAL_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
-<html lang="de"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Casambi Setup</title>
 <style>
@@ -58,75 +58,75 @@ button{background:#0a6;color:#fff;border:0;border-radius:6px;cursor:pointer;marg
 button.sec{background:#37a}#status{white-space:pre-wrap;margin-top:12px;font-weight:bold}
 small{color:#666}
 </style></head><body>
-<h1>Casambi-Gateway einrichten</h1>
-<fieldset><legend>1. WLAN</legend>
-<button class="sec" onclick="scanWifi()">WLAN suchen</button>
-<label>Netzwerk</label><select id="ssid"><option value="">– zuerst suchen –</option></select>
-<label>WLAN-Passwort</label><input id="wpw" type="password">
+<h1>Set up Casambi gateway</h1>
+<fieldset><legend>1. Wi-Fi</legend>
+<button class="sec" onclick="scanWifi()">Scan Wi-Fi</button>
+<label>Network</label><select id="ssid"><option value="">– scan first –</option></select>
+<label>Wi-Fi password</label><input id="wpw" type="password">
 </fieldset>
-<fieldset><legend>2. Casambi-Netz</legend>
-<button class="sec" onclick="scanBle()">Casambi-Gateways suchen</button>
-<label>Gateway / Netz</label><select id="net"><option value="">– zuerst suchen –</option></select>
-<small>Bei mehreren genügt die Passwort-Eingabe – nur das passende Netz authentifiziert.</small>
-<label>Casambi-Netzwerk-Passwort</label><input id="cpw" type="password">
+<fieldset><legend>2. Casambi network</legend>
+<button class="sec" onclick="scanBle()">Scan Casambi gateways</button>
+<label>Gateway / network</label><select id="net"><option value="">– scan first –</option></select>
+<small>If several appear, just enter the password – only the matching network authenticates.</small>
+<label>Casambi network password</label><input id="cpw" type="password">
 </fieldset>
-<button onclick="provision()">Einrichten</button>
+<button onclick="provision()">Set up</button>
 <div id="status"></div>
 <script>
 const S=document.getElementById('status');
 function j(u,o){return fetch(u,o).then(r=>r.json())}
 async function scanWifi(){
-  S.textContent='WLAN-Suche läuft…';
+  S.textContent='Scanning for Wi-Fi…';
   for(let i=0;i<15;i++){
     let d=await j('/api/wifi-scan');
     if(d.state==='done'){
       let s=document.getElementById('ssid');s.innerHTML='';
       d.networks.sort((a,b)=>b.rssi-a.rssi).forEach(n=>{
         let o=document.createElement('option');o.value=n.ssid;
-        o.textContent=n.ssid+' ('+n.rssi+' dBm)'+(n.enc?'':' [offen]');s.appendChild(o)});
-      S.textContent=d.networks.length+' WLANs gefunden.';return;
+        o.textContent=n.ssid+' ('+n.rssi+' dBm)'+(n.enc?'':' [open]');s.appendChild(o)});
+      S.textContent=d.networks.length+' Wi-Fi network(s) found.';return;
     }
     await new Promise(r=>setTimeout(r,1000));
   }
-  S.textContent='WLAN-Suche dauert zu lange – erneut versuchen.';
+  S.textContent='Wi-Fi scan is taking too long – please try again.';
 }
 async function scanBle(){
-  S.textContent='Casambi-Suche läuft (ca. 10 s)…';
+  S.textContent='Scanning for Casambi (approx. 10 s)…';
   await j('/api/ble-scan',{method:'POST'});
   for(let i=0;i<20;i++){
     await new Promise(r=>setTimeout(r,1500));
     let d=await j('/api/ble-scan');
     if(d.state==='done'){
       let s=document.getElementById('net');s.innerHTML='';
-      if(!d.devices.length){S.textContent='Kein Casambi-Gateway gefunden.';return;}
+      if(!d.devices.length){S.textContent='No Casambi gateway found.';return;}
       d.devices.sort((a,b)=>b.rssi-a.rssi).forEach(n=>{
         let o=document.createElement('option');o.value=n.uuid;
         o.textContent=(n.name||n.uuid)+' ('+n.rssi+' dBm)';s.appendChild(o)});
-      S.textContent=d.devices.length+' Gateway(s) gefunden.';return;
+      S.textContent=d.devices.length+' gateway(s) found.';return;
     }
   }
-  S.textContent='Casambi-Suche dauert zu lange – erneut versuchen.';
+  S.textContent='Casambi scan is taking too long – please try again.';
 }
 async function provision(){
   let body={ssid:document.getElementById('ssid').value,
     wifiPassword:document.getElementById('wpw').value,
     casambiPassword:document.getElementById('cpw').value,
     networkUuid:document.getElementById('net').value};
-  if(!body.ssid){S.textContent='Bitte WLAN wählen.';return;}
-  if(!body.casambiPassword){S.textContent='Bitte Casambi-Passwort eingeben.';return;}
-  S.textContent='Einrichtung gestartet…';
+  if(!body.ssid){S.textContent='Please select a Wi-Fi network.';return;}
+  if(!body.casambiPassword){S.textContent='Please enter the Casambi password.';return;}
+  S.textContent='Setup started…';
   await j('/api/provision',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)});
-  const T={connecting_wifi:'Verbinde mit WLAN…',fetching_cloud:'Lade Konfiguration aus der Cloud…'};
+  const T={connecting_wifi:'Connecting to Wi-Fi…',fetching_cloud:'Downloading configuration from the cloud…'};
   for(let i=0;i<120;i++){
     await new Promise(r=>setTimeout(r,2000));
     let d=await j('/api/provision/status');
-    if(d.state==='done'){S.textContent='Fertig! Netz: '+(d.networkName||'?')+
-      '\nDas Gerät startet neu.';return;}
-    if(d.state==='error'){S.textContent='Fehler: '+(d.msg||'unbekannt');return;}
+    if(d.state==='done'){S.textContent='Done! Network: '+(d.networkName||'?')+
+      '\nThe device is restarting.';return;}
+    if(d.state==='error'){S.textContent='Error: '+(d.msg||'unknown');return;}
     S.textContent=T[d.state]||('Status: '+d.state);
   }
-  S.textContent='Zeitüberschreitung – Status prüfen.';
+  S.textContent='Timed out – please check the status.';
 }
 </script></body></html>)HTML";
 

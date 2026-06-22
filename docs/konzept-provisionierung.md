@@ -206,14 +206,16 @@ Auto-Hangeln implementiert ist.
 > der vorhandene Reconnect auf die feste `autoConnectAddress` würde genügen,
 > sofern dieser Endpunkt stabil bleibt.
 >
-> **Entscheidender Test (offen):** Das aktuell verbundene Gateway-Gerät stromlos
-> machen und beobachten, ob der ESP über dieselbe `autoConnectAddress`
-> automatisch wieder verbindet (Casambi hat die Rolle intern verschoben) →
-> dann ist Hopping **nicht nötig**. Verliert der ESP dauerhaft die Verbindung →
-> Hopping (oder ein Advertisement-/Auth-basiertes Re-Discovery) wird doch
-> gebraucht. Bis dahin ist Abschnitt 7 **zurückgestellt** und die folgenden
-> Unterabschnitte sind nur die ursprüngliche (MAC-Listen-)Idee, die durch den
-> Random-Adress-Befund (siehe Kasten in 7.1) ohnehin nicht trägt.
+> **Entscheidender Test — durchgeführt, Hopping NICHT nötig.** Die anfangs
+> kontaktierte Einheit („AZ Stehleuchte", id=1) wurde aus- und wieder
+> eingeschaltet: Sie ging `OFFLINE` und wieder `ONLINE`, die **BLE-Verbindung
+> zum Netz blieb aber durchgehend bestehen** (kein „connection lost", kein
+> Reconnect, WebSocket sendete weiter). Casambi verschiebt die Gateway-Rolle
+> also intern, ohne dass der ESP die Verbindung verliert. **Ergebnis:**
+> ESP-seitiges Hopping wird **nicht** implementiert; der vorhandene Reconnect
+> auf die feste `autoConnectAddress` genügt. Abschnitt 7 ist damit
+> **geschlossen** (die folgenden Unterabschnitte bleiben nur als
+> Hintergrund/Historie stehen).
 
 ### 7.1 Grundlage: netzweite Keys + bekannte MAC-Liste
 Zwei Eigenschaften machen automatisches Umschalten möglich:
