@@ -169,6 +169,17 @@ Vorbehalte (Hardware-Prüfpunkte, siehe 9):
 Kosten: jeder Versuch = ein Cloud-Roundtrip (BLE hier ohnehin aus → Heap frei),
 bei wenigen Advertisern unkritisch.
 
+**Wiederholtes Scannen zur gezielten Gateway-Auswahl (praxiserprobt):**
+Weil das Casambi-Mesh aushandelt, welche Einheit gerade als „connectable"
+advertised, zeigt jeder erneute BLE-Scan u. U. eine **andere** Einheit desselben
+Netzes. Man kann den Scan im Portal daher **so oft wiederholen, bis das
+gewünschte Gateway erscheint**, und gezielt eine Einheit wählen, die
+**dauerhaft mit Strom versorgt und nicht vom Netz getrennt** wird.
+Das ist aktuell wichtig, weil der Reconnect noch auf die gespeicherte MAC pinnt
+(Auto-Hangeln, Abschnitt 7, ist zurückgestellt): Eine stabile, ortsfeste
+Einheit als Gateway zu wählen erhöht die Betriebszuverlässigkeit, bis das
+Auto-Hangeln implementiert ist.
+
 ### 6.4 Scan-Ergebnis (pro Gerät)
 ```json
 {
