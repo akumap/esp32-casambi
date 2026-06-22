@@ -100,11 +100,29 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
     }
 }
 
+String CasambiWebServer::_gatewayName(const String& mac) const {
+    if (mac.isEmpty()) return String("");
+    String want = mac; want.replace(":", ""); want.toLowerCase();
+    for (const auto& u : _config->units) {
+        String a = u.address; a.replace(":", ""); a.toLowerCase();
+        if (a == want) return u.name;
+    }
+    return String("");
+}
+
 String CasambiWebServer::_buildHelloMessage() const {
     JsonDocument doc;
     doc["type"] = "hello";
     doc["build"] = FIRMWARE_BUILD;  // injected by scripts/build_number.py
-    doc["ble_connected"] = _client->isAuthenticated();
+    bool bleConn = _client->isAuthenticated();
+    doc["ble_connected"] = bleConn;
+
+    // Currently connected gateway (BLE MAC + resolved unit name) for transparency.
+    String gwMac = bleConn ? _client->getConnectedAddress() : String("");
+    JsonObject gw = doc["gateway"].to<JsonObject>();
+    gw["connected"] = bleConn;
+    gw["mac"]       = gwMac;
+    gw["name"]      = _gatewayName(gwMac);
 
     JsonArray units = doc["units"].to<JsonArray>();
     for (const auto& unit : _config->units) {
@@ -168,6 +186,13 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
     doc["type"]      = "connection_state";
     doc["connected"] = connected;
     if (reason != 0) doc["reason"] = reason;
+
+    // Report which gateway we are on (empty when disconnected) for transparency.
+    String gwMac = connected ? _client->getConnectedAddress() : String("");
+    JsonObject gw = doc["gateway"].to<JsonObject>();
+    gw["connected"] = connected;
+    gw["mac"]       = gwMac;
+    gw["name"]      = _gatewayName(gwMac);
 
     String msg;
     serializeJson(doc, msg);

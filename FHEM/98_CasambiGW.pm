@@ -393,8 +393,28 @@ sub CasambiGW_HandleWsMessage {
     } elsif ($type eq "connection_state") {
         my $ble = $msg->{connected} ? "ble_connected" : "ble_disconnected";
         readingsSingleUpdate($hash, "ble_state", $ble, 1);
+        CasambiGW_UpdateGateway($hash, $msg->{gateway});
         Log3 $name, 3, "$name: BLE state: $ble";
     }
+}
+
+# ============================================================================
+# Gateway transparency — which Casambi unit currently serves as BLE gateway.
+# Fed from the ESP32 "hello" and "connection_state" messages. Useful now and
+# as a basis for the planned gateway-hopping feature.
+# ============================================================================
+
+sub CasambiGW_UpdateGateway {
+    my ($hash, $gw) = @_;
+    return unless ref($gw) eq "HASH";
+
+    my $connected = $gw->{connected} ? 1 : 0;
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "gatewayState", $connected ? "connected" : "disconnected");
+    readingsBulkUpdate($hash, "gatewayMac",   $gw->{mac}  // "");
+    readingsBulkUpdate($hash, "gatewayName",  $gw->{name} // "");
+    readingsEndUpdate($hash, 1);
+    return undef;
 }
 
 # ============================================================================
@@ -416,6 +436,9 @@ sub CasambiGW_HandleHello {
     } else {
         readingsSingleUpdate($hash, "esp32BuildWarning", "ok", 1);
     }
+
+    # Report the currently used gateway (name/MAC/status) for transparency.
+    CasambiGW_UpdateGateway($hash, $msg->{gateway});
 
     # Build MAC→FHEM-name registry from all CasambiUnit devices of this GW
     my %byMac;
@@ -723,6 +746,13 @@ sub CasambiGW_Ready {
     <li><b>configured</b> &mdash; whether the ESP32 has a valid configuration
         (true) or is still in setup mode (false), from <code>/api/info</code></li>
     <li><b>network</b> &mdash; Casambi network name reported by the ESP32</li>
+    <li><b>gatewayState</b> &mdash; BLE gateway link: connected / disconnected</li>
+    <li><b>gatewayName</b> &mdash; name of the Casambi unit currently acting as
+        the BLE gateway (empty while disconnected)</li>
+    <li><b>gatewayMac</b> &mdash; BLE MAC of the current gateway unit
+        (empty while disconnected). Together with gatewayName this provides
+        transparency over which unit the ESP32 is connected through &mdash;
+        also a basis for the planned gateway-hopping feature.</li>
     <li><b>ble_state</b> &mdash; ESP32 BLE link state
         (ble_connected / ble_disconnected)</li>
     <li><b>syncState</b> &mdash; ok | changes_pending</li>

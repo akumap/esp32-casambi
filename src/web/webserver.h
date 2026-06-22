@@ -146,6 +146,9 @@ private:
     void _sendJsonSuccess(AsyncWebServerRequest* request);
     String _getClientIP(AsyncWebServerRequest* request);
 
+    // Resolve a gateway BLE MAC to the matching unit name (empty if unknown).
+    String _gatewayName(const String& mac) const;
+
     // WebSocket helpers
     void _handleWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                                AwsEventType type, void* arg, uint8_t* data, size_t len);
