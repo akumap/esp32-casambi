@@ -100,11 +100,41 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
     }
 }
 
+String CasambiWebServer::_gatewayName(const String& mac) const {
+    if (mac.isEmpty()) return String("");
+    String want = mac; want.replace(":", ""); want.toLowerCase();
+
+    // Try to resolve via the unit list (works only if the gateway advertises
+    // its hardware MAC rather than a random static address).
+    for (const auto& u : _config->units) {
+        String a = u.address; a.replace(":", ""); a.toLowerCase();
+        if (a == want) return u.name;
+    }
+
+    // Fallback: the advertised name captured at provisioning for this gateway.
+    String ac = _config->autoConnectAddress; ac.replace(":", ""); ac.toLowerCase();
+    if (!ac.isEmpty() && ac == want && _config->gatewayName.length())
+        return _config->gatewayName;
+
+    // No reliable name: the connection endpoint is typically a random network
+    // gateway address that maps to no named unit. Leave empty rather than
+    // mislabeling it (gatewayMac is the meaningful identifier).
+    return String("");
+}
+
 String CasambiWebServer::_buildHelloMessage() const {
     JsonDocument doc;
     doc["type"] = "hello";
     doc["build"] = FIRMWARE_BUILD;  // injected by scripts/build_number.py
-    doc["ble_connected"] = _client->isAuthenticated();
+    bool bleConn = _client->isAuthenticated();
+    doc["ble_connected"] = bleConn;
+
+    // Currently connected gateway (BLE MAC + resolved unit name) for transparency.
+    String gwMac = bleConn ? _client->getConnectedAddress() : String("");
+    JsonObject gw = doc["gateway"].to<JsonObject>();
+    gw["connected"] = bleConn;
+    gw["mac"]       = gwMac;
+    gw["name"]      = _gatewayName(gwMac);
 
     JsonArray units = doc["units"].to<JsonArray>();
     for (const auto& unit : _config->units) {
@@ -169,6 +199,13 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
     doc["connected"] = connected;
     if (reason != 0) doc["reason"] = reason;
 
+    // Report which gateway we are on (empty when disconnected) for transparency.
+    String gwMac = connected ? _client->getConnectedAddress() : String("");
+    JsonObject gw = doc["gateway"].to<JsonObject>();
+    gw["connected"] = connected;
+    gw["mac"]       = gwMac;
+    gw["name"]      = _gatewayName(gwMac);
+
     String msg;
     serializeJson(doc, msg);
     _ws->textAll(msg);
@@ -182,6 +219,19 @@ void CasambiWebServer::_setupRoutes() {
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    // Discovery: lets FHEM tell a configured gateway apart from one still in
+    // setup mode (the portal serves the same path with configured:false).
+    _server->on("/api/info", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        JsonDocument d;
+        d["configured"] = true;
+        d["build"]      = FIRMWARE_BUILD;
+        d["network"]    = _config->networkName;
+        d["mac"]        = WiFi.macAddress();
+        d["ip"]         = WiFi.localIP().toString();
+        String out; serializeJson(d, out);
+        request->send(200, "application/json", out);
+    });
 
     // Status & discovery endpoints
     _server->on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* request) {

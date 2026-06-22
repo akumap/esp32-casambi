@@ -40,6 +40,8 @@ use MIME::Base64;
 use constant WS_PING_INTERVAL    => 30;   # seconds between WS keepalive pings
 use constant WS_PONG_TIMEOUT     => 60;   # seconds without pong → reconnect
 use constant MIN_FIRMWARE_BUILD  => 1;    # minimum accepted ESP32 build number
+use constant INFO_POLL_SETUP     => 15;   # seconds between /api/info polls while the ESP is in setup mode
+use constant INFO_POLL_OFFLINE   => 30;   # seconds between /api/info polls while the ESP is unreachable
 
 # ============================================================================
 # Module registration
@@ -75,16 +77,102 @@ sub CasambiGW_Define {
     $hash->{wsState}    = "disconnected";
     $hash->{buf}        = "";
     $hash->{UNIT_BY_ID} = {};
+    $hash->{infoPolling}= 0;
 
-    DevIo_CloseDev($hash);
-    DevIo_OpenDev($hash, 0, "CasambiGW_WsHandshake");
+    # Do not open the WebSocket blindly: first check /api/info and only connect
+    # once the ESP32 reports configured:true (see CasambiGW_CheckInfo).
+    readingsSingleUpdate($hash, "state", "initializing", 1);
+    CasambiGW_StartInfoPoll($hash);
     return undef;
 }
 
 sub CasambiGW_Undefine {
     my ($hash, $name) = @_;
     RemoveInternalTimer($hash, "CasambiGW_Ping");
+    RemoveInternalTimer($hash, "CasambiGW_Poll");
     DevIo_CloseDev($hash);
+    return undef;
+}
+
+# ============================================================================
+# Connection bring-up gated by GET /api/info
+#
+# Before opening the WebSocket the module queries /api/info. Only when the
+# ESP32 reports configured:true do we connect; while it is still in setup mode
+# (configured:false) or unreachable we poll periodically and connect
+# automatically once it becomes ready (e.g. after finishing the setup portal).
+# ============================================================================
+
+sub CasambiGW_StartInfoPoll {
+    my $hash = shift;
+    $hash->{infoPolling} = 1;
+    $hash->{wsState}     = "disconnected";
+    RemoveInternalTimer($hash, "CasambiGW_Ping");
+    RemoveInternalTimer($hash, "CasambiGW_Poll");
+    DevIo_CloseDev($hash);                      # also removes us from readyfnlist
+    InternalTimer(gettimeofday() + 1, "CasambiGW_Poll", $hash);
+    return undef;
+}
+
+sub CasambiGW_Poll {
+    my $hash = shift;
+    return if ($hash->{wsState} // "") eq "connected";
+    CasambiGW_CheckInfo($hash);
+    return undef;
+}
+
+sub CasambiGW_CheckInfo {
+    my $hash = shift;
+    my $url  = "http://$hash->{GW_IP}:$hash->{GW_PORT}/api/info";
+    HttpUtils_NonblockingGet({
+        url      => $url,
+        timeout  => 5,
+        hash     => $hash,
+        callback => \&CasambiGW_InfoCb,
+    });
+    return undef;
+}
+
+sub CasambiGW_InfoCb {
+    my ($param, $err, $data) = @_;
+    my $hash = $param->{hash};
+    my $name = $hash->{NAME};
+
+    if ($err || !defined($data) || $data eq "") {
+        Log3 $name, 4, "$name: /api/info unreachable: " . ($err // "no data");
+        readingsSingleUpdate($hash, "state", "unreachable", 1);
+        InternalTimer(gettimeofday() + INFO_POLL_OFFLINE, "CasambiGW_Poll", $hash);
+        return undef;
+    }
+
+    my $info;
+    eval { $info = decode_json($data); };
+    if ($@ || ref($info) ne "HASH") {
+        Log3 $name, 2, "$name: /api/info bad JSON: " . ($@ // "");
+        readingsSingleUpdate($hash, "state", "unreachable", 1);
+        InternalTimer(gettimeofday() + INFO_POLL_OFFLINE, "CasambiGW_Poll", $hash);
+        return undef;
+    }
+
+    my $configured = $info->{configured} ? 1 : 0;
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "esp32Build", $info->{build})  if defined $info->{build};
+    readingsBulkUpdate($hash, "configured", $configured ? "true" : "false");
+    readingsBulkUpdate($hash, "network", $info->{network})   if defined $info->{network};
+    readingsEndUpdate($hash, 1);
+
+    if ($configured) {
+        Log3 $name, 3, "$name: ESP configured (network '"
+            . ($info->{network} // "?") . "') - connecting WebSocket";
+        $hash->{infoPolling} = 0;
+        RemoveInternalTimer($hash, "CasambiGW_Poll");
+        DevIo_CloseDev($hash);
+        DevIo_OpenDev($hash, 0, "CasambiGW_WsHandshake");
+    } else {
+        Log3 $name, 3, "$name: ESP still in setup mode - waiting for provisioning";
+        readingsSingleUpdate($hash, "state", "setup_required", 1);
+        InternalTimer(gettimeofday() + INFO_POLL_SETUP, "CasambiGW_Poll", $hash);
+    }
     return undef;
 }
 
@@ -102,10 +190,7 @@ sub CasambiGW_Set {
 
     if ($cmd eq "reconnect") {
         Log3 $name, 3, "$name: reconnect requested";
-        $hash->{wsState} = "disconnected";
-        RemoveInternalTimer($hash, "CasambiGW_Ping");
-        DevIo_CloseDev($hash);
-        DevIo_OpenDev($hash, 0, "CasambiGW_WsHandshake");
+        CasambiGW_StartInfoPoll($hash);   # re-check /api/info, then connect
         return undef;
     }
 
@@ -181,9 +266,10 @@ sub CasambiGW_Read {
         } else {
             my $status = (split /\r\n/, $hash->{buf})[0];
             Log3 $name, 2, "$name: WebSocket handshake failed: $status";
-            $hash->{wsState} = "disconnected";
-            RemoveInternalTimer($hash, "CasambiGW_Ping");
-            DevIo_Disconnected($hash);
+            # A failed upgrade usually means the ESP is back in setup mode (or
+            # not ready). Fall back to polling /api/info instead of hammering
+            # the WebSocket via DevIo's auto-reconnect.
+            CasambiGW_StartInfoPoll($hash);
         }
         return undef;
     }
@@ -307,8 +393,28 @@ sub CasambiGW_HandleWsMessage {
     } elsif ($type eq "connection_state") {
         my $ble = $msg->{connected} ? "ble_connected" : "ble_disconnected";
         readingsSingleUpdate($hash, "ble_state", $ble, 1);
+        CasambiGW_UpdateGateway($hash, $msg->{gateway});
         Log3 $name, 3, "$name: BLE state: $ble";
     }
+}
+
+# ============================================================================
+# Gateway transparency — which Casambi unit currently serves as BLE gateway.
+# Fed from the ESP32 "hello" and "connection_state" messages. Useful now and
+# as a basis for the planned gateway-hopping feature.
+# ============================================================================
+
+sub CasambiGW_UpdateGateway {
+    my ($hash, $gw) = @_;
+    return unless ref($gw) eq "HASH";
+
+    my $connected = $gw->{connected} ? 1 : 0;
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "gatewayState", $connected ? "connected" : "disconnected");
+    readingsBulkUpdate($hash, "gatewayMac",   $gw->{mac}  // "");
+    readingsBulkUpdate($hash, "gatewayName",  $gw->{name} // "");
+    readingsEndUpdate($hash, 1);
+    return undef;
 }
 
 # ============================================================================
@@ -330,6 +436,9 @@ sub CasambiGW_HandleHello {
     } else {
         readingsSingleUpdate($hash, "esp32BuildWarning", "ok", 1);
     }
+
+    # Report the currently used gateway (name/MAC/status) for transparency.
+    CasambiGW_UpdateGateway($hash, $msg->{gateway});
 
     # Build MAC→FHEM-name registry from all CasambiUnit devices of this GW
     my %byMac;
@@ -583,6 +692,9 @@ sub CasambiGW_SendCommand {
 
 sub CasambiGW_Ready {
     my $hash = shift;
+    # While we are polling /api/info, reconnection is driven by that timer,
+    # not by DevIo's auto-reconnect.
+    return undef if $hash->{infoPolling};
     return DevIo_OpenDev($hash, 1, "CasambiGW_WsHandshake");
 }
 
@@ -626,8 +738,21 @@ sub CasambiGW_Ready {
   <br>
   <b>Readings</b>
   <ul>
-    <li><b>state</b> &mdash; WebSocket connection state
-        (connected / disconnected)</li>
+    <li><b>state</b> &mdash; connection state: initializing / setup_required
+        (ESP still in setup portal) / unreachable / connected / disconnected.
+        The module polls <code>/api/info</code> and only opens the WebSocket
+        once the ESP reports <em>configured:true</em>, reconnecting
+        automatically after the setup portal has been completed.</li>
+    <li><b>configured</b> &mdash; whether the ESP32 has a valid configuration
+        (true) or is still in setup mode (false), from <code>/api/info</code></li>
+    <li><b>network</b> &mdash; Casambi network name reported by the ESP32</li>
+    <li><b>gatewayState</b> &mdash; BLE gateway link: connected / disconnected</li>
+    <li><b>gatewayName</b> &mdash; name of the Casambi unit currently acting as
+        the BLE gateway (empty while disconnected)</li>
+    <li><b>gatewayMac</b> &mdash; BLE MAC of the current gateway unit
+        (empty while disconnected). Together with gatewayName this provides
+        transparency over which unit the ESP32 is connected through &mdash;
+        also a basis for the planned gateway-hopping feature.</li>
     <li><b>ble_state</b> &mdash; ESP32 BLE link state
         (ble_connected / ble_disconnected)</li>
     <li><b>syncState</b> &mdash; ok | changes_pending</li>

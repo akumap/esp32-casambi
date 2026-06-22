@@ -284,35 +284,113 @@ static void writeEntryJson(Print& out, const LogEntry& e) {
     out.print("\"}");
 }
 
-void EventLog::writeJson(Print& out, int maxEntries) {
+// Load the newest `maxEntries` records (chronological, oldest→newest) into
+// `entries`. Only the requested tail is read — loading the whole log into RAM
+// can exhaust the heap when WiFi/BLE/web are active (each LogEntry is large).
+void EventLog::_loadNewest(std::vector<LogEntry>& entries, int maxEntries) {
     bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
 
-    // Load all entries chronologically: inactive file (older) then active.
-    std::vector<LogEntry> entries;
-    const char* paths[2] = { _inactivePath(), _activePath() };
+    const size_t recSize = sizeof(LogEntry);
+    const char* paths[2] = { _inactivePath(), _activePath() };  // older, newer
+
+    // Count records per file from their sizes (no allocation).
+    size_t counts[2] = { 0, 0 };
     for (int p = 0; p < 2; p++) {
         if (!LittleFS.exists(paths[p])) continue;
         File f = LittleFS.open(paths[p], "r");
         if (!f) continue;
+        counts[p] = f.size() / recSize;
+        f.close();
+    }
+    size_t total = counts[0] + counts[1];
+
+    size_t limit = (maxEntries >= 0 && (size_t)maxEntries < total)
+                       ? (size_t)maxEntries : total;
+    size_t start = total - limit;   // global index of first entry to keep
+
+    entries.reserve(limit);
+
+    size_t globalIdx = 0;
+    for (int p = 0; p < 2; p++) {
+        size_t fileCount = counts[p];
+        if (fileCount == 0) continue;
+
+        // Skip whole file if it lies entirely before the wanted range.
+        if (start >= globalIdx + fileCount) { globalIdx += fileCount; continue; }
+
+        File f = LittleFS.open(paths[p], "r");
+        if (!f) { globalIdx += fileCount; continue; }
+
+        size_t skipInFile = (start > globalIdx) ? (start - globalIdx) : 0;
+        if (skipInFile) f.seek(skipInFile * recSize);
+
         LogEntry e;
-        while (f.read((uint8_t*)&e, sizeof(e)) == sizeof(e)) {
+        while (f.read((uint8_t*)&e, recSize) == (int)recSize) {
             entries.push_back(e);
         }
         f.close();
+        globalIdx += fileCount;
     }
 
     if (locked) xSemaphoreGive(_mutex);
+}
 
-    // Emit newest-first, limited to maxEntries if requested.
+void EventLog::writeJson(Print& out, int maxEntries) {
+    std::vector<LogEntry> entries;
+    _loadNewest(entries, maxEntries);
+
     out.print('[');
-    size_t total = entries.size();
-    size_t limit = (maxEntries >= 0 && (size_t)maxEntries < total) ? (size_t)maxEntries : total;
+    size_t kept = entries.size();
     bool first = true;
-    for (size_t i = 0; i < limit; i++) {
-        const LogEntry& e = entries[total - 1 - i];  // reverse → newest first
+    for (size_t i = 0; i < kept; i++) {
+        const LogEntry& e = entries[kept - 1 - i];  // reverse → newest first
         if (!first) out.print(',');
         first = false;
         writeEntryJson(out, e);
     }
     out.print(']');
+}
+
+// One aligned, human-readable line per entry (for the serial 'log' command).
+static void writeEntryText(Print& out, const LogEntry& e) {
+    char ts[40];
+    if (e.timestamp_ms > 0) {
+        time_t secs = (time_t)(e.timestamp_ms / 1000);
+        int    msPart = (int)(e.timestamp_ms % 1000);
+        struct tm tmv;
+        gmtime_r(&secs, &tmv);
+        size_t len = strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+        snprintf(ts + len, sizeof(ts) - len, ".%03dZ", msPart);
+    } else {
+        // Pre-NTP: magnitude of the timestamp is the uptime in ms.
+        unsigned long s = (unsigned long)((-e.timestamp_ms) / 1000);
+        int msPart = (int)((-e.timestamp_ms) % 1000);
+        snprintf(ts, sizeof(ts), "[up %lu:%02lu:%02lu.%03d]",
+                 s / 3600, (s / 60) % 60, s % 60, msPart);
+    }
+
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "%-25s %-8s b%-3u  ",
+             ts, EventLog::levelName(e.level), (unsigned)e.bootId);
+    out.print(prefix);
+
+    // msg is not necessarily NUL-terminated → print exactly msgLen bytes.
+    for (uint8_t i = 0; i < e.msgLen && i < LOG_MSG_MAX; i++) out.print(e.msg[i]);
+    out.print('\n');
+}
+
+void EventLog::writeText(Print& out, int maxEntries) {
+    std::vector<LogEntry> entries;
+    _loadNewest(entries, maxEntries);
+
+    size_t kept = entries.size();
+    if (kept == 0) {
+        out.println("(no entries)");
+        return;
+    }
+    out.println("time (UTC)                level    boot  message");
+    out.println("------------------------------------------------------------");
+    for (size_t i = 0; i < kept; i++) {
+        writeEntryText(out, entries[kept - 1 - i]);   // newest first
+    }
 }

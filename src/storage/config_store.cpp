@@ -45,6 +45,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     // Auto-connect settings
     doc["autoConnectEnabled"] = config.autoConnectEnabled;
     doc["autoConnectAddress"] = config.autoConnectAddress;
+    doc["gatewayName"] = config.gatewayName;
 
     // NTP server
     doc["ntpServer"] = config.ntpServer;
@@ -177,6 +178,7 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
     // Load auto-connect settings (with defaults for backward compatibility)
     config.autoConnectEnabled = doc["autoConnectEnabled"] | false;
     config.autoConnectAddress = doc["autoConnectAddress"] | "";
+    config.gatewayName = doc["gatewayName"] | "";
 
     // Load NTP server (with default for backward compatibility)
     config.ntpServer = doc["ntpServer"] | NTP_SERVER_DEFAULT;
