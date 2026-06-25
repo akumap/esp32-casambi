@@ -34,6 +34,11 @@ bool webDebugEnabled     = true;
 bool parseDebugEnabled   = false;
 bool heapDebugEnabled    = false;
 
+// Heap-leak attribution counters (see config.h).
+volatile uint32_t g_httpRequestCount = 0;
+volatile uint32_t g_wsEventCount     = 0;
+volatile uint32_t g_keepaliveCount   = 0;
+
 // Cached WiFi credentials — loaded once at boot and updated by 'wifi set'.
 // Avoids repeated LittleFS reads in the 30 s reconnect loop.
 static WiFiCredentials g_wifiCreds;
@@ -63,6 +68,15 @@ static unsigned long lastWiFiCheck = 0;
 // Heap monitoring state
 static unsigned long lastHeapCheck = 0;
 static size_t minFreeHeap = UINT32_MAX;
+
+// Persistent (EventLog) heap-trend logging — slower cadence than the serial
+// HEAP line so the multi-day slope survives reboots without flooding flash.
+#define HEAP_LOG_INTERVAL_MS  (15UL * 60UL * 1000UL)  // 15 min
+static unsigned long lastHeapLog = 0;
+static size_t   lastLoggedFreeHeap = 0;
+static uint32_t lastHttpCount = 0;
+static uint32_t lastWsCount   = 0;
+static uint32_t lastKaCount   = 0;
 
 // Connection health check state
 static unsigned long lastConnectionCheck = 0;
@@ -496,6 +510,29 @@ void monitorHeap() {
     if (heapDebugEnabled) {
         Serial.printf("HEAP: free=%d, min=%d, largest_block=%d\n",
                       freeHeap, minFreeHeap, largestBlock);
+    }
+
+    // Persistent heap-trend entry every HEAP_LOG_INTERVAL_MS. Logs the drift
+    // since the previous entry alongside how much each subsystem was exercised,
+    // so a slow leak can be attributed (free dropped X over N http/ws/keepalive).
+    // Survives reboots via the EventLog, unlike the serial HEAP line above.
+    if (lastHeapLog == 0 || now - lastHeapLog >= HEAP_LOG_INTERVAL_MS) {
+        long dFree   = (lastLoggedFreeHeap == 0)
+                         ? 0 : (long)freeHeap - (long)lastLoggedFreeHeap;
+        uint32_t dHttp = g_httpRequestCount - lastHttpCount;
+        uint32_t dWs   = g_wsEventCount     - lastWsCount;
+        uint32_t dKa   = g_keepaliveCount   - lastKaCount;
+
+        EventLog::log(LOG_INFO,
+            "Heap free=%u (%+ld) largest=%u min=%u | http+%u ws+%u ka+%u",
+            (unsigned)freeHeap, dFree, (unsigned)largestBlock,
+            (unsigned)minFreeHeap, dHttp, dWs, dKa);
+
+        lastHeapLog        = now;
+        lastLoggedFreeHeap = freeHeap;
+        lastHttpCount      = g_httpRequestCount;
+        lastWsCount        = g_wsEventCount;
+        lastKaCount        = g_keepaliveCount;
     }
 
     // Critical heap warning

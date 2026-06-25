@@ -204,8 +204,18 @@ bool CasambiClient::sendKeepalive() {
 
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return false;
 
+    // The keepalive runs every 30 s for the whole uptime, so even a tiny
+    // per-call leak here accumulates to many KB over days. Measure the GATT
+    // read in isolation; only print when it actually moved the heap, to avoid
+    // flooding the log with no-op deltas.
+    g_keepaliveCount++;
+    HeapSnapshot hKeepalive = heapSnapshot();
     std::string value = _authChar->readValue();
     xSemaphoreGive(_mutex);
+
+    if (heapDebugEnabled && (long)ESP.getFreeHeap() != (long)hKeepalive.freeHeap) {
+        heapTraceDelta("ble.keepalive", hKeepalive);
+    }
 
     if (value.length() == 0) {
         Serial.println("BLE: Keepalive failed - no response");

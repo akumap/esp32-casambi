@@ -151,4 +151,13 @@ extern bool webDebugEnabled;      // Web API request logging (defined in main.cp
 extern bool parseDebugEnabled;    // Protocol parse compact output (defined in main.cpp)
 extern bool heapDebugEnabled;     // Heap monitoring output (defined in main.cpp)
 
+// ----------------------------------------------------------------------------
+// Heap-leak attribution counters (defined in main.cpp). Bumped by the periodic
+// subsystems so the heap monitor can report "heap dropped X over N requests /
+// keepalives", attributing a slow leak to its source. Cheap monotonic counters.
+// ----------------------------------------------------------------------------
+extern volatile uint32_t g_httpRequestCount;  // per HTTP /api request
+extern volatile uint32_t g_wsEventCount;      // per WebSocket connect/disconnect
+extern volatile uint32_t g_keepaliveCount;    // per BLE keepalive
+
 #endif // CONFIG_H
