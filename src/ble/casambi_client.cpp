@@ -7,6 +7,7 @@
 
 #include "casambi_client.h"
 #include "packet.h"
+#include "../log/heap_trace.h"
 #include <mbedtls/sha256.h>
 #include <esp_task_wdt.h>
 
@@ -36,6 +37,10 @@ CasambiClient::~CasambiClient() {
 }
 
 bool CasambiClient::connect(const String& address) {
+    // Heap baseline for the whole connect cycle. Compared at each phase below
+    // so a per-reconnect leak (and where in the flow it happens) is visible.
+    HeapSnapshot hConnect = heapSnapshot();
+
     if (bleDebugEnabled) {
         Serial.printf("BLE: Connecting to %s\n", address.c_str());
     }
@@ -84,6 +89,11 @@ bool CasambiClient::connect(const String& address) {
         return false;
     }
 
+    // GATT discovery (createClient + connect + service/char tree) is the prime
+    // leak suspect on the Bluedroid stack — measure it in isolation.
+    heapTraceDelta("ble.gatt_setup", hConnect);
+    HeapSnapshot hKeyEx = heapSnapshot();
+
     if (bleDebugEnabled) {
         Serial.println("BLE: Initializing key exchange...");
     }
@@ -109,6 +119,9 @@ bool CasambiClient::connect(const String& address) {
         return false;
     }
 
+    // ECDH key pair + transport key + encryption object allocations.
+    heapTraceDelta("ble.key_exchange", hKeyEx);
+
     CasambiKey* key = _config->getBestKey();
     if (key) {
         if (!_authenticate()) {
@@ -121,6 +134,11 @@ bool CasambiClient::connect(const String& address) {
         _setState(ConnectionState::Authenticated);
     }
 
+    // Net heap consumed by the full connect cycle. Over repeated reconnects
+    // this is the number to watch — if it trends negative and never recovers
+    // after the matching disconnect, the reconnect path is the leak.
+    heapTraceDelta("ble.connect_total", hConnect);
+
     Serial.println("BLE: Ready!");
     return true;
 }
@@ -130,6 +148,10 @@ void CasambiClient::disconnect() {
 }
 
 void CasambiClient::_disconnectInternal(DisconnectReason reason) {
+    // Heap baseline for the teardown — paired with ble.connect_total, the two
+    // deltas should roughly cancel. A persistent shortfall here is the leak.
+    HeapSnapshot hDisconnect = heapSnapshot();
+
     if (_bleClient && _bleClient->isConnected()) {
         _bleClient->disconnect();
     }
@@ -157,6 +179,11 @@ void CasambiClient::_disconnectInternal(DisconnectReason reason) {
     } else {
         Serial.println("BLE: Disconnected");
     }
+
+    // NOTE: the BLEClient object itself is not freed here — it is deleted at the
+    // top of the next connect(). So this delta only covers disconnect() + the
+    // encryption teardown; the GATT-tree free shows up in the next gatt_setup.
+    heapTraceDelta("ble.disconnect", hDisconnect);
 }
 
 void CasambiClient::_setState(ConnectionState newState, DisconnectReason reason) {

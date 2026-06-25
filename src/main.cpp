@@ -19,6 +19,7 @@
 #include "web/webserver.h"
 #include "web/setup_portal.h"
 #include "log/event_log.h"
+#include "log/heap_trace.h"
 #include <ESPmDNS.h>
 
 // Global state
@@ -377,7 +378,13 @@ void checkAndReconnectBLE() {
                   networkConfig.autoConnectAddress.c_str(),
                   bleReconnectInterval);
 
+    // Net heap across one reconnect attempt (success or failure). A failed
+    // attempt that does not return to baseline is the most dangerous leak,
+    // since the backoff loop repeats it indefinitely.
+    HeapSnapshot hReconnect = heapSnapshot();
+
     if (casambiClient->connect(networkConfig.autoConnectAddress)) {
+        heapTraceDelta("ble.reconnect_ok", hReconnect);
         Serial.println("BLE: Reconnect successful!");
         consecutiveReconnectFailures = 0;
         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;  // Reset backoff
@@ -391,6 +398,7 @@ void checkAndReconnectBLE() {
             }
         }
     } else {
+        heapTraceDelta("ble.reconnect_fail", hReconnect);
         consecutiveReconnectFailures++;
 
         // Exponential backoff (double interval, up to max)
@@ -435,6 +443,7 @@ void checkAndReconnectWiFi() {
     }
 
     Serial.println("WiFi: Connection lost, attempting reconnect...");
+    HeapSnapshot hWifi = heapSnapshot();
     WiFi.disconnect();
     delay(100);
     WiFi.begin(g_wifiCreds.ssid.c_str(), g_wifiCreds.password.c_str());
@@ -463,6 +472,9 @@ void checkAndReconnectWiFi() {
             Serial.println("WiFi: Reconnect failed, will retry later");
         }
     }
+
+    // Net heap across the WiFi recovery (incl. web server restart on success).
+    heapTraceDelta("wifi.reconnect", hWifi);
 }
 
 // ============================================================================
