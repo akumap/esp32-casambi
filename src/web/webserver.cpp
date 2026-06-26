@@ -630,10 +630,22 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     EventLog::snapshotNewest(n, src->cOlder, src->cNewer, src->total, src->start);
     src->nextGlobal = src->total;   // descend to src->start
 
+    WEB_LOG("Web: /api/log n=%d total=%u (older=%u newer=%u) free=%u largest=%u\n",
+            n, (unsigned)src->total, (unsigned)src->cOlder, (unsigned)src->cNewer,
+            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+
     AsyncWebServerResponse* response = request->beginChunkedResponse(
         "application/json",
-        [src](uint8_t* buffer, size_t maxLen, size_t /*index*/) -> size_t {
-            return src->fill(buffer, maxLen);
+        [src](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+            size_t produced = src->fill(buffer, maxLen);
+            // Per-chunk trace: shows how far streaming gets and the live heap, so
+            // a mid-response allocation failure (→ HTTP/0.9 at the client) is
+            // visible. Runs in the AsyncTCP task; gated behind `debug web on`.
+            WEB_LOG("Web: /api/log chunk idx=%u maxLen=%u -> %u  free=%u largest=%u phase=%d\n",
+                    (unsigned)index, (unsigned)maxLen, (unsigned)produced,
+                    (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+                    src->phase);
+            return produced;
         });
     request->send(response);
 }
