@@ -5,7 +5,6 @@
 #include "webserver.h"
 #include "../config.h"
 #include "../log/event_log.h"
-#include "../log/heap_trace.h"
 #include "../storage/config_store.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -77,20 +76,14 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
                                               uint8_t* data, size_t len) {
     switch (type) {
         case WS_EVT_CONNECT:
-            g_wsEventCount++;
             WEB_LOG("WS: client #%u connected from %s\n",
                     client->id(), client->remoteIP().toString().c_str());
-            // FHEM holds a persistent WebSocket and reconnects on drop; absolute
-            // heap at connect/disconnect surfaces a per-session client leak.
-            heapTraceMark("ws.connect");
             // Send full state to the newly connected client
             client->text(_buildHelloMessage());
             break;
 
         case WS_EVT_DISCONNECT:
-            g_wsEventCount++;
             WEB_LOG("WS: client #%u disconnected\n", client->id());
-            heapTraceMark("ws.disconnect");
             break;
 
         case WS_EVT_ERROR:
@@ -231,7 +224,6 @@ void CasambiWebServer::_setupRoutes() {
     // Discovery: lets FHEM tell a configured gateway apart from one still in
     // setup mode (the portal serves the same path with configured:false).
     _server->on("/api/info", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        g_httpRequestCount++;
         JsonDocument d;
         d["configured"] = true;
         d["build"]      = FIRMWARE_BUILD;
@@ -400,7 +392,6 @@ void CasambiWebServer::_setupRoutes() {
 // ============================================================================
 
 void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
-    g_httpRequestCount++;
     JsonDocument doc;
 
     doc["ble_connected"] = _client->isAuthenticated();
@@ -445,7 +436,6 @@ WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
 }
 
 void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
-    g_httpRequestCount++;
     WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
     JsonDocument doc;
     JsonArray units = doc["units"].to<JsonArray>();
@@ -611,7 +601,6 @@ struct LogJsonSource {
 }  // namespace
 
 void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
-    g_httpRequestCount++;
     WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
 
     // Default to the newest 25 entries (~3.5 KB JSON) so a plain GET fits in a
@@ -633,22 +622,10 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     EventLog::snapshotNewest(n, src->cOlder, src->cNewer, src->total, src->start);
     src->nextGlobal = src->total;   // descend to src->start
 
-    WEB_LOG("Web: /api/log n=%d total=%u (older=%u newer=%u) free=%u largest=%u\n",
-            n, (unsigned)src->total, (unsigned)src->cOlder, (unsigned)src->cNewer,
-            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
-
     AsyncWebServerResponse* response = request->beginChunkedResponse(
         "application/json",
-        [src](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
-            size_t produced = src->fill(buffer, maxLen);
-            // Per-chunk trace: shows how far streaming gets and the live heap, so
-            // a mid-response allocation failure (→ HTTP/0.9 at the client) is
-            // visible. Runs in the AsyncTCP task; gated behind `debug web on`.
-            WEB_LOG("Web: /api/log chunk idx=%u maxLen=%u -> %u  free=%u largest=%u phase=%d\n",
-                    (unsigned)index, (unsigned)maxLen, (unsigned)produced,
-                    (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
-                    src->phase);
-            return produced;
+        [src](uint8_t* buffer, size_t maxLen, size_t /*index*/) -> size_t {
+            return src->fill(buffer, maxLen);
         });
     request->send(response);
 }
