@@ -94,21 +94,27 @@ und der einmalige Mehraufwand der 2.x-Scan-/Subscribe-API ist klein gegenüber
 der Arbeit, später erneut migrieren zu müssen. Ein offizieller
 [1.x→2.x-Migration-Guide](https://github.com/h2zero/NimBLE-Arduino) existiert.
 
-> Achtung Nebenrisiko: `platform = espressif32` ist in `platformio.ini`
-> **nicht gepinnt**. Im Zuge der Migration sollte die Plattformversion
-> ebenfalls gepinnt werden, damit Core- und NimBLE-Version reproduzierbar
-> zusammenpassen.
+> Nebenrisiko (optional): `platform = espressif32` ist in `platformio.ini`
+> **nicht gepinnt**. Reproduzierbarer wäre es, Core- und NimBLE-Version
+> gemeinsam zu pinnen — das ist aber eine separate Entscheidung und nicht Teil
+> des Migrations-Pflichtumfangs.
 
-### 4.2 Parallele Build-Umgebung statt Big-Bang
+### 4.2 In-place-Migration mit Branch-Rollback
 
-Eine neue PlatformIO-Umgebung `env:nimble` (erbt von `devkit-v4`, fügt die
-NimBLE-Lib und `-DUSE_NIMBLE` hinzu) **ohne** die bestehenden Umgebungen zu
-verändern. So bleibt der alte Bluedroid-Build während der gesamten Migration
-**jederzeit baubar und flashbar** — sofortiger Vergleich und Rollback.
+Die Umstellung erfolgt **direkt** in den bestehenden Build-Umgebungen — kein
+paralleler Bluedroid-Build, keine `#ifdef`-Brücke, keine neue PlatformIO-
+Umgebung. Bluedroid wird durch NimBLE **ersetzt**. Die einzige nötige Änderung
+an `platformio.ini` ist das Hinzufügen der gepinnten NimBLE-Lib zu `lib_deps`
+(siehe 4.1); die Umgebungen selbst (`devkit-v4`, `esp32-c3`, `debug`,
+`release`) bleiben strukturell unverändert.
 
-Optional als Brücke: die paar Aufrufe in `src/ble/` per `#ifdef USE_NIMBLE`
-umschalten. Das hält **einen** Branch baubar für **beide** Stacks, bis NimBLE
-verifiziert ist; danach werden die `#ifdef`s und der alte Pfad entfernt.
+Die Risikobegrenzung liegt damit auf **Branch-Ebene**: Die gesamte Migration
+lebt isoliert auf `claude/ble-nimbble-migration-uuwzu4`. Geht etwas schief, wird
+der Branch **verworfen** (und bei Bedarf neu gestartet) — `main` mit dem
+funktionierenden Bluedroid-Stand bleibt unberührt. Der Schutz besteht also
+nicht darin, beide Stacks gleichzeitig baubar zu halten, sondern darin, in
+**kleinen, einzeln getesteten Schritten** (7) zu committen, sodass ein
+Fehlversuch früh und billig erkannt wird.
 
 ### 4.3 Kleine, prüfbare Schritte (siehe 7)
 
@@ -128,8 +134,8 @@ vorhandene Heap-Logging (`heapDebugEnabled`) eignet sich als Basis.
 Die Migration gilt als gescheitert (→ Branch nicht mergen), wenn eines zutrifft:
 Verbindungsaufbau/Auth schlägt reproduzierbar fehl, Unit-State-Notifications
 gehen verloren, neue Reboots/Watchdog-Resets, oder der freie Heap ist **nicht**
-besser als vorher. Rückrollen = bei der `devkit-v4`-Umgebung bleiben; der
-NimBLE-Branch wird verworfen oder pausiert.
+besser als vorher. Rückrollen = den Branch **verwerfen** und ggf. neu starten;
+`main` mit dem Bluedroid-Stand bleibt der Rückfallpunkt.
 
 ## 5. Architektur der Umstellung
 
@@ -139,8 +145,8 @@ NimBLE-Branch wird verworfen oder pausiert.
 als private Member sowie die Bluedroid-Notify-Signatur. Zur Risikominderung und
 um Include-Streuung zu vermeiden:
 
-- **Bevorzugt:** Member auf NimBLE-Pendants umstellen, aber die `#include`s nur
-  in die `.cpp` ziehen und im Header **vorwärts-deklarieren**
+- Member auf NimBLE-Pendants umstellen, aber die `#include`s nur in die `.cpp`
+  ziehen und im Header **vorwärts-deklarieren**
   (`class NimBLEClient; class NimBLERemoteCharacteristic;`). Dann ist NimBLE ein
   reines Implementierungsdetail von `src/ble/`.
 - Das öffentliche API (Methoden, Enums, Callback-`std::function`-Typen) bleibt
@@ -219,10 +225,12 @@ Packets verifizieren.
 
 ## 7. Umsetzungsreihenfolge (jeder Schritt einzeln testbar)
 
-1. **Vorbereitung/Messung.** Heap an den drei Punkten (4.4) auf dem
-   Bluedroid-Build protokollieren als Referenz. Platform-Version pinnen.
-2. **Build-Umgebung.** `env:nimble` in `platformio.ini` mit gepinnter
-   NimBLE-Lib und `-DUSE_NIMBLE`. Leerer Build muss durchlaufen.
+1. **Vorbereitung/Messung.** Heap an den drei Punkten (4.4) auf dem aktuellen
+   Bluedroid-Stand (`main`) protokollieren als Referenz — vor dem ersten
+   Umstellungs-Commit.
+2. **NimBLE-Lib einbinden.** Gepinnte `h2zero/NimBLE-Arduino`-Version zu
+   `lib_deps` in `platformio.ini` hinzufügen (keine neue Umgebung). Build muss
+   weiterhin durchlaufen.
 3. **Scan migrieren** (`casambi_scan.cpp`, plus die zwei Scan-Stellen in
    `main.cpp` und Portal-Scan). Zustandslos, kleinste Einheit. Test:
    Portal-/Wizard-Scan findet dieselben Casambi-Geräte wie vorher.
@@ -234,8 +242,8 @@ Packets verifizieren.
    Wizard-Pfad testen (BLE frei → TLS erfolgreich → Reboot in Betriebsmodus).
 6. **Heap-Vergleich** gegen die Referenz aus Schritt 1; Akzeptanzkriterien (8)
    prüfen.
-7. **Aufräumen.** `#ifdef`-Brücken und Bluedroid-Pfad entfernen, alte
-   Build-Umgebungen auf NimBLE umstellen, Doku/README aktualisieren.
+7. **Aufräumen.** Tote Bluedroid-Includes/-Reste entfernen, Doku/README
+   aktualisieren.
 
 ## 8. Akzeptanzkriterien
 
@@ -253,17 +261,18 @@ Packets verifizieren.
 
 ## 9. Rollback
 
-Solange die Brücken-Variante (4.2) aktiv ist: einfach die `devkit-v4`-
-(Bluedroid-)Umgebung flashen. Der NimBLE-Code lebt isoliert in `src/ble/`
-hinter `#ifdef`/eigener Build-Umgebung; ein fehlgeschlagener Versuch berührt den
-produktiven Bluedroid-Pfad nicht. Branch `claude/ble-nimbble-migration-uuwzu4`
-bleibt bis zur Abnahme separat.
+Die gesamte Migration lebt auf `claude/ble-nimbble-migration-uuwzu4` und wird
+erst nach bestandener Abnahme (8) nach `main` gemerged. Geht etwas schief, wird
+der **Branch verworfen** (und bei Bedarf neu aufgesetzt) — `main` trägt
+weiterhin den funktionierenden Bluedroid-Stand. Es gibt bewusst **keinen**
+parallelen Bluedroid-Build und keine `#ifdef`-Brücke; die Absicherung ist die
+Branch-Isolation plus die kleinschrittigen, einzeln getesteten Commits (7).
 
 ## 10. Aufwandsschätzung (grob)
 
 | Schritt | Aufwand |
 |---|---|
-| Build-Umgebung + Lib pinnen | klein |
+| NimBLE-Lib gepinnt einbinden | klein |
 | Scan-Migration | klein |
 | Client-Migration (inkl. Notify-Timing-Tests) | mittel — Kern des Risikos |
 | Lifecycle/Deinit + Cloud-/Wizard-Tests | klein–mittel |
