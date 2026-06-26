@@ -543,12 +543,16 @@ static const size_t LOG_ENTRY_STAGE = 1024;
 // in HTTP chunks, holding only a single entry in RAM at a time — so a large log
 // never needs a big contiguous buffer (which would fail on a fragmented heap).
 struct LogJsonSource {
+    static const size_t READ_BATCH = 4;   // records fetched per LittleFS open
+
     size_t cOlder = 0, cNewer = 0, total = 0, start = 0;
     size_t nextGlobal = 0;          // next global index to emit (descending)
     int    phase = 0;               // 0='[', 1=entries, 2=']', 3=done
     bool   first = true;
     char   stage[LOG_ENTRY_STAGE];
     size_t stageLen = 0, stagePos = 0;
+    LogEntry batch[READ_BATCH];     // newest-first run, refilled on demand
+    size_t batchCount = 0, batchPos = 0;
 
     size_t fill(uint8_t* out, size_t maxLen) {
         size_t produced = 0;
@@ -571,19 +575,26 @@ struct LogJsonSource {
                 continue;
             }
             if (phase == 1) {
-                if (nextGlobal > start) {
-                    nextGlobal--;
-                    LogEntry e;
-                    if (EventLog::readByGlobal(nextGlobal, cOlder, cNewer, e)) {
-                        BufPrint bp(stage, sizeof(stage));
-                        if (!first) bp.write(',');
-                        first = false;
-                        EventLog::writeEntryJson(bp, e);
-                        stageLen = bp.length();
+                // Refill the batch (one flash open per READ_BATCH records).
+                if (batchPos >= batchCount) {
+                    if (nextGlobal > start) {
+                        size_t from = nextGlobal - 1;
+                        batchCount = EventLog::readDescRun(from, start, READ_BATCH,
+                                                           cOlder, cNewer, batch);
+                        batchPos = 0;
+                        nextGlobal = from - batchCount + 1;
+                        if (batchCount == 0) phase = 2;   // read failure → stop
+                        continue;
                     }
-                    continue;   // (read failure → skip, stageLen stays 0)
+                    phase = 2;
+                    continue;
                 }
-                phase = 2;
+                // Serialize one entry from the batch into the stage buffer.
+                BufPrint bp(stage, sizeof(stage));
+                if (!first) bp.write(',');
+                first = false;
+                EventLog::writeEntryJson(bp, batch[batchPos++]);
+                stageLen = bp.length();
                 continue;
             }
             if (phase == 2) {

@@ -383,28 +383,41 @@ void EventLog::snapshotNewest(int maxEntries, size_t& cOlder, size_t& cNewer,
     start = total - limit;
 }
 
-bool EventLog::readByGlobal(size_t globalIndex, size_t cOlder, size_t cNewer,
-                            LogEntry& out) {
-    if (globalIndex >= cOlder + cNewer) return false;
+size_t EventLog::readDescRun(size_t from, size_t minGlobal, size_t want,
+                             size_t cOlder, size_t cNewer, LogEntry* out) {
+    size_t total = cOlder + cNewer;
+    if (from >= total || want == 0) return 0;
+
+    // Stay within one file: older = [0, cOlder), newer = [cOlder, total).
+    size_t fileBase  = (from >= cOlder) ? cOlder : 0;
+    const char* path = (from >= cOlder) ? _activePath() : _inactivePath();
+    size_t low = (minGlobal > fileBase) ? minGlobal : fileBase;
+    size_t cnt = from - low + 1;
+    if (cnt > want) cnt = want;
 
     const size_t recSize = sizeof(LogEntry);
-    bool ok = false;
+    size_t lo  = from - cnt + 1;        // ascending start (global index)
+    size_t got = 0;
 
     bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
-    // Map the global index (oldest-first) to the older (inactive) or newer
-    // (active) file. Paths are resolved live; a ring rollover mid-stream is rare
-    // and at worst yields a stale record, never a crash.
-    const char* path = (globalIndex < cOlder) ? _inactivePath() : _activePath();
-    size_t offset = (globalIndex < cOlder) ? globalIndex : (globalIndex - cOlder);
-
     File f = LittleFS.open(path, "r");
     if (f) {
-        f.seek(offset * recSize);
-        ok = (f.read((uint8_t*)&out, recSize) == (int)recSize);
+        f.seek((lo - fileBase) * recSize);
+        for (size_t i = 0; i < cnt; i++) {
+            if (f.read((uint8_t*)&out[i], recSize) != (int)recSize) break;
+            got++;
+        }
         f.close();
     }
     if (locked) xSemaphoreGive(_mutex);
-    return ok;
+
+    // out[0..got) was read ascending (oldest→newest); reverse to newest-first.
+    for (size_t i = 0; i < got / 2; i++) {
+        LogEntry tmp = out[i];
+        out[i] = out[got - 1 - i];
+        out[got - 1 - i] = tmp;
+    }
+    return got;
 }
 
 // Comma tracking for the streamed JSON array (no heap closure needed).

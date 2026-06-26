@@ -115,12 +115,18 @@ public:
                                size_t& total, size_t& start);
 
     /**
-     * Read the record at a global index (0 = oldest) using the file counts from
-     * snapshotNewest(). Returns false if the index is out of range or the read
-     * fails. One small record is read from flash; no large allocation.
+     * Read a descending run of records into `out`, newest-first (out[0] is the
+     * record at global index `from`). Reads at most `want` records, going down
+     * to max(`minGlobal`, file start), and never crosses the file boundary — so
+     * each call needs only a single LittleFS open. Returns the count read.
+     *
+     * Batching this way keeps flash open/close churn low (one open per `want`
+     * records) so a chunked HTTP response stays light on a fragmented heap,
+     * instead of opening the file once per entry. Counts come from
+     * snapshotNewest().
      */
-    static bool readByGlobal(size_t globalIndex, size_t cOlder, size_t cNewer,
-                             LogEntry& out);
+    static size_t readDescRun(size_t from, size_t minGlobal, size_t want,
+                              size_t cOlder, size_t cNewer, LogEntry* out);
 
     /**
      * Current boot counter (incremented once per begin()).
