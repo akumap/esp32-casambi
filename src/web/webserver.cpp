@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <time.h>
+#include <memory>
 
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
 
@@ -509,6 +510,95 @@ void CasambiWebServer::_handleGetScenes(AsyncWebServerRequest* request) {
 // Event-Log Endpoints
 // ============================================================================
 
+namespace {
+
+// Print sink that writes into a fixed stack/struct buffer with no allocation.
+// Used to serialize one log entry at a time for the chunked /api/log response.
+class BufPrint : public Print {
+public:
+    BufPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0) {}
+    size_t write(uint8_t c) override {
+        if (_len < _cap) _buf[_len++] = (char)c;
+        return 1;
+    }
+    size_t write(const uint8_t* data, size_t len) override {
+        size_t room = _cap - _len;
+        size_t n = (len < room) ? len : room;
+        memcpy(_buf + _len, data, n);
+        _len += n;
+        return len;
+    }
+    size_t length() const { return _len; }
+private:
+    char*  _buf;
+    size_t _cap;
+    size_t _len;
+};
+
+// Worst-case one entry as JSON: ~100 B of fixed fields plus a 120-char message
+// that may expand 6× when JSON-escaped (\uXXXX) → ~820 B. 1 KB is a safe bound.
+static const size_t LOG_ENTRY_STAGE = 1024;
+
+// Resumable generator for the /api/log JSON array. Streams entries newest-first
+// in HTTP chunks, holding only a single entry in RAM at a time — so a large log
+// never needs a big contiguous buffer (which would fail on a fragmented heap).
+struct LogJsonSource {
+    size_t cOlder = 0, cNewer = 0, total = 0, start = 0;
+    size_t nextGlobal = 0;          // next global index to emit (descending)
+    int    phase = 0;               // 0='[', 1=entries, 2=']', 3=done
+    bool   first = true;
+    char   stage[LOG_ENTRY_STAGE];
+    size_t stageLen = 0, stagePos = 0;
+
+    size_t fill(uint8_t* out, size_t maxLen) {
+        size_t produced = 0;
+        while (produced < maxLen) {
+            // 1) Drain any bytes already staged.
+            if (stagePos < stageLen) {
+                size_t avail = stageLen - stagePos;
+                size_t room  = maxLen - produced;
+                size_t cp    = (avail < room) ? avail : room;
+                memcpy(out + produced, stage + stagePos, cp);
+                stagePos += cp;
+                produced += cp;
+                continue;
+            }
+            // 2) Staging empty → produce the next piece.
+            stageLen = stagePos = 0;
+            if (phase == 0) {
+                stage[stageLen++] = '[';
+                phase = 1;
+                continue;
+            }
+            if (phase == 1) {
+                if (nextGlobal > start) {
+                    nextGlobal--;
+                    LogEntry e;
+                    if (EventLog::readByGlobal(nextGlobal, cOlder, cNewer, e)) {
+                        BufPrint bp(stage, sizeof(stage));
+                        if (!first) bp.write(',');
+                        first = false;
+                        EventLog::writeEntryJson(bp, e);
+                        stageLen = bp.length();
+                    }
+                    continue;   // (read failure → skip, stageLen stays 0)
+                }
+                phase = 2;
+                continue;
+            }
+            if (phase == 2) {
+                stage[stageLen++] = ']';
+                phase = 3;
+                continue;
+            }
+            break;              // phase 3: done
+        }
+        return produced;        // 0 once fully drained → ends the response
+    }
+};
+
+}  // namespace
+
 void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     g_httpRequestCount++;
     WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
@@ -520,9 +610,18 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
         if (n < 0) n = 0;
     }
 
-    // Stream the JSON array to avoid building a large String in heap.
-    AsyncResponseStream* response = request->beginResponseStream("application/json");
-    EventLog::writeJson(*response, n);
+    // Stream the array in HTTP chunks: the source reads one record at a time, so
+    // only ~1 KB is ever held regardless of log size. Avoids the big contiguous
+    // allocation an AsyncResponseStream would grow to hold the whole array.
+    auto src = std::make_shared<LogJsonSource>();
+    EventLog::snapshotNewest(n, src->cOlder, src->cNewer, src->total, src->start);
+    src->nextGlobal = src->total;   // descend to src->start
+
+    AsyncWebServerResponse* response = request->beginChunkedResponse(
+        "application/json",
+        [src](uint8_t* buffer, size_t maxLen, size_t /*index*/) -> size_t {
+            return src->fill(buffer, maxLen);
+        });
     request->send(response);
 }
 

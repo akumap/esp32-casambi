@@ -9,7 +9,6 @@
 #include <sys/time.h>
 #include <time.h>
 #include <stdarg.h>
-#include <vector>
 
 // ----------------------------------------------------------------------------
 // Layer 1 — RTC NOINIT RAM. Survives WDT/panic/SW reset, NOT power-off/brownout.
@@ -257,7 +256,7 @@ static void writeEscaped(Print& out, const char* s, size_t len) {
     }
 }
 
-static void writeEntryJson(Print& out, const LogEntry& e) {
+void EventLog::writeEntryJson(Print& out, const LogEntry& e) {
     // For synced entries timestamp_ms is Unix ms (UTC). For pre-sync entries it
     // is -(uptime_ms); formatting that uptime as epoch yields a 1970 date, which
     // is how clients can tell an entry was logged before NTP sync (year 1970,
@@ -284,70 +283,131 @@ static void writeEntryJson(Print& out, const LogEntry& e) {
     out.print("\"}");
 }
 
-// Load the newest `maxEntries` records (chronological, oldest→newest) into
-// `entries`. Only the requested tail is read — loading the whole log into RAM
-// can exhaust the heap when WiFi/BLE/web are active (each LogEntry is large).
-void EventLog::_loadNewest(std::vector<LogEntry>& entries, int maxEntries) {
-    bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
+// Number of fixed-size records in a file (0 if missing). Assumes _mutex held.
+size_t EventLog::_fileRecordCount(const char* path) {
+    if (!LittleFS.exists(path)) return 0;
+    File f = LittleFS.open(path, "r");
+    if (!f) return 0;
+    size_t c = f.size() / sizeof(LogEntry);
+    f.close();
+    return c;
+}
 
+// Emit records [firstWanted, count) of one file, newest (highest index) first.
+// The file is read in small fixed-size batches: peak RAM is BATCH*sizeof(LogEntry)
+// on the stack — never a single large heap block. The mutex is held only while a
+// batch is read from flash, never during the (potentially slow) output, so other
+// tasks can keep logging and no concurrent flash access occurs during printing.
+void EventLog::_emitFileReverse(Print& out, const char* path, size_t count,
+                                size_t firstWanted, EventLogEmitFn emit, void* ctx) {
     const size_t recSize = sizeof(LogEntry);
-    const char* paths[2] = { _inactivePath(), _activePath() };  // older, newer
+    const size_t BATCH = 4;          // 4 * 132 B = 528 B on the stack
+    LogEntry buf[BATCH];
 
-    // Count records per file from their sizes (no allocation).
-    size_t counts[2] = { 0, 0 };
-    for (int p = 0; p < 2; p++) {
-        if (!LittleFS.exists(paths[p])) continue;
-        File f = LittleFS.open(paths[p], "r");
-        if (!f) continue;
-        counts[p] = f.size() / recSize;
-        f.close();
+    size_t hi = count;               // exclusive upper bound still to emit
+    while (hi > firstWanted) {
+        size_t lo = (hi - firstWanted > BATCH) ? (hi - BATCH) : firstWanted;
+        size_t n  = hi - lo;         // 1..BATCH records, ascending [lo, hi)
+
+        size_t got = 0;
+        bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
+        File f = LittleFS.open(path, "r");
+        if (f) {
+            f.seek(lo * recSize);
+            while (got < n && f.read((uint8_t*)&buf[got], recSize) == (int)recSize) {
+                got++;
+            }
+            f.close();
+        }
+        if (locked) xSemaphoreGive(_mutex);
+
+        // Output newest-first within the batch (descending), outside the lock.
+        for (size_t k = got; k-- > 0; ) emit(out, buf[k], ctx);
+
+        hi = lo;
     }
-    size_t total = counts[0] + counts[1];
+}
+
+// Emit the newest `maxEntries` records (all if < 0), newest-first, streaming via
+// `emit`. Only file sizes are read into RAM up front; records are streamed in
+// small batches, so this is safe even when the heap is too fragmented for a
+// large contiguous buffer — the failure mode that previously reset the device.
+void EventLog::_forEachNewest(Print& out, int maxEntries, EventLogEmitFn emit, void* ctx) {
+    // Snapshot the file layout (older = inactive, newer = active) under the lock.
+    bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
+    const char* older = _inactivePath();
+    const char* newer = _activePath();
+    size_t cOlder = _fileRecordCount(older);
+    size_t cNewer = _fileRecordCount(newer);
+    if (locked) xSemaphoreGive(_mutex);
+
+    size_t total = cOlder + cNewer;
+    if (total == 0) return;
 
     size_t limit = (maxEntries >= 0 && (size_t)maxEntries < total)
                        ? (size_t)maxEntries : total;
-    size_t start = total - limit;   // global index of first entry to keep
+    size_t start = total - limit;    // global index of the oldest wanted entry
 
-    entries.reserve(limit);
+    // Newer file holds global indices [cOlder, total). Emit its wanted tail
+    // first (newest), then the older file if the range reaches into it.
+    size_t firstWantedNewer = (start > cOlder) ? (start - cOlder) : 0;
+    _emitFileReverse(out, newer, cNewer, firstWantedNewer, emit, ctx);
 
-    size_t globalIdx = 0;
-    for (int p = 0; p < 2; p++) {
-        size_t fileCount = counts[p];
-        if (fileCount == 0) continue;
-
-        // Skip whole file if it lies entirely before the wanted range.
-        if (start >= globalIdx + fileCount) { globalIdx += fileCount; continue; }
-
-        File f = LittleFS.open(paths[p], "r");
-        if (!f) { globalIdx += fileCount; continue; }
-
-        size_t skipInFile = (start > globalIdx) ? (start - globalIdx) : 0;
-        if (skipInFile) f.seek(skipInFile * recSize);
-
-        LogEntry e;
-        while (f.read((uint8_t*)&e, recSize) == (int)recSize) {
-            entries.push_back(e);
-        }
-        f.close();
-        globalIdx += fileCount;
+    if (start < cOlder) {
+        _emitFileReverse(out, older, cOlder, start, emit, ctx);
     }
+}
 
+void EventLog::snapshotNewest(int maxEntries, size_t& cOlder, size_t& cNewer,
+                              size_t& total, size_t& start) {
+    bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
+    cOlder = _fileRecordCount(_inactivePath());
+    cNewer = _fileRecordCount(_activePath());
     if (locked) xSemaphoreGive(_mutex);
+
+    total = cOlder + cNewer;
+    size_t limit = (maxEntries >= 0 && (size_t)maxEntries < total)
+                       ? (size_t)maxEntries : total;
+    start = total - limit;
+}
+
+bool EventLog::readByGlobal(size_t globalIndex, size_t cOlder, size_t cNewer,
+                            LogEntry& out) {
+    if (globalIndex >= cOlder + cNewer) return false;
+
+    const size_t recSize = sizeof(LogEntry);
+    bool ok = false;
+
+    bool locked = _mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE;
+    // Map the global index (oldest-first) to the older (inactive) or newer
+    // (active) file. Paths are resolved live; a ring rollover mid-stream is rare
+    // and at worst yields a stale record, never a crash.
+    const char* path = (globalIndex < cOlder) ? _inactivePath() : _activePath();
+    size_t offset = (globalIndex < cOlder) ? globalIndex : (globalIndex - cOlder);
+
+    File f = LittleFS.open(path, "r");
+    if (f) {
+        f.seek(offset * recSize);
+        ok = (f.read((uint8_t*)&out, recSize) == (int)recSize);
+        f.close();
+    }
+    if (locked) xSemaphoreGive(_mutex);
+    return ok;
+}
+
+// Comma tracking for the streamed JSON array (no heap closure needed).
+struct JsonEmitCtx { bool first; };
+static void emitEntryJson(Print& out, const LogEntry& e, void* ctx) {
+    JsonEmitCtx* c = (JsonEmitCtx*)ctx;
+    if (!c->first) out.print(',');
+    c->first = false;
+    EventLog::writeEntryJson(out, e);
 }
 
 void EventLog::writeJson(Print& out, int maxEntries) {
-    std::vector<LogEntry> entries;
-    _loadNewest(entries, maxEntries);
-
     out.print('[');
-    size_t kept = entries.size();
-    bool first = true;
-    for (size_t i = 0; i < kept; i++) {
-        const LogEntry& e = entries[kept - 1 - i];  // reverse → newest first
-        if (!first) out.print(',');
-        first = false;
-        writeEntryJson(out, e);
-    }
+    JsonEmitCtx ctx = { true };
+    _forEachNewest(out, maxEntries, emitEntryJson, &ctx);
     out.print(']');
 }
 
@@ -379,18 +439,17 @@ static void writeEntryText(Print& out, const LogEntry& e) {
     out.print('\n');
 }
 
-void EventLog::writeText(Print& out, int maxEntries) {
-    std::vector<LogEntry> entries;
-    _loadNewest(entries, maxEntries);
+// Row counter so the header / "(no entries)" can be chosen while streaming.
+struct TextEmitCtx { size_t count; };
+static void emitEntryText(Print& out, const LogEntry& e, void* ctx) {
+    ((TextEmitCtx*)ctx)->count++;
+    writeEntryText(out, e);
+}
 
-    size_t kept = entries.size();
-    if (kept == 0) {
-        out.println("(no entries)");
-        return;
-    }
+void EventLog::writeText(Print& out, int maxEntries) {
     out.println("time (UTC)                level    boot  message");
     out.println("------------------------------------------------------------");
-    for (size_t i = 0; i < kept; i++) {
-        writeEntryText(out, entries[kept - 1 - i]);   // newest first
-    }
+    TextEmitCtx ctx = { 0 };
+    _forEachNewest(out, maxEntries, emitEntryText, &ctx);
+    if (ctx.count == 0) out.println("(no entries)");
 }
