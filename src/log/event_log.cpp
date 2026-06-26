@@ -17,6 +17,7 @@
 RTC_NOINIT_ATTR static uint32_t rtcLogMagic;                 // == RTC_MAGIC when valid
 RTC_NOINIT_ATTR static uint16_t rtcLogHead;                  // next write slot
 RTC_NOINIT_ATTR static uint16_t rtcLogCount;                 // valid entries (<= capacity)
+RTC_NOINIT_ATTR static uint16_t rtcLogPending;               // newest entries not yet persisted to LittleFS
 RTC_NOINIT_ATTR static LogEntry rtcLog[LOG_RTC_CAPACITY];
 
 static const uint32_t RTC_MAGIC = 0xCAFEBABE;
@@ -92,8 +93,8 @@ void EventLog::_writeMeta() {
     }
 }
 
-// Assumes _mutex is held.
-void EventLog::_appendLittleFS(const LogEntry& e) {
+// Assumes _mutex is held. Returns true if the entry reached LittleFS.
+bool EventLog::_appendLittleFS(const LogEntry& e) {
     // Switch to the other file (and clear it) once the active file is full.
     if (_activeSize + sizeof(LogEntry) > LOG_FILE_MAX_SIZE) {
         _activeFile = (_activeFile == '0') ? '1' : '0';
@@ -105,11 +106,11 @@ void EventLog::_appendLittleFS(const LogEntry& e) {
     }
 
     File f = LittleFS.open(_activePath(), "a");
-    if (!f) return;
-    if (f.write((const uint8_t*)&e, sizeof(e)) == sizeof(e)) {
-        _activeSize += sizeof(e);
-    }
+    if (!f) return false;
+    bool ok = (f.write((const uint8_t*)&e, sizeof(e)) == sizeof(e));
+    if (ok) _activeSize += sizeof(e);
     f.close();
+    return ok;
 }
 
 void EventLog::begin() {
@@ -133,8 +134,12 @@ void EventLog::begin() {
     _readMeta();
 
     // --- Recover RTC "last words" from the previous boot (if any) ---
-    if (rtcLogMagic == RTC_MAGIC && rtcLogCount > 0) {
-        uint16_t count = rtcLogCount;
+    // Only entries that never made it to LittleFS (rtcLogPending) are flushed —
+    // log() persists each entry immediately, so on a clean restart nothing is
+    // pending and we avoid re-writing (duplicating) the last boot's entries.
+    if (rtcLogMagic == RTC_MAGIC && rtcLogPending > 0) {
+        uint16_t count = rtcLogPending;
+        if (count > rtcLogCount)     count = rtcLogCount;
         if (count > LOG_RTC_CAPACITY) count = LOG_RTC_CAPACITY;
         // Oldest-first iteration so LittleFS keeps chronological order.
         uint16_t start = (rtcLogHead + LOG_RTC_CAPACITY - count) % LOG_RTC_CAPACITY;
@@ -145,13 +150,14 @@ void EventLog::begin() {
             }
             xSemaphoreGive(_mutex);
         }
-        Serial.printf("EventLog: recovered %u RTC entries from previous boot\n", count);
+        Serial.printf("EventLog: recovered %u unpersisted RTC entries from previous boot\n", count);
     }
 
     // --- (Re)initialise RTC ring for this boot ---
-    rtcLogMagic = RTC_MAGIC;
-    rtcLogHead  = 0;
-    rtcLogCount = 0;
+    rtcLogMagic   = RTC_MAGIC;
+    rtcLogHead    = 0;
+    rtcLogCount   = 0;
+    rtcLogPending = 0;
 
     _initialized = true;
 
@@ -201,17 +207,22 @@ void EventLog::log(uint8_t level, const char* fmt, ...) {
     // Layer 1: RTC RAM (crash-safe). Done even if begin() hasn't run yet —
     // begin() resets the ring, so this is harmless before init.
     if (rtcLogMagic != RTC_MAGIC) {
-        rtcLogMagic = RTC_MAGIC;
-        rtcLogHead  = 0;
-        rtcLogCount = 0;
+        rtcLogMagic   = RTC_MAGIC;
+        rtcLogHead    = 0;
+        rtcLogCount   = 0;
+        rtcLogPending = 0;
     }
     rtcLog[rtcLogHead] = e;
     rtcLogHead = (rtcLogHead + 1) % LOG_RTC_CAPACITY;
     if (rtcLogCount < LOG_RTC_CAPACITY) rtcLogCount++;
+    // Mark this entry as not-yet-persisted; cleared once LittleFS confirms it.
+    if (rtcLogPending < LOG_RTC_CAPACITY) rtcLogPending++;
 
-    // Layer 2: LittleFS (best-effort; only once initialised).
-    if (_initialized) {
-        _appendLittleFS(e);
+    // Layer 2: LittleFS (best-effort; only once initialised). On success the
+    // backlog is cleared — log() persists synchronously, so a successful write
+    // means everything up to here is on flash and need not be recovered later.
+    if (_initialized && _appendLittleFS(e)) {
+        rtcLogPending = 0;
     }
 
     if (locked) xSemaphoreGive(_mutex);
@@ -226,9 +237,10 @@ void EventLog::clear() {
     _activeFile = '0';
     _activeSize = 0;
 
-    rtcLogMagic = RTC_MAGIC;
-    rtcLogHead  = 0;
-    rtcLogCount = 0;
+    rtcLogMagic   = RTC_MAGIC;
+    rtcLogHead    = 0;
+    rtcLogCount   = 0;
+    rtcLogPending = 0;
 
     if (locked) xSemaphoreGive(_mutex);
     Serial.println("EventLog: cleared");

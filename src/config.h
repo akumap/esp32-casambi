@@ -110,11 +110,16 @@
 // Connection health check interval (ms) - verify BLE is still alive
 #define CONNECTION_CHECK_INTERVAL_MS    10000
 
-// Heap monitoring interval (ms) - log free heap periodically
-#define HEAP_MONITOR_INTERVAL_MS        60000
+// Heap monitoring interval (ms) - check free heap periodically
+#define HEAP_MONITOR_INTERVAL_MS        15000
 
 // Minimum free heap before forced restart (bytes)
 #define HEAP_CRITICAL_THRESHOLD         20000
+
+// Consecutive low-heap readings required before a protective restart. A single
+// transient dip (e.g. TCP/WS buffers during a web request, a BLE reconnect)
+// recovers on its own; only a sustained shortfall warrants a reboot.
+#define HEAP_CRITICAL_CONSECUTIVE       3
 
 // Watchdog timeout (seconds) - hardware WDT
 #define WDT_TIMEOUT_SECONDS             30

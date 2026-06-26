@@ -150,7 +150,7 @@ private:
     static int64_t _nowTimestamp();                 // signed timestamp per above
     static const char* _activePath();
     static const char* _inactivePath();
-    static void   _appendLittleFS(const LogEntry& e);  // assumes mutex held
+    static bool   _appendLittleFS(const LogEntry& e);  // assumes mutex held; true on success
     static void   _writeMeta();
     static void   _readMeta();
 };

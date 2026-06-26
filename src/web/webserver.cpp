@@ -603,11 +603,13 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     g_httpRequestCount++;
     WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
 
-    // Optional ?n=<count> limits to the newest n entries.
-    int n = -1;
+    // Default to the newest 50 entries: a plain GET should stay cheap even on a
+    // tight heap. Use ?n=<count> for more (?n=0 → all). The full log can be
+    // hundreds of entries and, with TCP/header buffers, is a heavy request.
+    int n = 50;
     if (request->hasParam("n")) {
         n = request->getParam("n")->value().toInt();
-        if (n < 0) n = 0;
+        if (n <= 0) n = -1;   // ?n=0 → all entries
     }
 
     // Stream the array in HTTP chunks: the source reads one record at a time, so

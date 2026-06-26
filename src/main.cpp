@@ -535,15 +535,30 @@ void monitorHeap() {
         lastKaCount        = g_keepaliveCount;
     }
 
-    // Critical heap warning
+    // Critical heap handling with debounce: a single low reading is usually a
+    // transient spike (web/WS TCP buffers, a BLE reconnect) that recovers on its
+    // own. Only restart after HEAP_CRITICAL_CONSECUTIVE sustained low readings.
+    static uint8_t lowHeapStreak = 0;
     if (freeHeap < HEAP_CRITICAL_THRESHOLD) {
-        Serial.printf("*** CRITICAL: Free heap %d bytes < %d threshold! ***\n",
-                      freeHeap, HEAP_CRITICAL_THRESHOLD);
-        Serial.println("*** Restarting ESP32 to prevent crash ***");
-        EventLog::log(LOG_CRITICAL, "Restart: low heap %u < %u bytes",
-                      (unsigned)freeHeap, (unsigned)HEAP_CRITICAL_THRESHOLD);
-        delay(1000);
-        ESP.restart();
+        lowHeapStreak++;
+        Serial.printf("*** Low heap %d < %d (%u/%u) ***\n",
+                      freeHeap, HEAP_CRITICAL_THRESHOLD,
+                      lowHeapStreak, HEAP_CRITICAL_CONSECUTIVE);
+        // Record the onset of a low-heap episode once, for post-mortem analysis.
+        if (lowHeapStreak == 1) {
+            EventLog::log(LOG_WARN, "Low heap %u < %u (transient?)",
+                          (unsigned)freeHeap, (unsigned)HEAP_CRITICAL_THRESHOLD);
+        }
+        if (lowHeapStreak >= HEAP_CRITICAL_CONSECUTIVE) {
+            Serial.println("*** Sustained low heap - restarting ESP32 ***");
+            EventLog::log(LOG_CRITICAL, "Restart: low heap %u < %u bytes (%u readings)",
+                          (unsigned)freeHeap, (unsigned)HEAP_CRITICAL_THRESHOLD,
+                          lowHeapStreak);
+            delay(1000);
+            ESP.restart();
+        }
+    } else {
+        lowHeapStreak = 0;   // recovered → reset the episode
     }
 }
 
