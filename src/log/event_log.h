@@ -28,7 +28,6 @@
 #define EVENT_LOG_H
 
 #include <Arduino.h>
-#include <vector>
 #include "../config.h"
 
 // ----------------------------------------------------------------------------
@@ -53,6 +52,11 @@ struct __attribute__((packed)) LogEntry {
     uint8_t  msgLen;              // valid bytes in msg (<= LOG_MSG_MAX)
     char     msg[LOG_MSG_MAX];    // message text (not necessarily NUL-terminated)
 };
+
+// Per-entry output callback used by the streaming readers. `ctx` carries any
+// caller state (e.g. JSON comma tracking) so no heap-allocated closure is
+// needed. Entries are delivered newest-first.
+typedef void (*EventLogEmitFn)(Print& out, const LogEntry& e, void* ctx);
 
 class EventLog {
 public:
@@ -89,6 +93,42 @@ public:
     static void writeText(Print& out, int maxEntries = -1);
 
     /**
+     * Serialize a single entry as a JSON object (no surrounding array/comma).
+     * Public so a chunked HTTP response can stream entries one at a time
+     * without buffering the whole array in RAM.
+     */
+    static void writeEntryJson(Print& out, const LogEntry& e);
+
+    // ------------------------------------------------------------------------
+    // Pull-based access for low-memory streaming (e.g. chunked HTTP response).
+    // Lets a caller emit the newest entries one at a time, never holding more
+    // than a single record in RAM, instead of building the whole array first.
+    // ------------------------------------------------------------------------
+
+    /**
+     * Snapshot the current record layout. `total` is the number of stored
+     * records; `start` is the global index of the oldest record that falls in
+     * the newest `maxEntries` window (maxEntries < 0 → all). cOlder/cNewer are
+     * the per-file counts needed to map a global index back to a file.
+     */
+    static void snapshotNewest(int maxEntries, size_t& cOlder, size_t& cNewer,
+                               size_t& total, size_t& start);
+
+    /**
+     * Read a descending run of records into `out`, newest-first (out[0] is the
+     * record at global index `from`). Reads at most `want` records, going down
+     * to max(`minGlobal`, file start), and never crosses the file boundary — so
+     * each call needs only a single LittleFS open. Returns the count read.
+     *
+     * Batching this way keeps flash open/close churn low (one open per `want`
+     * records) so a chunked HTTP response stays light on a fragmented heap,
+     * instead of opening the file once per entry. Counts come from
+     * snapshotNewest().
+     */
+    static size_t readDescRun(size_t from, size_t minGlobal, size_t want,
+                              size_t cOlder, size_t cNewer, LogEntry* out);
+
+    /**
      * Current boot counter (incremented once per begin()).
      */
     static uint16_t bootCount() { return _bootId; }
@@ -105,11 +145,18 @@ private:
     static size_t _activeSize;     // bytes currently in active file
     static SemaphoreHandle_t _mutex;
 
-    static void   _loadNewest(std::vector<LogEntry>& entries, int maxEntries);  // newest tail, oldest→newest
+    // Streaming readers — emit the newest `maxEntries` records newest-first
+    // without ever holding more than a few records in RAM. The flash is read in
+    // small fixed-size batches, so no large contiguous allocation is needed
+    // (which would fail on a fragmented heap and reset the device).
+    static void   _forEachNewest(Print& out, int maxEntries, EventLogEmitFn emit, void* ctx);
+    static void   _emitFileReverse(Print& out, const char* path, size_t count,
+                                   size_t firstWanted, EventLogEmitFn emit, void* ctx);
+    static size_t _fileRecordCount(const char* path);   // assumes mutex held
     static int64_t _nowTimestamp();                 // signed timestamp per above
     static const char* _activePath();
     static const char* _inactivePath();
-    static void   _appendLittleFS(const LogEntry& e);  // assumes mutex held
+    static bool   _appendLittleFS(const LogEntry& e);  // assumes mutex held; true on success
     static void   _writeMeta();
     static void   _readMeta();
 };
