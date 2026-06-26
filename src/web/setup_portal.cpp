@@ -6,7 +6,7 @@
 
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
-#include <BLEDevice.h>
+#include <NimBLEDevice.h>
 #include <esp_task_wdt.h>
 #include <ArduinoJson.h>
 
@@ -302,7 +302,7 @@ void SetupPortal::_runScan() {
     // here would make every scan after the first one find nothing. The memory
     // is released later, once, right before the cloud TLS handshake.
     if (!_bleInited) {
-        BLEDevice::init("Casambi-Setup");
+        NimBLEDevice::init("Casambi-Setup");
         _bleInited = true;
     }
     CasambiScan::run(PORTAL_BLE_SCAN_SECONDS, _scanResults);
@@ -324,7 +324,7 @@ void SetupPortal::_runProvision() {
     // large enough contiguous heap block. After this BLE is unusable until the
     // next reboot — fine, we reboot into operation mode on success.
     if (_bleInited) {
-        BLEDevice::deinit(true);
+        NimBLEDevice::deinit(true);
         _bleInited = false;
         delay(100);
     }

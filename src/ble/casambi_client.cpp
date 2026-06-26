@@ -7,6 +7,7 @@
 
 #include "casambi_client.h"
 #include "packet.h"
+#include <NimBLEDevice.h>
 #include <mbedtls/sha256.h>
 #include <esp_task_wdt.h>
 
@@ -54,12 +55,19 @@ bool CasambiClient::connect(const String& address) {
     _totalReceivedPackets = 0;
 
     if (_bleClient) {
-        delete _bleClient;
+        // NimBLE tracks clients in an internal list; deleteClient() removes it
+        // there before freeing. A plain `delete` would leave a dangling pointer
+        // in that list. createClient() may also hand back a pooled client, so
+        // always release the old one explicitly first.
+        NimBLEDevice::deleteClient(_bleClient);
         _bleClient = nullptr;
     }
-    _bleClient = BLEDevice::createClient();
+    _bleClient = NimBLEDevice::createClient();
 
-    if (!_bleClient->connect(BLEAddress(address.c_str()))) {
+    // Casambi gateways are reconnected by their stored MAC (no live scan). NimBLE
+    // requires the peer address type; mirror the old Bluedroid default (public).
+    // If a gateway turns out to advertise a random address, see concept 6.3.
+    if (!_bleClient->connect(NimBLEAddress(std::string(address.c_str()), BLE_ADDR_PUBLIC))) {
         Serial.println("BLE: Connection failed");
         _lastDisconnectReason = DisconnectReason::BLELinkLoss;
         return false;
@@ -70,14 +78,14 @@ bool CasambiClient::connect(const String& address) {
     _lastNotificationTime = millis();
     Serial.println("BLE: Connected");
 
-    BLERemoteService* service = _bleClient->getService(BLEUUID(CASAMBI_SERVICE_UUID));
+    NimBLERemoteService* service = _bleClient->getService(NimBLEUUID(CASAMBI_SERVICE_UUID));
     if (!service) {
         Serial.println("BLE: Service not found");
         _disconnectInternal(DisconnectReason::InternalError);
         return false;
     }
 
-    _authChar = service->getCharacteristic(BLEUUID(CASAMBI_AUTH_CHAR_UUID));
+    _authChar = service->getCharacteristic(NimBLEUUID(CASAMBI_AUTH_CHAR_UUID));
     if (!_authChar) {
         Serial.println("BLE: Auth characteristic not found");
         _disconnectInternal(DisconnectReason::InternalError);
@@ -376,7 +384,7 @@ bool CasambiClient::_readDeviceInfo() {
     }
 
     if (_authChar->canNotify()) {
-        _authChar->registerForNotify(_notifyCallback);
+        _authChar->subscribe(true, _notifyCallback);
         if (bleDebugEnabled) {
             Serial.println("BLE: Notifications enabled");
         }
@@ -632,7 +640,7 @@ std::vector<uint8_t> CasambiClient::_getNonce(uint32_t counter) {
 // BLE NOTIFICATION HANDLING
 // ============================================================================
 
-void CasambiClient::_notifyCallback(BLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool isNotify) {
+void CasambiClient::_notifyCallback(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool isNotify) {
     if (g_clientInstance) {
         g_clientInstance->_handleNotification(data, len);
     }
