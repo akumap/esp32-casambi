@@ -614,10 +614,13 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     g_httpRequestCount++;
     WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
 
-    // Default to the newest 50 entries: a plain GET should stay cheap even on a
-    // tight heap. Use ?n=<count> for more (?n=0 → all). The full log can be
-    // hundreds of entries and, with TCP/header buffers, is a heavy request.
-    int n = 50;
+    // Default to the newest 25 entries (~3.5 KB JSON) so a plain GET fits in a
+    // single TCP window and the framework's per-chunk malloc(space) (~5.5 KB)
+    // stays within the largest free block. Larger responses span multiple chunks
+    // and, on this device's tight/fragmented heap (largest block ~13 KB), can
+    // fail to send (client sees HTTP/0.9). Use ?n=<count> for more (?n=0 = all)
+    // at your own risk, or fetch the full log over serial ('log N').
+    int n = 25;
     if (request->hasParam("n")) {
         n = request->getParam("n")->value().toInt();
         if (n <= 0) n = -1;   // ?n=0 → all entries
