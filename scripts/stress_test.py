@@ -507,7 +507,9 @@ def worker_heap_monitor(host, port, interval=4):
         if ok and body:
             try:
                 data = json.loads(body)
-                stats.record_heap(data.get("free_heap", 0))
+                # largest_block is present on newer firmware; None on older.
+                stats.record_heap(data.get("free_heap", 0),
+                                  data.get("largest_block"))
             except Exception:
                 pass
         _monitor_stop.wait(interval)
@@ -713,11 +715,29 @@ def main():
             print(f"  end of load         : {heap_before_cd//1024} KB")
         print(f"  after cooldown      : {final//1024} KB")
         if recovered:
-            print("  => RECOVERED — no persistent leak detected.\n")
+            print("  => free heap RECOVERED — no persistent free-heap leak.")
         else:
             lost = (baseline - final) // 1024
-            print(f"  => NOT recovered — ~{lost} KB still missing after load"
-                  f" stopped (likely leak / fragmentation).\n")
+            print(f"  => free heap NOT recovered — ~{lost} KB still missing"
+                  f" after load stopped (likely leak).")
+
+        # Fragmentation verdict (largest allocatable block), if firmware exposes it.
+        lb = [(s[1], s[2]) for s in stats.heap_samples if s[1] is not None]
+        if lb:
+            lb_base  = lb[0][0]
+            lb_final = lb[-1][0]
+            lb_min   = min(v for v, _ in lb)
+            print(f"  largest block       : start={lb_base//1024}KB"
+                  f"  min={lb_min//1024}KB  after cooldown={lb_final//1024}KB")
+            if lb_final < lb_base * 0.9:
+                print(f"  => FRAGMENTED — largest block did not recover"
+                      f" (free heap can look fine while allocations still fail).")
+            else:
+                print(f"  => largest block recovered — no lasting fragmentation.")
+        else:
+            print("  (largest_block not reported — update ESP32 firmware to track"
+                  " fragmentation)")
+        print()
 
 
 if __name__ == "__main__":
