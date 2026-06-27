@@ -319,23 +319,56 @@ def _ws_recv_frame(s, timeout=2):
 # Worker threads
 # ---------------------------------------------------------------------------
 
-def worker_get_flood(host, port, rate):
-    """GET random read-only endpoints.  rate>0 caps requests/sec for this worker."""
+def worker_get_flood(host, port, rate, keepalive=False):
+    """GET random read-only endpoints.  rate>0 caps requests/sec for this worker.
+
+    keepalive=True reuses a single TCP connection across requests (no
+    'Connection: close'), so it does NOT churn connections.  Comparing a
+    keepalive run against the default (one connection per request) tells us
+    whether a heap leak comes from connection churn (TCP layer) or from
+    per-request handling (our code)."""
     endpoints = [
         "/api/status", "/api/units", "/api/groups",
         "/api/scenes",  "/api/log?n=5", "/api/ntp",
     ]
     min_interval = (1.0 / rate) if rate and rate > 0 else 0.0
+    conn = None
     while not stop_evt.is_set():
-        t0 = time.monotonic()
+        t0   = time.monotonic()
         path = random.choice(endpoints)
         cat  = path.split("?")[0].split("/")[-1]
-        ok, lat, _ = http_get(host, port, path)
-        stats.record(f"GET/{cat}", ok, lat)
+
+        if keepalive:
+            # Persistent connection: keep one open and reuse it.
+            try:
+                if conn is None:
+                    conn = http.client.HTTPConnection(host, port, timeout=5)
+                conn.request("GET", path)          # no Connection: close
+                resp = conn.getresponse()
+                resp.read()
+                ok = resp.status == 200
+                stats.record(f"GET/{cat}", ok, (time.monotonic() - t0) * 1000)
+            except Exception:
+                stats.record(f"GET/{cat}", False)
+                try:
+                    if conn:
+                        conn.close()
+                except Exception:
+                    pass
+                conn = None
+        else:
+            ok, lat, _ = http_get(host, port, path)
+            stats.record(f"GET/{cat}", ok, lat)
+
         if min_interval:
             sleep = min_interval - (time.monotonic() - t0)
             if sleep > 0:
                 stop_evt.wait(sleep)
+    if conn:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def worker_post_control(host, port, period):
@@ -525,7 +558,12 @@ def main():
     parser.add_argument("--concurrency", type=int, default=None)
     parser.add_argument("--ws-clients",  type=int, default=None)
     parser.add_argument("--get-rate",    type=float, default=None)
+    parser.add_argument("--keepalive",   action="store_true",
+                        help="GET workers reuse one TCP connection (no churn) — "
+                             "use to tell connection-churn leaks from per-request ones")
     parser.add_argument("--skip-ws",     action="store_true")
+    parser.add_argument("--skip-post",   action="store_true",
+                        help="Disable all POST workers (control/invalid/oversize)")
     parser.add_argument("--skip-abort",  action="store_true")
     args = parser.parse_args()
 
@@ -542,6 +580,9 @@ def main():
         prof["get_rate"] = args.get_rate
     if args.skip_ws:
         prof["ws_churn"] = prof["ws_persistent"] = 0
+    if args.skip_post:
+        prof["post_workers"] = 0
+        prof["invalid"] = prof["oversize"] = False
     if args.skip_abort:
         prof["abort_workers"] = 0
 
@@ -550,7 +591,9 @@ def main():
     print(f"Profile  : {args.profile}")
     print(f"Duration : {args.duration}s active  +  {args.cooldown}s cooldown"
           f"  (ramp {args.ramp}s)")
-    print(f"Workers  : get={prof['get_workers']} post={prof['post_workers']}"
+    print(f"Workers  : get={prof['get_workers']}"
+          f"{' (keepalive)' if args.keepalive else ''}"
+          f" post={prof['post_workers']}"
           f" abort={prof['abort_workers']}"
           f" ws_churn={prof['ws_churn']} ws_persistent={prof['ws_persistent']}\n")
 
@@ -561,7 +604,8 @@ def main():
     # Build the worker list (function, args) — started later with ramp.
     jobs = []
     for _ in range(prof["get_workers"]):
-        jobs.append((worker_get_flood, (args.host, args.port, prof["get_rate"])))
+        jobs.append((worker_get_flood,
+                     (args.host, args.port, prof["get_rate"], args.keepalive)))
     for _ in range(prof["post_workers"]):
         jobs.append((worker_post_control, (args.host, args.port, prof["post_period"])))
     if prof["invalid"]:
