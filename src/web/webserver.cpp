@@ -364,10 +364,12 @@ void CasambiWebServer::_setupRoutes() {
             // _tempObject automatically.  Register a disconnect handler to
             // clean it up in that case.  Normal completions delete it below
             // and set _tempObject = nullptr, so this becomes a safe no-op.
-            request->onDisconnect([](AsyncWebServerRequest* r) {
-                if (r->_tempObject) {
-                    delete static_cast<String*>(r->_tempObject);
-                    r->_tempObject = nullptr;
+            // ArDisconnectHandler is std::function<void()>, so capture the
+            // request rather than taking it as a parameter.
+            request->onDisconnect([request]() {
+                if (request->_tempObject) {
+                    delete static_cast<String*>(request->_tempObject);
+                    request->_tempObject = nullptr;
                 }
             });
         }
