@@ -131,10 +131,11 @@
 // WEBSERVER / WEBSOCKET SETTINGS
 // ============================================================================
 
-// Maximum simultaneous WebSocket clients. New connections beyond this limit are
-// rejected (closed immediately on connect), so existing clients — notably the
-// FHEM gateway link — are never evicted by connection churn. Bounds memory use
-// under load. Realistic need is ~2 (FHEM + one browser); 3 leaves headroom.
+// Maximum simultaneous WebSocket clients. loop() trims the client list to this
+// many via cleanupClients(); excess/stale clients are closed. Bounds memory use
+// under connection churn. Realistic need is ~2 (FHEM + one browser); 3 leaves
+// headroom. (A connect-time hard reject was tried but leaked client structures
+// under churn — see git history — so the cap is enforced via cleanupClients.)
 #define WS_MAX_CLIENTS                  3
 
 // Depth of the inter-task broadcast queue (stores String* pointers).

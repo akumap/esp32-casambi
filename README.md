@@ -422,9 +422,8 @@ ws://<esp32-ip>/ws
 ```
 
 A maximum of **3 simultaneous WebSocket clients** is enforced (`WS_MAX_CLIENTS`
-in `src/config.h`). Connections beyond the limit are rejected (closed
-immediately on connect) rather than evicting an existing client, so the
-established FHEM gateway link is never dropped by connection churn. The
+in `src/config.h`); the server trims the client list to this many and closes
+excess/stale connections, bounding memory use under connection churn. The
 realistic need is small — typically the FHEM gateway plus an optional browser.
 
 ### Messages (server → client, JSON)
