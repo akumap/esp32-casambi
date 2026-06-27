@@ -98,6 +98,18 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
                                               AsyncWebSocketClient* client,
                                               AwsEventType type, void* arg,
                                               uint8_t* data, size_t len) {
+    // Investigation trace (enable with 'debug heap on'): one line per WS
+    // lifecycle event with live client count and heap, to locate a churn-time
+    // leak (heap drops per cycle and never recovers) or crash (last line before
+    // a reboot identifies where). Low volume: one line per connect/disconnect.
+    if (heapDebugEnabled &&
+        (type == WS_EVT_CONNECT || type == WS_EVT_DISCONNECT || type == WS_EVT_ERROR)) {
+        const char* ev = (type == WS_EVT_CONNECT) ? "CONNECT"
+                       : (type == WS_EVT_DISCONNECT) ? "DISCONN" : "ERROR";
+        Serial.printf("WSDBG %s id=%u count=%u free=%u largest=%u\n",
+                      ev, client->id(), (unsigned)server->count(),
+                      (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    }
     switch (type) {
         case WS_EVT_CONNECT:
             WEB_LOG("WS: client #%u connected from %s\n",
