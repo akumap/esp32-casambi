@@ -9,14 +9,18 @@
 #define CASAMBI_CLIENT_H
 
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEClient.h>
 #include <vector>
 #include <functional>
 #include "../config.h"
 #include "../cloud/network_config.h"
 #include "../crypto/encryption.h"
 #include "../crypto/key_exchange.h"
+
+// NimBLE types are an implementation detail of src/ble/ — forward-declare here
+// and include <NimBLEDevice.h> only in the .cpp so the BLE stack does not leak
+// into the rest of the firmware (see docs/konzept-ble-nimble-migration.md, 5.1).
+class NimBLEClient;
+class NimBLERemoteCharacteristic;
 
 // ============================================================================
 // CONNECTION STATES
@@ -159,8 +163,8 @@ public:
 
 private:
     NetworkConfig* _config;
-    BLEClient* _bleClient;
-    BLERemoteCharacteristic* _authChar;
+    NimBLEClient* _bleClient;
+    NimBLERemoteCharacteristic* _authChar;
 
     ConnectionState _state;
     ECDHKeyExchange* _keyExchange;
@@ -247,7 +251,7 @@ private:
     // BLE CALLBACKS
     // ========================================================================
 
-    static void _notifyCallback(BLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool isNotify);
+    static void _notifyCallback(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool isNotify);
     void _handleNotification(uint8_t* data, size_t len);
     void _handleKeyExchangeNotification(uint8_t* data, size_t len);
     void _handleAuthNotification(uint8_t* data, size_t len);

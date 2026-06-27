@@ -6,8 +6,7 @@
  */
 
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEScan.h>
+#include <NimBLEDevice.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 #include <time.h>
@@ -174,7 +173,7 @@ void setup() {
             heapDebugEnabled    = networkConfig.heapDebugEnabled;
 
             // Initialize BLE first (before WiFi for proper coexistence)
-            BLEDevice::init("ESP32-Casambi");
+            NimBLEDevice::init("ESP32-Casambi");
 
             // Initialize BLE client
             casambiClient = new CasambiClient(&networkConfig);
@@ -600,16 +599,16 @@ void checkCasambiVersions(const NetworkConfig& cfg) {
 // BLE SCANNING (with memory leak fix)
 // ============================================================================
 
-class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
-    void onResult(BLEAdvertisedDevice advertisedDevice) {
+class ScanCallbacks : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
         // Check if this is a Casambi device (service UUID)
-        if (advertisedDevice.haveServiceUUID()) {
-            BLEUUID serviceUUID = advertisedDevice.getServiceUUID();
-            if (serviceUUID.equals(BLEUUID(CASAMBI_SERVICE_UUID))) {
+        if (advertisedDevice->haveServiceUUID()) {
+            NimBLEUUID serviceUUID = advertisedDevice->getServiceUUID();
+            if (serviceUUID.equals(NimBLEUUID(CASAMBI_SERVICE_UUID))) {
                 ScannedDevice dev;
-                dev.address = advertisedDevice.getAddress().toString().c_str();
-                dev.name = advertisedDevice.haveName() ? advertisedDevice.getName().c_str() : "Unknown";
-                dev.rssi = advertisedDevice.getRSSI();
+                dev.address = advertisedDevice->getAddress().toString().c_str();
+                dev.name = advertisedDevice->haveName() ? advertisedDevice->getName().c_str() : "Unknown";
+                dev.rssi = advertisedDevice->getRSSI();
 
                 // Check if already in list
                 bool found = false;
@@ -803,7 +802,7 @@ void handleCommand(const String& cmd) {
             if (casambiClient) {
                 casambiClient->disconnect();
             }
-            BLEDevice::deinit(true);
+            NimBLEDevice::deinit(true);
             delay(500);
 
             // From here on the BLE stack is gone, so we can no longer just
@@ -1354,27 +1353,27 @@ void runSetupWizard() {
     Serial.println("Step 1: Scanning for Casambi networks...");
     Serial.println("(Make sure your Casambi lights are powered on)\n");
 
-    BLEDevice::init("ESP32-Casambi");
+    NimBLEDevice::init("ESP32-Casambi");
 
     scannedDevices.clear();
-    BLEScan* pBLEScan = BLEDevice::getScan();
+    NimBLEScan* pBLEScan = NimBLEDevice::getScan();
 
     // Fix memory leak: reuse scan callback instance
     if (scanCallbackInstance) delete scanCallbackInstance;
     scanCallbackInstance = new ScanCallbacks();
-    pBLEScan->setAdvertisedDeviceCallbacks(scanCallbackInstance);
+    pBLEScan->setScanCallbacks(scanCallbackInstance);
     pBLEScan->setActiveScan(true);
     pBLEScan->setInterval(100);
     pBLEScan->setWindow(99);
 
     Serial.println("Scanning for 10 seconds...\n");
-    pBLEScan->start(10, false);
+    pBLEScan->getResults(10000, false);  // blocking, duration in ms
     pBLEScan->clearResults();  // Free scan result memory
 
     if (scannedDevices.size() == 0) {
         Serial.println("\nNo Casambi networks found!");
         Serial.println("Make sure your lights are on and try again.");
-        BLEDevice::deinit();
+        NimBLEDevice::deinit();
         return;
     }
 
@@ -1399,7 +1398,7 @@ void runSetupWizard() {
 
     if (selectedIndex < 0 || selectedIndex >= (int)scannedDevices.size()) {
         Serial.println("Invalid selection. Cancelled.");
-        BLEDevice::deinit();
+        NimBLEDevice::deinit();
         return;
     }
 
@@ -1412,7 +1411,7 @@ void runSetupWizard() {
     Serial.printf("Network UUID: %s\n", networkUuid.c_str());
 
     // Clean up BLE for now (will reinit WiFi)
-    BLEDevice::deinit();
+    NimBLEDevice::deinit();
     delay(500);
 
     // Step 2: Get network password
@@ -1522,17 +1521,17 @@ void scanForDevices() {
 
     scannedDevices.clear();
 
-    BLEScan* pBLEScan = BLEDevice::getScan();
+    NimBLEScan* pBLEScan = NimBLEDevice::getScan();
 
     // Fix memory leak: reuse scan callback instance
     if (scanCallbackInstance) delete scanCallbackInstance;
     scanCallbackInstance = new ScanCallbacks();
-    pBLEScan->setAdvertisedDeviceCallbacks(scanCallbackInstance);
+    pBLEScan->setScanCallbacks(scanCallbackInstance);
     pBLEScan->setActiveScan(true);
     pBLEScan->setInterval(100);
     pBLEScan->setWindow(99);
 
-    BLEScanResults foundDevices = pBLEScan->start(10, false);
+    pBLEScan->getResults(10000, false);  // blocking, duration in ms
 
     Serial.printf("\nFound %d Casambi device(s)\n", scannedDevices.size());
     Serial.println("Use 'connect <n>' to connect to device n\n");

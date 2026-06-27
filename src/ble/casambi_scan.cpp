@@ -4,9 +4,7 @@
 
 #include "casambi_scan.h"
 #include "../config.h"
-#include <BLEDevice.h>
-#include <BLEScan.h>
-#include <BLEAdvertisedDevice.h>
+#include <NimBLEDevice.h>
 
 namespace {
 
@@ -22,15 +20,15 @@ String toHex(const std::string& s) {
 }
 
 // Collects matching Casambi advertisers into a caller-supplied vector.
-class Collector : public BLEAdvertisedDeviceCallbacks {
+class Collector : public NimBLEScanCallbacks {
 public:
     std::vector<CasambiScanResult>* out = nullptr;
 
-    void onResult(BLEAdvertisedDevice dev) override {
-        if (!dev.haveServiceUUID()) return;
-        if (!dev.getServiceUUID().equals(BLEUUID(CASAMBI_SERVICE_UUID))) return;
+    void onResult(const NimBLEAdvertisedDevice* dev) override {
+        if (!dev->haveServiceUUID()) return;
+        if (!dev->getServiceUUID().equals(NimBLEUUID(CASAMBI_SERVICE_UUID))) return;
 
-        String mac = dev.getAddress().toString().c_str();
+        String mac = dev->getAddress().toString().c_str();
         for (const auto& r : *out) {
             if (r.mac == mac) return;  // already seen
         }
@@ -40,10 +38,10 @@ public:
         r.uuid = mac;
         r.uuid.replace(":", "");
         r.uuid.toLowerCase();
-        r.name = dev.haveName() ? String(dev.getName().c_str()) : String("");
-        r.rssi = dev.getRSSI();
-        if (dev.haveManufacturerData()) r.mfgData = toHex(dev.getManufacturerData());
-        if (dev.haveServiceData())      r.svcData = toHex(dev.getServiceData());
+        r.name = dev->haveName() ? String(dev->getName().c_str()) : String("");
+        r.rssi = dev->getRSSI();
+        if (dev->haveManufacturerData()) r.mfgData = toHex(dev->getManufacturerData());
+        if (dev->haveServiceData())      r.svcData = toHex(dev->getServiceData());
 
         out->push_back(r);
     }
@@ -54,18 +52,20 @@ public:
 void CasambiScan::run(uint32_t seconds, std::vector<CasambiScanResult>& out) {
     out.clear();
 
-    BLEScan* scan = BLEDevice::getScan();
+    NimBLEScan* scan = NimBLEDevice::getScan();
     Collector cb;
     cb.out = &out;
 
-    scan->setAdvertisedDeviceCallbacks(&cb);
+    scan->setScanCallbacks(&cb);
     scan->setActiveScan(true);
     scan->setInterval(100);
     scan->setWindow(99);
 
-    scan->start(seconds, false);   // blocking
+    // NimBLE scan durations are in milliseconds. getResults() blocks for the
+    // duration and fires the callback for each advertiser meanwhile.
+    scan->getResults(seconds * 1000, false);
     scan->clearResults();
 
     // cb lives on the stack; detach before it goes out of scope.
-    scan->setAdvertisedDeviceCallbacks(nullptr);
+    scan->setScanCallbacks(nullptr);
 }
