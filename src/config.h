@@ -131,9 +131,11 @@
 // WEBSERVER / WEBSOCKET SETTINGS
 // ============================================================================
 
-// Maximum simultaneous WebSocket clients. The server evicts the oldest client
-// when this limit is hit, bounding memory growth under rapid connect/disconnect.
-#define WS_MAX_CLIENTS                  4
+// Maximum simultaneous WebSocket clients. New connections beyond this limit are
+// rejected (closed immediately on connect), so existing clients — notably the
+// FHEM gateway link — are never evicted by connection churn. Bounds memory use
+// under load. Realistic need is ~2 (FHEM + one browser); 3 leaves headroom.
+#define WS_MAX_CLIENTS                  3
 
 // Depth of the inter-task broadcast queue (stores String* pointers).
 // Broadcasts from the BLE task are enqueued here and drained by loop(), so

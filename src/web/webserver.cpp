@@ -100,6 +100,16 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
                                               uint8_t* data, size_t len) {
     switch (type) {
         case WS_EVT_CONNECT:
+            // Hard cap on simultaneous clients. count() already includes this
+            // just-connected client, so reject it when we are over the limit.
+            // Rejecting the newcomer (rather than evicting an existing client)
+            // protects the established FHEM link from connection churn.
+            if (server->count() > WS_MAX_CLIENTS) {
+                WEB_LOG("WS: client #%u rejected — at capacity (%d clients)\n",
+                        client->id(), WS_MAX_CLIENTS);
+                client->close();
+                break;
+            }
             WEB_LOG("WS: client #%u connected from %s\n",
                     client->id(), client->remoteIP().toString().c_str());
             // Send full state to the newly connected client
