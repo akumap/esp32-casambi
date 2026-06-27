@@ -35,6 +35,7 @@
 #endif
 
 #include <ESPAsyncWebServer.h>
+#include <freertos/queue.h>
 #include "../ble/casambi_client.h"
 #include "../cloud/network_config.h"
 
@@ -104,6 +105,10 @@ private:
 
     // Server state
     bool _running;
+
+    // Queue of String* broadcast messages posted from the BLE task and drained
+    // by loop() so _ws->textAll() is always called from the loop task.
+    QueueHandle_t _broadcastQueue;
 
     // Setup route handlers
     void _setupRoutes();

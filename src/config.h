@@ -128,6 +128,22 @@
 #define MAX_RECONNECT_FAILURES          10
 
 // ============================================================================
+// WEBSERVER / WEBSOCKET SETTINGS
+// ============================================================================
+
+// Maximum simultaneous WebSocket clients. The server evicts the oldest client
+// when this limit is hit, bounding memory growth under rapid connect/disconnect.
+#define WS_MAX_CLIENTS                  4
+
+// Depth of the inter-task broadcast queue (stores String* pointers).
+// Broadcasts from the BLE task are enqueued here and drained by loop(), so
+// _ws->textAll() is always called from the loop task — never from a BLE task
+// callback — which avoids races with the async_tcp task's _clients management.
+// If the queue is full the broadcast is silently dropped (lighting state will
+// catch up on the next BLE notification anyway).
+#define WS_BROADCAST_QUEUE_DEPTH        8
+
+// ============================================================================
 // BLE PACKET CONSTANTS
 // ============================================================================
 

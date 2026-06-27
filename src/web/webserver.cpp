@@ -14,7 +14,9 @@
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
 
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
-    : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false) {
+    : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
+      _broadcastQueue(nullptr) {
+    _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
 }
 
 CasambiWebServer::~CasambiWebServer() {
@@ -56,13 +58,35 @@ void CasambiWebServer::stop() {
         // _ws is owned by _server (added via addHandler), do not delete separately
         _ws = nullptr;
         _running = false;
+
+        // Drain and free any pending broadcast messages so nothing leaks when
+        // the server is torn down while the BLE task is still posting.
+        if (_broadcastQueue) {
+            String* msg = nullptr;
+            while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
+                delete msg;
+            }
+        }
+
         Serial.println("Web: Server stopped");
     }
 }
 
 void CasambiWebServer::loop() {
-    if (_ws) {
-        _ws->cleanupClients();
+    // Drain the inter-task broadcast queue.  Messages are posted here from the
+    // BLE task (broadcastUnitState / broadcastConnectionState) and sent out
+    // here in the loop task so _ws->textAll() is never called from a BLE
+    // callback — avoiding races with the async_tcp task's _clients management.
+    if (_ws && _broadcastQueue) {
+        String* msg = nullptr;
+        while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
+            if (msg) {
+                _ws->textAll(*msg);
+                delete msg;
+            }
+        }
+        // Enforce client limit: evict oldest clients beyond WS_MAX_CLIENTS.
+        _ws->cleanupClients(WS_MAX_CLIENTS);
     }
 }
 
@@ -164,7 +188,7 @@ String CasambiWebServer::_buildHelloMessage() const {
 }
 
 void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
-    if (!_ws || _ws->count() == 0) return;
+    if (!_ws || !_broadcastQueue) return;
 
     JsonDocument doc;
     doc["type"]   = "unit_state";
@@ -184,16 +208,22 @@ void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool on
         }
     }
 
-    String msg;
-    serializeJson(doc, msg);
-    _ws->textAll(msg);
-
-    WEB_LOG("WS: broadcast unit_state id=%d level=%d online=%d (%u client(s))\n",
-            unitId, level, online, _ws->count());
+    // Post to the inter-task queue; loop() drains it in the loop task.
+    // Non-blocking: if the queue is full the message is silently dropped
+    // (the next BLE notification will carry the latest state anyway).
+    String* msg = new String();
+    serializeJson(doc, *msg);
+    if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
+        delete msg;
+        WEB_LOG("WS: broadcast queue full, dropped unit_state id=%d\n", unitId);
+    } else {
+        WEB_LOG("WS: queued unit_state id=%d level=%d online=%d\n",
+                unitId, level, online);
+    }
 }
 
 void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
-    if (!_ws || _ws->count() == 0) return;
+    if (!_ws || !_broadcastQueue) return;
 
     JsonDocument doc;
     doc["type"]      = "connection_state";
@@ -207,12 +237,15 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
     gw["mac"]       = gwMac;
     gw["name"]      = _gatewayName(gwMac);
 
-    String msg;
-    serializeJson(doc, msg);
-    _ws->textAll(msg);
-
-    WEB_LOG("WS: broadcast connection_state connected=%d reason=%d (%u client(s))\n",
-            connected, reason, _ws->count());
+    String* msg = new String();
+    serializeJson(doc, *msg);
+    if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
+        delete msg;
+        WEB_LOG("WS: broadcast queue full, dropped connection_state\n");
+    } else {
+        WEB_LOG("WS: queued connection_state connected=%d reason=%d\n",
+                connected, reason);
+    }
 }
 
 void CasambiWebServer::_setupRoutes() {
@@ -326,13 +359,23 @@ void CasambiWebServer::_setupRoutes() {
             String* body = new String();
             body->reserve(total);
             request->_tempObject = body;
+            // If the client disconnects before the full body arrives, the
+            // String* would leak because ESPAsyncWebServer never frees
+            // _tempObject automatically.  Register a disconnect handler to
+            // clean it up in that case.  Normal completions delete it below
+            // and set _tempObject = nullptr, so this becomes a safe no-op.
+            request->onDisconnect([](AsyncWebServerRequest* r) {
+                if (r->_tempObject) {
+                    delete static_cast<String*>(r->_tempObject);
+                    r->_tempObject = nullptr;
+                }
+            });
         }
 
         // Append data to body
         String* body = (String*)request->_tempObject;
-        for (size_t i = 0; i < len; i++) {
-            body->concat((char)data[i]);
-        }
+        if (!body) return;  // safety: should not happen after index==0 above
+        body->concat((const char*)data, len);
 
         // Process request on last chunk
         if (index + len == total) {
