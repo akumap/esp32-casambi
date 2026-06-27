@@ -1,22 +1,43 @@
 #!/usr/bin/env python3
 """
-ESP32 Casambi Web Server Stress Test
-=====================================
-Tests stability under high-frequency HTTP and WebSocket load, including
-aborted connections, WebSocket connection churn, and concurrent requests.
-Monitors device heap over time to detect memory leaks.
+ESP32 Casambi Web Server Stress / Stability Test
+================================================
+Exercises the ESP32 web server under controlled, staged load and watches the
+device heap — both during the run and during a cooldown phase afterwards — to
+distinguish a transient dip from a real leak (heap that never comes back).
+
+The load is organised into PROFILES so you can start gently and ramp up:
+
+  realistic  Mirrors the FHEM CasambiGW module: ONE persistent WebSocket with
+             ping/pong every few seconds and only sporadic control POSTs.
+             No HTTP polling while connected (FHEM doesn't either).
+             This is the production load and MUST stay rock stable.
+
+  light      realistic + a little HTTP polling and one slow WS reconnect loop.
+
+  medium     A handful of concurrent GET/POST workers + WS churn + 1 persistent.
+
+  heavy      Aggressive: many concurrent workers, fast WS churn, aborted POSTs.
+             This is the "excessive use" scenario from issue #17 — expected to
+             find the breaking point, not to pass cleanly.
 
 Usage:
-    python3 scripts/stress_test.py --host <ESP32_IP> [options]
+    python3 scripts/stress_test.py --host <ESP32_IP> [--profile realistic]
 
-Options:
+Common options:
     --host HOST        ESP32 IP address (required)
     --port PORT        HTTP port (default: 80)
-    --duration SECS    Test duration in seconds (default: 60)
-    --concurrency N    Concurrent HTTP GET workers (default: 8)
-    --ws-clients N     Concurrent WebSocket clients (default: 4)
-    --skip-ws          Skip WebSocket tests
-    --skip-abort       Skip aborted-connection tests (body-leak probing)
+    --profile NAME     realistic | light | medium | heavy   (default: realistic)
+    --duration SECS    Active load duration (default: 60)
+    --ramp SECS        Stagger worker startup over this window (default: 10)
+    --cooldown SECS    After load stops, keep sampling heap this long to check
+                       for recovery (default: 30)
+
+Overrides (take precedence over the profile):
+    --concurrency N    HTTP GET/POST worker count
+    --ws-clients N     WebSocket worker count
+    --get-rate R       Max GET requests/sec PER get worker (0 = unlimited)
+    --skip-ws / --skip-abort
 """
 
 import argparse
@@ -24,13 +45,57 @@ import base64
 import collections
 import http.client
 import json
+import os
 import random
 import socket
-import statistics
 import struct
 import sys
 import threading
 import time
+
+
+# ---------------------------------------------------------------------------
+# Load profiles
+# ---------------------------------------------------------------------------
+# Each profile is a dict of knobs the worker-spawner reads.  Keeping them in one
+# place makes it easy to start gently (realistic) and step up deliberately.
+
+PROFILES = {
+    "realistic": dict(
+        get_workers=0, get_rate=0.0,
+        post_workers=0, post_period=0.0,
+        invalid=False, oversize=False, abort_workers=0,
+        ws_churn=0, ws_churn_period=0.0,
+        ws_persistent=1,
+        # The single persistent client behaves like FHEM: a control POST now
+        # and then, otherwise it just holds the socket open and ping/pongs.
+        fhem_cmd_period=8.0,
+    ),
+    "light": dict(
+        get_workers=1, get_rate=1.0,
+        post_workers=1, post_period=2.0,
+        invalid=False, oversize=False, abort_workers=0,
+        ws_churn=1, ws_churn_period=2.0,
+        ws_persistent=1,
+        fhem_cmd_period=8.0,
+    ),
+    "medium": dict(
+        get_workers=3, get_rate=3.0,
+        post_workers=2, post_period=0.4,
+        invalid=True, oversize=True, abort_workers=1,
+        ws_churn=2, ws_churn_period=0.4,
+        ws_persistent=1,
+        fhem_cmd_period=6.0,
+    ),
+    "heavy": dict(
+        get_workers=6, get_rate=0.0,        # unlimited
+        post_workers=3, post_period=0.05,
+        invalid=True, oversize=True, abort_workers=2,
+        ws_churn=4, ws_churn_period=0.05,
+        ws_persistent=1,
+        fhem_cmd_period=4.0,
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +107,7 @@ class Stats:
         self._lock = threading.Lock()
         self.counts = collections.defaultdict(int)
         self.latencies = collections.defaultdict(list)
-        self.heap_samples = []   # (free_heap, timestamp)
+        self.heap_samples = []   # (free_heap, largest_block|None, monotonic_ts)
 
     def record(self, category, success, latency_ms=None):
         with self._lock:
@@ -50,9 +115,9 @@ class Stats:
             if latency_ms is not None and success:
                 self.latencies[category].append(latency_ms)
 
-    def record_heap(self, free_heap):
+    def record_heap(self, free_heap, largest=None):
         with self._lock:
-            self.heap_samples.append((free_heap, time.time()))
+            self.heap_samples.append((free_heap, largest, time.monotonic()))
 
     def snapshot(self):
         with self._lock:
@@ -84,30 +149,29 @@ class Stats:
             lat_str = ""
             if lats:
                 p50 = lats[len(lats) // 2]
-                p95 = lats[int(len(lats) * 0.95)]
+                p95 = lats[min(len(lats) - 1, int(len(lats) * 0.95))]
                 lat_str = f"  p50={p50:.0f}ms  p95={p95:.0f}ms  max={lats[-1]:.0f}ms"
             print(f"  {cat:<34}  ok={ok:5d}  err={err:4d}{lat_str}")
 
-        if self.heap_samples:
-            first_heap = self.heap_samples[0][0]
-            last_heap  = self.heap_samples[-1][0]
-            min_heap   = min(s[0] for s in self.heap_samples)
-            print(f"\nHeap (device) :"
-                  f"  start={first_heap//1024} KB"
-                  f"  end={last_heap//1024} KB"
-                  f"  min={min_heap//1024} KB")
-            drift = last_heap - first_heap
-            if drift < -4096:
-                print(f"  *** WARNING: Heap drifted by {drift//1024} KB"
-                      f" — possible memory leak! ***")
-            else:
-                print("  Heap stable (no significant drift)")
-
+        self._report_heap()
         print()
+
+    def _report_heap(self):
+        if not self.heap_samples:
+            print("\nHeap (device) : no samples collected")
+            return
+        first  = self.heap_samples[0][0]
+        last   = self.heap_samples[-1][0]
+        lo     = min(s[0] for s in self.heap_samples)
+        frags  = [s[1] for s in self.heap_samples if s[1] is not None]
+        frag_str = f"  largest_block_min={min(frags)//1024}KB" if frags else ""
+        print(f"\nHeap (device) :"
+              f"  start={first//1024}KB  end={last//1024}KB  min={lo//1024}KB"
+              f"{frag_str}")
 
 
 stats    = Stats()
-stop_evt = threading.Event()
+stop_evt = threading.Event()   # set when active load should stop
 
 
 # ---------------------------------------------------------------------------
@@ -142,14 +206,14 @@ def http_post(host, port, path, body_bytes, timeout=5):
         resp = conn.getresponse()
         resp.read()
         conn.close()
-        # 2xx and 4xx are both "handled gracefully"; only 5xx (or no response) counts as error
+        # 2xx and 4xx are both "handled gracefully"; only 5xx (or no response) is an error.
         return resp.status < 500, (time.monotonic() - t0) * 1000
     except Exception:
         return False, None
 
 
 def http_post_abort(host, port, path, partial_body):
-    """Send partial POST body then close TCP without completing it (leak probe)."""
+    """Send a partial POST body then close TCP without completing it (leak probe)."""
     try:
         s = socket.create_connection((host, port), timeout=3)
         claimed_len = len(partial_body) + 300
@@ -205,6 +269,20 @@ def _ws_connect(host, port, path="/ws", timeout=5):
         return None
 
 
+def _ws_send(s, opcode, payload=b""):
+    """Send a properly masked client→server frame (RFC 6455 requires masking)."""
+    mask = bytes(random.randint(0, 255) for _ in range(4))
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    plen = len(payload)
+    if plen < 126:
+        header = bytes([0x80 | opcode, 0x80 | plen])
+    elif plen < 65536:
+        header = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack("!H", plen)
+    else:
+        header = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack("!Q", plen)
+    s.sendall(header + mask + masked)
+
+
 def _ws_recv_frame(s, timeout=2):
     """Read one WebSocket frame.  Returns (opcode, payload_bytes) or (None, None)."""
     s.settimeout(timeout)
@@ -218,16 +296,15 @@ def _ws_recv_frame(s, timeout=2):
                 buf += c
             return buf
 
-        hdr = recv_exact(2)
-        b1, b2 = hdr
-        opcode  = b1 & 0x0F
-        masked  = bool(b2 & 0x80)
-        plen    = b2 & 0x7F
+        b1, b2 = recv_exact(2)
+        opcode = b1 & 0x0F
+        masked = bool(b2 & 0x80)
+        plen   = b2 & 0x7F
         if plen == 126:
             plen = struct.unpack("!H", recv_exact(2))[0]
         elif plen == 127:
             plen = struct.unpack("!Q", recv_exact(8))[0]
-        mask    = recv_exact(4) if masked else None
+        mask = recv_exact(4) if masked else None
         payload = recv_exact(plen)
         if mask:
             payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
@@ -238,30 +315,30 @@ def _ws_recv_frame(s, timeout=2):
         return None, None
 
 
-def _ws_send_close(s):
-    try:
-        s.sendall(bytes([0x88, 0x00]))  # FIN + close opcode, no payload
-    except Exception:
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Worker threads
 # ---------------------------------------------------------------------------
 
-def worker_get_flood(host, port):
+def worker_get_flood(host, port, rate):
+    """GET random read-only endpoints.  rate>0 caps requests/sec for this worker."""
     endpoints = [
         "/api/status", "/api/units", "/api/groups",
         "/api/scenes",  "/api/log?n=5", "/api/ntp",
     ]
+    min_interval = (1.0 / rate) if rate and rate > 0 else 0.0
     while not stop_evt.is_set():
+        t0 = time.monotonic()
         path = random.choice(endpoints)
         cat  = path.split("?")[0].split("/")[-1]
         ok, lat, _ = http_get(host, port, path)
         stats.record(f"GET/{cat}", ok, lat)
+        if min_interval:
+            sleep = min_interval - (time.monotonic() - t0)
+            if sleep > 0:
+                stop_evt.wait(sleep)
 
 
-def worker_post_control(host, port):
+def worker_post_control(host, port, period):
     """POST unit/scene commands; 503 (BLE not connected) counts as ok."""
     cases = [
         ("/api/units/1/on",      b""),
@@ -274,11 +351,11 @@ def worker_post_control(host, port):
         path, body = random.choice(cases)
         ok, lat = http_post(host, port, path, body)
         stats.record("POST/control", ok, lat)
-        time.sleep(0.05)
+        stop_evt.wait(period)
 
 
 def worker_post_invalid(host, port):
-    """Sends malformed / semantically wrong bodies — 4xx expected."""
+    """Sends malformed / semantically wrong bodies — 4xx expected (counts as ok)."""
     cases = [
         ("/api/units/1/level",       b"not json"),
         ("/api/units/1/level",       b'{"wrong":1}'),
@@ -291,7 +368,7 @@ def worker_post_invalid(host, port):
         path, body = random.choice(cases)
         ok, lat = http_post(host, port, path, body)
         stats.record("POST/invalid", ok, lat)
-        time.sleep(0.1)
+        stop_evt.wait(0.1)
 
 
 def worker_post_oversize(host, port):
@@ -300,85 +377,112 @@ def worker_post_oversize(host, port):
     while not stop_evt.is_set():
         ok, lat = http_post(host, port, "/api/units/1/level", body)
         stats.record("POST/oversize", ok, lat)
-        time.sleep(0.3)
+        stop_evt.wait(0.3)
 
 
 def worker_post_abort(host, port):
     """Aborts connections mid-body to probe for the _tempObject memory leak."""
-    partials = [
-        b'{"level":',          # incomplete JSON
-        b'{"le',               # even more partial
-        b'',                   # empty — body accumulation never starts
-    ]
+    partials = [b'{"level":', b'{"le', b'']
     while not stop_evt.is_set():
-        partial = random.choice(partials)
-        ok = http_post_abort(host, port, "/api/units/1/level", partial)
+        ok = http_post_abort(host, port, "/api/units/1/level", random.choice(partials))
         stats.record("POST/abort", ok)
-        time.sleep(0.15)   # pace: avoid exhausting TCP port space
+        stop_evt.wait(0.15)
 
 
-def worker_ws_churn(host, port):
+def worker_ws_churn(host, port, period):
     """Opens a WebSocket, reads the hello message, then closes it."""
     while not stop_evt.is_set():
         t0 = time.monotonic()
         s  = _ws_connect(host, port)
         if s is None:
             stats.record("WS/connect", False)
-            time.sleep(0.2)
+            stop_evt.wait(max(period, 0.2))
             continue
         stats.record("WS/connect", True, (time.monotonic() - t0) * 1000)
 
         opcode, payload = _ws_recv_frame(s, timeout=2)
-        if opcode == 1:  # text frame
+        if opcode == 1:
             try:
-                msg = json.loads(payload)
-                stats.record("WS/hello", msg.get("type") == "hello")
+                stats.record("WS/hello", json.loads(payload).get("type") == "hello")
             except Exception:
                 stats.record("WS/hello", False)
-
-        _ws_send_close(s)
+        try:
+            _ws_send(s, 0x08)   # masked close
+        except Exception:
+            pass
         s.close()
-        time.sleep(0.05)
+        stop_evt.wait(period)
 
 
-def worker_ws_persistent(host, port):
-    """Holds a WebSocket open and counts received push messages."""
+def worker_ws_fhem(host, port, cmd_period):
+    """
+    Mirrors the FHEM CasambiGW client: ONE persistent WebSocket that
+      - reads the initial hello,
+      - replies to server pings with pongs,
+      - sends a client ping periodically (FHEM does every 30s),
+      - issues an occasional control POST (user toggling a light),
+      - reconnects after a short delay if the link drops (like DevIo).
+    """
+    last_ping = time.monotonic()
+    last_cmd  = time.monotonic()
     while not stop_evt.is_set():
         s = _ws_connect(host, port)
         if s is None:
-            stats.record("WS/persist_connect", False)
-            time.sleep(1)
+            stats.record("FHEM/connect", False)
+            stop_evt.wait(2.0)          # DevIo-style reconnect delay
             continue
-        stats.record("WS/persist_connect", True)
+        stats.record("FHEM/connect", True)
 
         while not stop_evt.is_set():
             opcode, payload = _ws_recv_frame(s, timeout=1)
-            if opcode is None:
-                break        # timeout → reconnect
-            if opcode == 8:  # server-initiated close
+            now = time.monotonic()
+
+            if opcode == 8:             # server close
                 break
-            if opcode == 1:  # text push
-                stats.record("WS/push_msg", True)
+            elif opcode == 9:           # ping → pong
+                try:
+                    _ws_send(s, 0x0A, payload or b"")
+                except Exception:
+                    break
+            elif opcode in (0, 1):      # data push
+                stats.record("FHEM/push", True)
+
+            # Periodic client ping (compressed cadence vs FHEM's 30s).
+            if now - last_ping >= 5.0:
+                last_ping = now
+                try:
+                    _ws_send(s, 0x09)
+                except Exception:
+                    break
+
+            # Occasional control command, like a user action.
+            if cmd_period and now - last_cmd >= cmd_period:
+                last_cmd = now
+                ok, _ = http_post(host, port, "/api/units/1/level", b'{"level":128}')
+                stats.record("FHEM/cmd", ok)
 
         s.close()
 
 
-def worker_heap_monitor(host, port):
-    """Polls /api/status every few seconds to track device heap."""
-    time.sleep(3)
-    while not stop_evt.is_set():
+def worker_heap_monitor(host, port, interval=4):
+    """Polls /api/status to track device heap.  Runs through cooldown too."""
+    time.sleep(2)
+    while not _monitor_stop.is_set():
         ok, _, body = http_get(host, port, "/api/status")
         if ok and body:
             try:
                 data = json.loads(body)
-                stats.record_heap(data["free_heap"])
+                stats.record_heap(data.get("free_heap", 0))
             except Exception:
                 pass
-        time.sleep(4)
+        _monitor_stop.wait(interval)
+
+
+_monitor_stop = threading.Event()   # heap monitor keeps running until this is set
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Orchestration
 # ---------------------------------------------------------------------------
 
 def check_reachable(host, port):
@@ -395,7 +499,7 @@ def check_reachable(host, port):
             pass
     ok2, _, _ = http_get(host, port, "/api/status", timeout=8)
     if ok2:
-        print("Device reachable (no /api/info, setup portal?)")
+        print("Device reachable (no /api/info)")
         return True
     print(f"ERROR: Device at {host}:{port} is not reachable.")
     return False
@@ -403,74 +507,93 @@ def check_reachable(host, port):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ESP32 Casambi web server stress test",
+        description="ESP32 Casambi web server stress / stability test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--host",        required=True,      help="ESP32 IP address")
-    parser.add_argument("--port",        type=int, default=80)
-    parser.add_argument("--duration",    type=int, default=60,
-                        help="Test duration in seconds (default: 60)")
-    parser.add_argument("--concurrency", type=int, default=8,
-                        help="Concurrent GET workers (default: 8)")
-    parser.add_argument("--ws-clients",  type=int, default=4,
-                        help="WebSocket workers (default: 4)")
+    parser.add_argument("--host",     required=True, help="ESP32 IP address")
+    parser.add_argument("--port",     type=int, default=80)
+    parser.add_argument("--profile",  choices=list(PROFILES), default="realistic",
+                        help="Load profile (default: realistic)")
+    parser.add_argument("--duration", type=int, default=60,
+                        help="Active load duration in seconds (default: 60)")
+    parser.add_argument("--ramp",     type=int, default=10,
+                        help="Stagger worker startup over this window (default: 10)")
+    parser.add_argument("--cooldown", type=int, default=30,
+                        help="Post-load heap-recovery observation (default: 30)")
+    # Overrides
+    parser.add_argument("--concurrency", type=int, default=None)
+    parser.add_argument("--ws-clients",  type=int, default=None)
+    parser.add_argument("--get-rate",    type=float, default=None)
     parser.add_argument("--skip-ws",     action="store_true")
     parser.add_argument("--skip-abort",  action="store_true")
     args = parser.parse_args()
 
+    prof = dict(PROFILES[args.profile])   # copy so overrides don't mutate the table
+
+    # Apply overrides
+    if args.concurrency is not None:
+        prof["get_workers"]  = max(1, args.concurrency // 2)
+        prof["post_workers"] = max(1, args.concurrency // 4)
+    if args.ws_clients is not None:
+        prof["ws_churn"]     = max(0, args.ws_clients - 1)
+        prof["ws_persistent"] = 1 if args.ws_clients >= 1 else 0
+    if args.get_rate is not None:
+        prof["get_rate"] = args.get_rate
+    if args.skip_ws:
+        prof["ws_churn"] = prof["ws_persistent"] = 0
+    if args.skip_abort:
+        prof["abort_workers"] = 0
+
     print(f"\nESP32 Casambi — Web Server Stress Test")
     print(f"Target   : http://{args.host}:{args.port}/")
-    print(f"Duration : {args.duration}s")
-    print(f"Workers  : {args.concurrency} HTTP GET"
-          f"  +POST"
-          f"{'  +WS' if not args.skip_ws else ''}"
-          f"{'  +abort' if not args.skip_abort else ''}\n")
+    print(f"Profile  : {args.profile}")
+    print(f"Duration : {args.duration}s active  +  {args.cooldown}s cooldown"
+          f"  (ramp {args.ramp}s)")
+    print(f"Workers  : get={prof['get_workers']} post={prof['post_workers']}"
+          f" abort={prof['abort_workers']}"
+          f" ws_churn={prof['ws_churn']} ws_persistent={prof['ws_persistent']}\n")
 
     if not check_reachable(args.host, args.port):
         sys.exit(1)
     print()
 
+    # Build the worker list (function, args) — started later with ramp.
+    jobs = []
+    for _ in range(prof["get_workers"]):
+        jobs.append((worker_get_flood, (args.host, args.port, prof["get_rate"])))
+    for _ in range(prof["post_workers"]):
+        jobs.append((worker_post_control, (args.host, args.port, prof["post_period"])))
+    if prof["invalid"]:
+        jobs.append((worker_post_invalid, (args.host, args.port)))
+    if prof["oversize"]:
+        jobs.append((worker_post_oversize, (args.host, args.port)))
+    for _ in range(prof["abort_workers"]):
+        jobs.append((worker_post_abort, (args.host, args.port)))
+    for _ in range(prof["ws_churn"]):
+        jobs.append((worker_ws_churn, (args.host, args.port, prof["ws_churn_period"])))
+    for _ in range(prof["ws_persistent"]):
+        jobs.append((worker_ws_fhem, (args.host, args.port, prof["fhem_cmd_period"])))
+
+    # Heap monitor runs independently through the cooldown phase.
+    mon = threading.Thread(target=worker_heap_monitor, args=(args.host, args.port),
+                           daemon=True)
+    mon.start()
+
     threads = []
+    ramp_gap = (args.ramp / len(jobs)) if (args.ramp and jobs) else 0.0
 
-    def add(target, *targs):
-        t = threading.Thread(target=target, args=targs, daemon=True)
-        threads.append(t)
-
-    # GET flood
-    for _ in range(max(1, args.concurrency // 2)):
-        add(worker_get_flood, args.host, args.port)
-
-    # POST control (expects 503 when BLE not connected)
-    for _ in range(max(1, args.concurrency // 4)):
-        add(worker_post_control, args.host, args.port)
-
-    # POST invalid / oversize
-    add(worker_post_invalid, args.host, args.port)
-    add(worker_post_oversize, args.host, args.port)
-
-    # Abort / body-leak probe
-    if not args.skip_abort:
-        for _ in range(max(1, args.concurrency // 4)):
-            add(worker_post_abort, args.host, args.port)
-
-    # WebSocket
-    if not args.skip_ws:
-        n_churn = max(1, args.ws_clients // 2)
-        n_pst   = max(1, args.ws_clients - n_churn)
-        for _ in range(n_churn):
-            add(worker_ws_churn, args.host, args.port)
-        for _ in range(n_pst):
-            add(worker_ws_persistent, args.host, args.port)
-
-    # Heap monitor
-    add(worker_heap_monitor, args.host, args.port)
-
-    print(f"Starting {len(threads)} worker threads …")
-    for t in threads:
-        t.start()
-
+    print(f"Starting {len(jobs)} worker thread(s)"
+          f"{' with ramp' if ramp_gap else ''} …")
     t_start = time.monotonic()
+    for fn, fargs in jobs:
+        t = threading.Thread(target=fn, args=fargs, daemon=True)
+        t.start()
+        threads.append(t)
+        if ramp_gap:
+            time.sleep(ramp_gap)
+
+    # Active phase
     try:
         while True:
             elapsed = time.monotonic() - t_start
@@ -478,35 +601,53 @@ def main():
                 break
             ok, err, heap = stats.snapshot()
             heap_str = f"  heap={heap//1024}KB" if heap else ""
-            print(
-                f"  [{elapsed:5.0f}s / {args.duration}s]"
-                f"  ok={ok}  err={err}{heap_str}",
-                end="\r", flush=True,
-            )
-            time.sleep(min(5, args.duration - elapsed))
+            print(f"  [{elapsed:5.0f}s / {args.duration}s active]"
+                  f"  ok={ok}  err={err}{heap_str}", end="\r", flush=True)
+            time.sleep(min(3, max(0.5, args.duration - elapsed)))
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        print("\nInterrupted — stopping load.")
 
-    print()
+    print("\nStopping active load …")
     stop_evt.set()
     for t in threads:
-        t.join(timeout=4)
+        t.join(timeout=5)
 
     duration_s = time.monotonic() - t_start
+    heap_before_cd = stats.snapshot()[2]
+
+    # Cooldown: no load, keep sampling heap to see whether it recovers.
+    if args.cooldown > 0:
+        print(f"Cooldown {args.cooldown}s — watching heap recovery (load stopped) …")
+        cd_start = time.monotonic()
+        while time.monotonic() - cd_start < args.cooldown:
+            _, _, heap = stats.snapshot()
+            heap_str = f"  heap={heap//1024}KB" if heap else ""
+            print(f"  [cooldown {time.monotonic()-cd_start:4.0f}s / {args.cooldown}s]"
+                  f"{heap_str}", end="\r", flush=True)
+            time.sleep(3)
+        print()
+
+    _monitor_stop.set()
+    mon.join(timeout=5)
+
     stats.report(duration_s)
 
-    # One final status poll to capture post-test heap
-    ok, _, body = http_get(args.host, args.port, "/api/status")
-    if ok and body:
-        try:
-            d = json.loads(body)
-            print(f"Post-test device status:")
-            print(f"  free_heap  : {d.get('free_heap', '?')} bytes")
-            print(f"  uptime_ms  : {d.get('uptime_ms', '?')}")
-            print(f"  ble_connected: {d.get('ble_connected', '?')}")
-            print()
-        except Exception:
-            pass
+    # Leak verdict: compare heap at end of cooldown against pre-test baseline.
+    if stats.heap_samples:
+        baseline = stats.heap_samples[0][0]
+        final    = stats.heap_samples[-1][0]
+        recovered = final >= baseline * 0.9
+        print("Heap recovery verdict:")
+        print(f"  baseline (pre-load) : {baseline//1024} KB")
+        if heap_before_cd:
+            print(f"  end of load         : {heap_before_cd//1024} KB")
+        print(f"  after cooldown      : {final//1024} KB")
+        if recovered:
+            print("  => RECOVERED — no persistent leak detected.\n")
+        else:
+            lost = (baseline - final) // 1024
+            print(f"  => NOT recovered — ~{lost} KB still missing after load"
+                  f" stopped (likely leak / fragmentation).\n")
 
 
 if __name__ == "__main__":
