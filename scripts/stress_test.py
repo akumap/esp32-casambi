@@ -108,12 +108,31 @@ class Stats:
         self.counts = collections.defaultdict(int)
         self.latencies = collections.defaultdict(list)
         self.heap_samples = []   # (free_heap, largest_block|None, monotonic_ts)
+        self.status_samples = [] # (boot_count|None, uptime_ms|None, monotonic_ts)
 
     def record(self, category, success, latency_ms=None):
         with self._lock:
             self.counts[f"{category}_{'ok' if success else 'err'}"] += 1
             if latency_ms is not None and success:
                 self.latencies[category].append(latency_ms)
+
+    def record_status(self, boot_count, uptime_ms):
+        with self._lock:
+            self.status_samples.append((boot_count, uptime_ms, time.monotonic()))
+
+    def rebooted(self):
+        """True if the device restarted during the run (boot_count jumped or
+        uptime went backwards) — which resets the heap and invalidates any
+        leak/recovery verdict."""
+        with self._lock:
+            bcs = [s[0] for s in self.status_samples if s[0] is not None]
+            uts = [s[1] for s in self.status_samples if s[1] is not None]
+        if bcs and max(bcs) != min(bcs):
+            return True
+        for i in range(1, len(uts)):
+            if uts[i] < uts[i - 1] - 2000:   # uptime dropped >2s → reboot
+                return True
+        return False
 
     def record_heap(self, free_heap, largest=None):
         with self._lock:
@@ -510,6 +529,10 @@ def worker_heap_monitor(host, port, interval=4):
                 # largest_block is present on newer firmware; None on older.
                 stats.record_heap(data.get("free_heap", 0),
                                   data.get("largest_block"))
+                # Track boot_count/uptime to catch a mid-test reboot (which
+                # resets the heap and would otherwise fake a "recovered" verdict).
+                stats.record_status(data.get("boot_count"),
+                                    data.get("uptime_ms"))
             except Exception:
                 pass
         _monitor_stop.wait(interval)
@@ -703,6 +726,17 @@ def main():
     mon.join(timeout=5)
 
     stats.report(duration_s)
+
+    # A mid-test reboot resets the heap and makes the recovery verdict
+    # meaningless — surface it loudly before anything else.
+    if stats.rebooted():
+        print("*" * 62)
+        print("*** REBOOT DETECTED DURING TEST ***")
+        print("The device restarted mid-run (boot_count jumped / uptime reset).")
+        print("A reboot resets the heap, so the recovery verdict below is NOT")
+        print("valid — treat this run as a CRASH, not a pass. Check the serial")
+        print("log for the cause (watchdog / panic / OOM).")
+        print("*" * 62)
 
     # Leak verdict: compare heap at end of cooldown against pre-test baseline.
     if stats.heap_samples:
