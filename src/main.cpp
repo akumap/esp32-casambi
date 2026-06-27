@@ -434,15 +434,28 @@ void checkAndReconnectWiFi() {
     }
 
     Serial.println("WiFi: Connection lost, attempting reconnect...");
+    // Checkpoint tracing: a WiFi-loss WDT hang was observed where loopTask
+    // stopped feeding the watchdog right after this point. These unconditional
+    // markers pinpoint which (normally non-blocking) WiFi call actually stalled,
+    // since the last line printed before the WDT reboot is the culprit.
+    esp_task_wdt_reset();
+    Serial.println("WiFiRC: -> disconnect()");
     WiFi.disconnect();
+    esp_task_wdt_reset();
+    Serial.println("WiFiRC: -> delay(100)");
     delay(100);
+    esp_task_wdt_reset();
+    Serial.println("WiFiRC: -> begin()");
     WiFi.begin(g_wifiCreds.ssid.c_str(), g_wifiCreds.password.c_str());
+    esp_task_wdt_reset();
+    Serial.println("WiFiRC: -> wait loop");
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
         delay(100);
         esp_task_wdt_reset();  // Feed watchdog during WiFi connect
     }
+    Serial.println("WiFiRC: <- wait done");
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
