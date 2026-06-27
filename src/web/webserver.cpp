@@ -14,7 +14,9 @@
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
 
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
-    : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false) {
+    : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
+      _broadcastQueue(nullptr) {
+    _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
 }
 
 CasambiWebServer::~CasambiWebServer() {
@@ -56,13 +58,35 @@ void CasambiWebServer::stop() {
         // _ws is owned by _server (added via addHandler), do not delete separately
         _ws = nullptr;
         _running = false;
+
+        // Drain and free any pending broadcast messages so nothing leaks when
+        // the server is torn down while the BLE task is still posting.
+        if (_broadcastQueue) {
+            String* msg = nullptr;
+            while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
+                delete msg;
+            }
+        }
+
         Serial.println("Web: Server stopped");
     }
 }
 
 void CasambiWebServer::loop() {
-    if (_ws) {
-        _ws->cleanupClients();
+    // Drain the inter-task broadcast queue.  Messages are posted here from the
+    // BLE task (broadcastUnitState / broadcastConnectionState) and sent out
+    // here in the loop task so _ws->textAll() is never called from a BLE
+    // callback — avoiding races with the async_tcp task's _clients management.
+    if (_ws && _broadcastQueue) {
+        String* msg = nullptr;
+        while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
+            if (msg) {
+                _ws->textAll(*msg);
+                delete msg;
+            }
+        }
+        // Enforce client limit: evict oldest clients beyond WS_MAX_CLIENTS.
+        _ws->cleanupClients(WS_MAX_CLIENTS);
     }
 }
 
@@ -74,6 +98,18 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
                                               AsyncWebSocketClient* client,
                                               AwsEventType type, void* arg,
                                               uint8_t* data, size_t len) {
+    // Investigation trace (enable with 'debug heap on'): one line per WS
+    // lifecycle event with live client count and heap, to locate a churn-time
+    // leak (heap drops per cycle and never recovers) or crash (last line before
+    // a reboot identifies where). Low volume: one line per connect/disconnect.
+    if (heapDebugEnabled &&
+        (type == WS_EVT_CONNECT || type == WS_EVT_DISCONNECT || type == WS_EVT_ERROR)) {
+        const char* ev = (type == WS_EVT_CONNECT) ? "CONNECT"
+                       : (type == WS_EVT_DISCONNECT) ? "DISCONN" : "ERROR";
+        Serial.printf("WSDBG %s id=%u count=%u free=%u largest=%u\n",
+                      ev, client->id(), (unsigned)server->count(),
+                      (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    }
     switch (type) {
         case WS_EVT_CONNECT:
             WEB_LOG("WS: client #%u connected from %s\n",
@@ -164,7 +200,7 @@ String CasambiWebServer::_buildHelloMessage() const {
 }
 
 void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
-    if (!_ws || _ws->count() == 0) return;
+    if (!_ws || !_broadcastQueue) return;
 
     JsonDocument doc;
     doc["type"]   = "unit_state";
@@ -184,16 +220,22 @@ void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool on
         }
     }
 
-    String msg;
-    serializeJson(doc, msg);
-    _ws->textAll(msg);
-
-    WEB_LOG("WS: broadcast unit_state id=%d level=%d online=%d (%u client(s))\n",
-            unitId, level, online, _ws->count());
+    // Post to the inter-task queue; loop() drains it in the loop task.
+    // Non-blocking: if the queue is full the message is silently dropped
+    // (the next BLE notification will carry the latest state anyway).
+    String* msg = new String();
+    serializeJson(doc, *msg);
+    if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
+        delete msg;
+        WEB_LOG("WS: broadcast queue full, dropped unit_state id=%d\n", unitId);
+    } else {
+        WEB_LOG("WS: queued unit_state id=%d level=%d online=%d\n",
+                unitId, level, online);
+    }
 }
 
 void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
-    if (!_ws || _ws->count() == 0) return;
+    if (!_ws || !_broadcastQueue) return;
 
     JsonDocument doc;
     doc["type"]      = "connection_state";
@@ -207,12 +249,15 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
     gw["mac"]       = gwMac;
     gw["name"]      = _gatewayName(gwMac);
 
-    String msg;
-    serializeJson(doc, msg);
-    _ws->textAll(msg);
-
-    WEB_LOG("WS: broadcast connection_state connected=%d reason=%d (%u client(s))\n",
-            connected, reason, _ws->count());
+    String* msg = new String();
+    serializeJson(doc, *msg);
+    if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
+        delete msg;
+        WEB_LOG("WS: broadcast queue full, dropped connection_state\n");
+    } else {
+        WEB_LOG("WS: queued connection_state connected=%d reason=%d\n",
+                connected, reason);
+    }
 }
 
 void CasambiWebServer::_setupRoutes() {
@@ -271,7 +316,14 @@ void CasambiWebServer::_setupRoutes() {
         ESP.restart();
     });
 
-    // NotFound handler for POST requests to match dynamic routes
+    // Catch-all request handler. ESPAsyncWebServer routes any request without a
+    // matching server.on() handler here, and — crucially — it invokes this
+    // request handler exactly ONCE per request (after the body, if any, has
+    // arrived). It is therefore the single place that sends a response for the
+    // dynamic POST routes. The companion onRequestBody below only BUFFERS the
+    // body; it must never send, otherwise the request gets two responses and
+    // the first response object leaks (~216 B per POST — the bug behind the
+    // heap exhaustion under load).
     _server->onNotFound([this](AsyncWebServerRequest *request) {
         if (request->method() != HTTP_POST) {
             _sendJsonError(request, "Endpoint not found", 404);
@@ -280,84 +332,91 @@ void CasambiWebServer::_setupRoutes() {
 
         String path = request->url();
 
-        // Scene control endpoints (no body needed)
+        // --- No-body control endpoints (respond immediately) ---
         if (path.indexOf("/api/scenes/") == 0) {
-            if (path.endsWith("/on")) {
-                _handleSceneOn(request);
-                return;
-            } else if (path.endsWith("/off")) {
-                _handleSceneOff(request);
-                return;
-            }
+            if (path.endsWith("/on"))  { _handleSceneOn(request);  return; }
+            if (path.endsWith("/off")) { _handleSceneOff(request); return; }
+        } else if (path.indexOf("/api/units/") == 0) {
+            if (path.endsWith("/on"))  { _handleUnitOn(request);  return; }
+            if (path.endsWith("/off")) { _handleUnitOff(request); return; }
         }
-        // Unit control endpoints (no body needed)
-        else if (path.indexOf("/api/units/") == 0) {
-            if (path.endsWith("/on")) {
-                _handleUnitOn(request);
-                return;
-            } else if (path.endsWith("/off")) {
-                _handleUnitOff(request);
+
+        // --- Body endpoints (body buffered into _tempObject by onRequestBody) ---
+        bool bodyEndpoint =
+            (path.indexOf("/api/scenes/") == 0 && path.endsWith("/level")) ||
+            (path.indexOf("/api/units/")  == 0 && (path.endsWith("/level") ||
+                path.endsWith("/color") || path.endsWith("/temperature") ||
+                path.endsWith("/slider") || path.endsWith("/vertical"))) ||
+            (path.indexOf("/api/groups/") == 0 && (path.endsWith("/level") ||
+                path.endsWith("/slider") || path.endsWith("/vertical"))) ||
+            (path == "/api/ntp");
+
+        if (bodyEndpoint) {
+            // Oversized payloads are not buffered by onRequestBody; reject here
+            // (this is still the single response point, so no double-send).
+            if (request->contentLength() > 512) {
+                if (request->_tempObject) {
+                    delete static_cast<String*>(request->_tempObject);
+                    request->_tempObject = nullptr;
+                }
+                _sendJsonError(request, "Request body too large", 413);
                 return;
             }
+            // Each handler reads the buffered body, sends exactly one response,
+            // and frees _tempObject. A missing body is handled inside them (400).
+            if (path.indexOf("/api/scenes/") == 0) {
+                if (path.endsWith("/level")) _handleSceneLevel(request);
+            } else if (path.indexOf("/api/units/") == 0) {
+                if      (path.endsWith("/level"))       _handleUnitLevel(request);
+                else if (path.endsWith("/color"))       _handleUnitColor(request);
+                else if (path.endsWith("/temperature")) _handleUnitTemperature(request);
+                else if (path.endsWith("/slider"))      _handleUnitSlider(request);
+                else if (path.endsWith("/vertical"))    _handleUnitVertical(request);
+            } else if (path.indexOf("/api/groups/") == 0) {
+                if      (path.endsWith("/level"))    _handleGroupLevel(request);
+                else if (path.endsWith("/slider"))   _handleGroupSlider(request);
+                else if (path.endsWith("/vertical")) _handleGroupVertical(request);
+            } else if (path == "/api/ntp") {
+                _handleSetNtp(request);
+            }
+            return;
         }
 
         _sendJsonError(request, "Endpoint not found", 404);
     });
 
-    // Generic POST handler for dynamic routes with body (level, color, temperature)
-    // This works around ESPAsyncWebServer's poor regex support
+    // Body collector for the dynamic POST routes. This ONLY accumulates the
+    // request body into _tempObject; dispatch and the single response happen in
+    // onNotFound above. (Sending from here as well would double-respond.)
     _server->onRequestBody([this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-        // Only handle POST requests to /api/*
         if (request->method() != HTTP_POST || !request->url().startsWith("/api/")) {
             return;
         }
 
-        // Reject oversized bodies to prevent heap exhaustion from aborted connections.
-        // Our JSON payloads are tiny (< 64 bytes); 512 bytes is a generous upper bound.
+        // Don't buffer oversized bodies; onNotFound rejects them via
+        // request->contentLength(). Our JSON payloads are tiny (< 64 bytes).
         if (total > 512) {
-            _sendJsonError(request, "Request body too large", 413);
             return;
         }
 
-        String path = request->url();
-
-        // Accumulate body for first chunk
+        // Allocate the buffer on the first chunk and arm a disconnect handler so
+        // an aborted (incomplete) body is freed — onNotFound never runs for a
+        // request that never completes, so this is the only cleanup path then.
         if (index == 0) {
             String* body = new String();
             body->reserve(total);
             request->_tempObject = body;
+            request->onDisconnect([request]() {
+                if (request->_tempObject) {
+                    delete static_cast<String*>(request->_tempObject);
+                    request->_tempObject = nullptr;
+                }
+            });
         }
 
-        // Append data to body
         String* body = (String*)request->_tempObject;
-        for (size_t i = 0; i < len; i++) {
-            body->concat((char)data[i]);
-        }
-
-        // Process request on last chunk
-        if (index + len == total) {
-            // Route to appropriate handler
-            // NOTE: Handlers are responsible for deleting the body after use
-            if (path.indexOf("/api/scenes/") == 0 && path.endsWith("/level")) {
-                _handleSceneLevel(request);
-            } else if (path.indexOf("/api/units/") == 0) {
-                if (path.endsWith("/level")) _handleUnitLevel(request);
-                else if (path.endsWith("/color")) _handleUnitColor(request);
-                else if (path.endsWith("/temperature")) _handleUnitTemperature(request);
-                else if (path.endsWith("/slider")) _handleUnitSlider(request);
-                else if (path.endsWith("/vertical")) _handleUnitVertical(request);
-            } else if (path.indexOf("/api/groups/") == 0) {
-                if (path.endsWith("/level")) _handleGroupLevel(request);
-                else if (path.endsWith("/slider")) _handleGroupSlider(request);
-                else if (path.endsWith("/vertical")) _handleGroupVertical(request);
-            } else if (path == "/api/ntp") {
-                _handleSetNtp(request);
-            } else {
-                // Unhandled endpoint - cleanup body
-                delete body;
-                request->_tempObject = nullptr;
-            }
-        }
+        if (!body) return;  // safety: should not happen after index==0 above
+        body->concat((const char*)data, len);
     });
 
     // Root endpoint
@@ -402,6 +461,11 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["wifi_rssi"] = WiFi.RSSI();
     doc["uptime_ms"] = millis();
     doc["free_heap"] = ESP.getFreeHeap();
+    // Diagnostics: largest allocatable block exposes heap fragmentation (which
+    // free_heap alone hides), and the all-time minimum free heap shows the
+    // worst dip since boot. Both feed the stress-test's leak/fragmentation check.
+    doc["largest_block"] = ESP.getMaxAllocHeap();
+    doc["min_free_heap"] = ESP.getMinFreeHeap();
     doc["boot_count"] = EventLog::bootCount();
     doc["ntp_server"] = _config->ntpServer;
 
