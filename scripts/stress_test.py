@@ -567,10 +567,19 @@ def main():
     parser.add_argument("--keepalive",   action="store_true",
                         help="GET workers reuse one TCP connection (no churn) — "
                              "use to tell connection-churn leaks from per-request ones")
-    parser.add_argument("--skip-ws",     action="store_true")
-    parser.add_argument("--skip-post",   action="store_true",
-                        help="Disable all POST workers (control/invalid/oversize)")
-    parser.add_argument("--skip-abort",  action="store_true")
+    parser.add_argument("--skip-ws",       action="store_true")
+    parser.add_argument("--skip-get",      action="store_true",
+                        help="Disable GET workers")
+    parser.add_argument("--skip-post",     action="store_true",
+                        help="Disable control + invalid + oversize POST workers")
+    parser.add_argument("--skip-control",  action="store_true",
+                        help="Disable only the valid control POST worker")
+    parser.add_argument("--skip-invalid",  action="store_true",
+                        help="Disable only the invalid-body POST worker")
+    parser.add_argument("--skip-oversize", action="store_true",
+                        help="Disable only the oversize-body POST worker")
+    parser.add_argument("--skip-abort",    action="store_true",
+                        help="Disable the aborted-connection POST worker")
     args = parser.parse_args()
 
     prof = dict(PROFILES[args.profile])   # copy so overrides don't mutate the table
@@ -586,9 +595,17 @@ def main():
         prof["get_rate"] = args.get_rate
     if args.skip_ws:
         prof["ws_churn"] = prof["ws_persistent"] = 0
+    if args.skip_get:
+        prof["get_workers"] = 0
     if args.skip_post:
         prof["post_workers"] = 0
         prof["invalid"] = prof["oversize"] = False
+    if args.skip_control:
+        prof["post_workers"] = 0
+    if args.skip_invalid:
+        prof["invalid"] = False
+    if args.skip_oversize:
+        prof["oversize"] = False
     if args.skip_abort:
         prof["abort_workers"] = 0
 
