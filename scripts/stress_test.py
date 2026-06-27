@@ -371,14 +371,14 @@ def worker_get_flood(host, port, rate, keepalive=False):
             pass
 
 
-def worker_post_control(host, port, period):
-    """POST unit/scene commands; 503 (BLE not connected) counts as ok."""
+def worker_post_control(host, port, period, unit):
+    """POST control commands to the designated test unit ONLY.
+    503 (BLE not connected) counts as ok. Never touches scenes/groups/other
+    units, so no other physical device is switched."""
     cases = [
-        ("/api/units/1/on",      b""),
-        ("/api/units/1/off",     b""),
-        ("/api/units/1/level",   b'{"level":128}'),
-        ("/api/scenes/1/on",     b""),
-        ("/api/groups/1/level",  b'{"level":200}'),
+        (f"/api/units/{unit}/on",    b""),
+        (f"/api/units/{unit}/off",   b""),
+        (f"/api/units/{unit}/level", b'{"level":128}'),
     ]
     while not stop_evt.is_set():
         path, body = random.choice(cases)
@@ -387,15 +387,14 @@ def worker_post_control(host, port, period):
         stop_evt.wait(period)
 
 
-def worker_post_invalid(host, port):
-    """Sends malformed / semantically wrong bodies — 4xx expected (counts as ok)."""
+def worker_post_invalid(host, port, unit):
+    """Sends malformed / semantically wrong bodies — 4xx expected (counts as ok).
+    All target the test unit and are rejected, so nothing is switched/changed."""
     cases = [
-        ("/api/units/1/level",       b"not json"),
-        ("/api/units/1/level",       b'{"wrong":1}'),
-        ("/api/units/1/color",       b'{"r":1}'),          # missing g, b
-        ("/api/units/1/temperature", b'{"kelvin":500}'),   # out of range
-        ("/api/ntp",                 b'{}'),               # missing server
-        ("/api/ntp",                 b'{"server":""}'),    # empty server
+        (f"/api/units/{unit}/level",       b"not json"),
+        (f"/api/units/{unit}/level",       b'{"wrong":1}'),
+        (f"/api/units/{unit}/color",       b'{"r":1}'),         # missing g, b
+        (f"/api/units/{unit}/temperature", b'{"kelvin":500}'),  # out of range → 400
     ]
     while not stop_evt.is_set():
         path, body = random.choice(cases)
@@ -404,20 +403,22 @@ def worker_post_invalid(host, port):
         stop_evt.wait(0.1)
 
 
-def worker_post_oversize(host, port):
-    """POSTs a body > 512 bytes — device must return 413, not crash."""
+def worker_post_oversize(host, port, unit):
+    """POSTs a body > 512 bytes — device must return 413, not crash (no switch)."""
     body = b'{"level":128,"pad":"' + b"x" * 600 + b'"}'
     while not stop_evt.is_set():
-        ok, lat = http_post(host, port, "/api/units/1/level", body)
+        ok, lat = http_post(host, port, f"/api/units/{unit}/level", body)
         stats.record("POST/oversize", ok, lat)
         stop_evt.wait(0.3)
 
 
-def worker_post_abort(host, port):
-    """Aborts connections mid-body to probe for the _tempObject memory leak."""
+def worker_post_abort(host, port, unit):
+    """Aborts connections mid-body to probe for the _tempObject memory leak.
+    Body never completes, so the command is never executed (no switch)."""
     partials = [b'{"level":', b'{"le', b'']
     while not stop_evt.is_set():
-        ok = http_post_abort(host, port, "/api/units/1/level", random.choice(partials))
+        ok = http_post_abort(host, port, f"/api/units/{unit}/level",
+                             random.choice(partials))
         stats.record("POST/abort", ok)
         stop_evt.wait(0.15)
 
@@ -447,7 +448,7 @@ def worker_ws_churn(host, port, period):
         stop_evt.wait(period)
 
 
-def worker_ws_fhem(host, port, cmd_period):
+def worker_ws_fhem(host, port, cmd_period, unit):
     """
     Mirrors the FHEM CasambiGW client: ONE persistent WebSocket that
       - reads the initial hello,
@@ -488,10 +489,11 @@ def worker_ws_fhem(host, port, cmd_period):
                 except Exception:
                     break
 
-            # Occasional control command, like a user action.
+            # Occasional control command, like a user action (test unit only).
             if cmd_period and now - last_cmd >= cmd_period:
                 last_cmd = now
-                ok, _ = http_post(host, port, "/api/units/1/level", b'{"level":128}')
+                ok, _ = http_post(host, port, f"/api/units/{unit}/level",
+                                  b'{"level":128}')
                 stats.record("FHEM/cmd", ok)
 
         s.close()
@@ -554,6 +556,10 @@ def main():
                         help="Stagger worker startup over this window (default: 10)")
     parser.add_argument("--cooldown", type=int, default=30,
                         help="Post-load heap-recovery observation (default: 30)")
+    parser.add_argument("--unit",     type=int, default=11,
+                        help="Casambi unit ID that control POSTs target. "
+                             "Default 11 = 'IFC'. ONLY this unit is ever switched; "
+                             "no scenes/groups/other units are touched.")
     # Overrides
     parser.add_argument("--concurrency", type=int, default=None)
     parser.add_argument("--ws-clients",  type=int, default=None)
@@ -589,6 +595,7 @@ def main():
     print(f"\nESP32 Casambi — Web Server Stress Test")
     print(f"Target   : http://{args.host}:{args.port}/")
     print(f"Profile  : {args.profile}")
+    print(f"Test unit: {args.unit}  (ONLY this unit is switched)")
     print(f"Duration : {args.duration}s active  +  {args.cooldown}s cooldown"
           f"  (ramp {args.ramp}s)")
     print(f"Workers  : get={prof['get_workers']}"
@@ -607,17 +614,19 @@ def main():
         jobs.append((worker_get_flood,
                      (args.host, args.port, prof["get_rate"], args.keepalive)))
     for _ in range(prof["post_workers"]):
-        jobs.append((worker_post_control, (args.host, args.port, prof["post_period"])))
+        jobs.append((worker_post_control,
+                     (args.host, args.port, prof["post_period"], args.unit)))
     if prof["invalid"]:
-        jobs.append((worker_post_invalid, (args.host, args.port)))
+        jobs.append((worker_post_invalid, (args.host, args.port, args.unit)))
     if prof["oversize"]:
-        jobs.append((worker_post_oversize, (args.host, args.port)))
+        jobs.append((worker_post_oversize, (args.host, args.port, args.unit)))
     for _ in range(prof["abort_workers"]):
-        jobs.append((worker_post_abort, (args.host, args.port)))
+        jobs.append((worker_post_abort, (args.host, args.port, args.unit)))
     for _ in range(prof["ws_churn"]):
         jobs.append((worker_ws_churn, (args.host, args.port, prof["ws_churn_period"])))
     for _ in range(prof["ws_persistent"]):
-        jobs.append((worker_ws_fhem, (args.host, args.port, prof["fhem_cmd_period"])))
+        jobs.append((worker_ws_fhem,
+                     (args.host, args.port, prof["fhem_cmd_period"], args.unit)))
 
     # Heap monitor runs independently through the cooldown phase.
     mon = threading.Thread(target=worker_heap_monitor, args=(args.host, args.port),
