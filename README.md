@@ -545,6 +545,8 @@ The controller is designed for 24/7 unattended operation:
 
 ### BLE Protocol
 
+**BLE stack:** The firmware uses **NimBLE** (NimBLE-Arduino) as its BLE host, not the default Bluedroid stack. NimBLE's substantially smaller RAM footprint leaves more contiguous heap for the TLS cloud handshake and reduces heap-pressure reboots. See [`docs/konzept-ble-nimble-migration.md`](docs/konzept-ble-nimble-migration.md) for the migration rationale.
+
 **Authentication Flow:**
 
 1. BLE connection to Casambi gateway
