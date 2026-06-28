@@ -18,22 +18,15 @@
 
 #include <Arduino.h>
 
-// HTTP method constants (must be defined before ESPAsyncWebServer.h)
-#ifndef HTTP_ANY
-#define HTTP_ANY 0
-#endif
-#ifndef HTTP_GET
-#define HTTP_GET 1
-#endif
-#ifndef HTTP_POST
-#define HTTP_POST 2
-#endif
-// Value must match ESPAsyncWebServer's WebRequestMethod enum (HTTP_DELETE = 0b100),
-// since defining HTTP_ANY above suppresses that enum in the library header.
-#ifndef HTTP_DELETE
-#define HTTP_DELETE 4
-#endif
-
+// NOTE: do NOT pre-define HTTP_GET/HTTP_POST/HTTP_DELETE here. The ESP32Async
+// ESPAsyncWebServer declares them in the `AsyncWebRequestMethod` enum and
+// exposes them globally itself (via `using namespace`, unless
+// ASYNCWEBSERVER_NO_GLOBAL_HTTP_METHODS is set). Pre-defining them as macros
+// corrupts that enum. The Arduino core's HTTPMethod enum (from <HTTPClient.h>,
+// pulled in by cloud/api_client.h) also defines these names, but the two only
+// clash at an actual point of use — and this header's translation units never
+// reference a bare HTTP_* constant alongside HTTPClient, so no qualification is
+// needed.
 #include <ESPAsyncWebServer.h>
 #include <freertos/queue.h>
 #include "../ble/casambi_client.h"

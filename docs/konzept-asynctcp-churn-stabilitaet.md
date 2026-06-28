@@ -9,11 +9,13 @@ Branch: `claude/migrate-async-tcp-stack-esp32async`
 - ✅ `platformio.ini`: Async-Stack auf `ESP32Async/AsyncTCP#v3.4.10` +
   `ESP32Async/ESPAsyncWebServer#v3.11.1` umgestellt (feste Git-Tags).
 - ✅ `src/main.cpp`: WiFi-Reconnect ist jetzt nicht-blockierend / watchdog-sicher.
-- ✅ `src/web/webserver.*`: API-Review abgeschlossen — **keine** Quelländerung
-  nötig (alle Berührungspunkte sind über die me-no-dev → ESP32Async-Linie
-  stabil; Details in 4.1.1).
-- ⏳ Ausstehend: Build auf dem PlatformIO-Host + zweistufige Abnahme (Abschnitt 6)
-  auf echter Hardware.
+- ✅ `src/web/webserver.h`: obsoleten `HTTP_GET/POST/DELETE`-Makro-Workaround
+  **entfernt** — der neue Stack deklariert die Methoden selbst (Details in 4.1.1).
+  Sonst keine Änderung an `webserver.cpp` (alle übrigen Berührungspunkte stabil).
+- ✅ Compile-Fix nach erstem Build-Versuch auf dem Host (Makro-Kollision mit dem
+  Enum des neuen Stacks).
+- ⏳ Ausstehend: erfolgreicher Build auf dem PlatformIO-Host + zweistufige Abnahme
+  (Abschnitt 6) auf echter Hardware.
 
 ## 1. Ziel
 
@@ -131,10 +133,21 @@ werden.
      zurückkehrt.
 
 #### 4.1.1 Ergebnis des API-Reviews (umgesetzt)
-Der Review aller Berührungspunkte ergab: **keine Quelländerung an
-`src/web/webserver.cpp` / `.h` nötig.** Die ESP32Async-Bibliotheken stammen aus
-derselben me-no-dev-Linie wie die `*-esphome`-Forks; alle genutzten Signaturen
-sind unverändert:
+Eine Quelländerung war nötig: der **`HTTP_GET/POST/DELETE`-Makro-Workaround** in
+`webserver.h` musste **entfernt** werden. Der alte `*-esphome`-Fork umschloss
+sein Methoden-Enum mit `#ifndef HTTP_ANY`, sodass vorab gesetzte Makros es
+unterdrückten. Der ESP32Async-Stack deklariert die Methoden dagegen im Enum
+`AsyncWebRequestMethod` (Werte u. a. `HTTP_DELETE=1<<0`, `HTTP_GET=1<<1`) **ohne**
+diesen Guard und exportiert sie selbst global (`using namespace`, abschaltbar via
+`ASYNCWEBSERVER_NO_GLOBAL_HTTP_METHODS`). Die alten Makros zerstörten dieses Enum
+beim Kompilieren (`expected identifier before numeric constant`) — daher raus.
+Kollision mit dem `HTTPMethod`-Enum des Arduino-Cores (`<HTTPClient.h>`, via
+`cloud/api_client.h`) entsteht nur am tatsächlichen Verwendungsort; in den
+relevanten Übersetzungseinheiten wird kein nacktes `HTTP_*` neben `HTTPClient`
+referenziert, daher ist keine Qualifizierung nötig.
+
+Alle übrigen Berührungspunkte in `webserver.cpp` sind unverändert (gegen v3.11.1
+geprüft):
 - `request->_tempObject` (`void*`), `request->onDisconnect(...)`,
   `request->beginChunkedResponse("application/json", filler)` mit
   `size_t(uint8_t*, size_t, size_t)`-Lambda — unverändert.
