@@ -2,3 +2,5 @@
 _vendor
 *.cl*
 tmp
+__pycache__/
+*.pyc
