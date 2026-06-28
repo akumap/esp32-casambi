@@ -70,6 +70,8 @@ void runSetupWizard();
 void scanForDevices();
 void connectToDevice(int index);
 void handleCommand(const String& cmd);
+void requestCloudRefresh(const String& password);
+void runScheduledCloudRefresh();
 void checkAndReconnectBLE();
 void checkAndReconnectWiFi();
 void monitorHeap();
@@ -171,6 +173,16 @@ void setup() {
             webDebugEnabled     = networkConfig.webDebugEnabled;
             parseDebugEnabled   = networkConfig.parseDebugEnabled;
             heapDebugEnabled    = networkConfig.heapDebugEnabled;
+
+            // A refresh scheduled via the serial command or POST /api/refreshCasambi
+            // runs here, before BLE/web are up, on a clean heap with no concurrent
+            // tasks. Clear the marker first so a failed download cannot loop. On
+            // success runScheduledCloudRefresh() reboots; on failure it returns and
+            // we continue normally with the existing config.
+            if (ConfigStore::isRefreshPending()) {
+                ConfigStore::clearRefreshPending();
+                runScheduledCloudRefresh();
+            }
 
             // Initialize BLE first (before WiFi for proper coexistence)
             NimBLEDevice::init("ESP32-Casambi");
@@ -350,6 +362,15 @@ void loop() {
     // WebSocket housekeeping (clean up disconnected clients)
     if (webServer) {
         webServer->loop();
+
+        // FHEM-triggered cloud-config refresh (POST /api/refreshCasambi). Handle
+        // it here in the loop task — never from the async web-server context. It
+        // only schedules the refresh and reboots; the actual download runs early
+        // at the next boot (race-free). Uses the stored password.
+        if (webServer->consumeRefreshRequest()) {
+            Serial.println("\n*** Cloud refresh requested via API ***");
+            requestCloudRefresh(networkConfig.casambiPassword);  // never returns
+        }
     }
 
     delay(10);
@@ -643,6 +664,159 @@ class ScanCallbacks : public NimBLEScanCallbacks {
 static ScanCallbacks* scanCallbackInstance = nullptr;
 
 // ============================================================================
+// CLOUD CONFIG REFRESH
+// ============================================================================
+
+// Schedule a Casambi cloud-config refresh and reboot. The refresh itself runs
+// at the next boot via runScheduledCloudRefresh(), BEFORE BLE and the async web
+// server are started.
+//
+// Doing it that way avoids a use-after-free crash (issue #21): tearing the BLE
+// stack and the AsyncWebServer down at runtime races with the async_tcp task,
+// which may still be processing the disconnect of the very connection that
+// triggered the refresh (e.g. the FHEM WebSocket). At boot, neither subsystem
+// is up yet, so the TLS download runs on a clean, large heap with no
+// concurrent tasks.
+//
+// Shared by the serial `refresh` command and the FHEM-triggered
+// POST /api/refreshCasambi. On success it does not return — it reboots.
+void requestCloudRefresh(const String& password) {
+    if (password.length() == 0) {
+        Serial.println("ERROR: No network password available for refresh.");
+        return;
+    }
+
+    // Persist the password to use after the reboot (saved one, or one newly
+    // typed at the serial prompt).
+    if (password != networkConfig.casambiPassword) {
+        networkConfig.casambiPassword = password;
+        if (!ConfigStore::saveNetworkConfig(networkConfig)) {
+            Serial.println("ERROR: Failed to store password for refresh");
+            return;
+        }
+    }
+
+    ConfigStore::setRefreshPending();
+    Serial.println("Cloud refresh scheduled. Restarting to apply...");
+    delay(500);
+    ESP.restart();
+}
+
+// Perform a scheduled cloud-config refresh. Called from setup() when the
+// refresh marker is present, before BLE/WiFi/web are initialised. `networkConfig`
+// must already be loaded (for the stored password and local settings).
+//
+// The marker is cleared by the caller BEFORE this runs, so a failed download
+// cannot cause a reboot loop — on any failure we simply return and setup()
+// continues into normal operation with the existing (unchanged) config. On
+// success the device reboots and comes up with the fresh config.
+void runScheduledCloudRefresh() {
+    Serial.println("\n=== Scheduled Cloud Refresh ===");
+
+    const String password = networkConfig.casambiPassword;
+    if (password.length() == 0) {
+        Serial.println("ERROR: No stored network password; skipping refresh.");
+        return;
+    }
+
+    // Bring up WiFi (nothing else is connected yet at this point in boot).
+    WiFiCredentials wifiCreds;
+    if (!ConfigStore::loadWiFiCredentials(wifiCreds)) {
+        Serial.println("ERROR: No WiFi credentials stored; skipping refresh.");
+        return;
+    }
+    g_wifiCreds = wifiCreds;
+    g_wifiCredsLoaded = true;
+
+    Serial.printf("Connecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifiCreds.ssid.c_str(), wifiCreds.password.c_str());
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        delay(100);
+        esp_task_wdt_reset();
+        Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("ERROR: WiFi connection failed; skipping refresh.");
+        WiFi.disconnect(true);
+        return;
+    }
+    Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+
+    // On any failure below, drop WiFi so setup() resumes from its normal
+    // "BLE first, then WiFi" ordering with the existing config untouched.
+
+    // Get network ID from stored UUID
+    Serial.println("--- Fetching network ID ---");
+    String networkId;
+    CasambiAPIClient tempClient;
+    if (!tempClient.getNetworkId(networkConfig.networkUuid, networkId)) {
+        Serial.printf("ERROR: Failed to get network ID: %s\n", tempClient.getLastError().c_str());
+        WiFi.disconnect(true);
+        return;
+    }
+
+    // Create session
+    Serial.println("--- Creating session ---");
+    String sessionToken;
+    if (!tempClient.createSession(networkId, password, sessionToken)) {
+        Serial.printf("ERROR: Authentication failed: %s\n", tempClient.getLastError().c_str());
+        WiFi.disconnect(true);
+        return;
+    }
+
+    // Fetch fresh configuration
+    Serial.println("--- Downloading configuration ---");
+    NetworkConfig freshConfig;
+    if (!tempClient.fetchNetworkConfig(networkId, sessionToken, freshConfig)) {
+        Serial.printf("ERROR: Failed to fetch config: %s\n", tempClient.getLastError().c_str());
+        WiFi.disconnect(true);
+        return;
+    }
+
+    // Restore network identifiers
+    freshConfig.networkUuid = networkConfig.networkUuid;
+    freshConfig.networkId = networkId;
+
+    // Persist the password used for this refresh
+    freshConfig.casambiPassword = password;
+
+    // Preserve local settings that are not part of the cloud config
+    freshConfig.autoConnectEnabled    = networkConfig.autoConnectEnabled;
+    freshConfig.autoConnectAddress    = networkConfig.autoConnectAddress;
+    freshConfig.bleDebugEnabled       = networkConfig.bleDebugEnabled;
+    freshConfig.casambiDebugEnabled   = networkConfig.casambiDebugEnabled;
+    freshConfig.webDebugEnabled       = networkConfig.webDebugEnabled;
+    freshConfig.parseDebugEnabled     = networkConfig.parseDebugEnabled;
+    freshConfig.heapDebugEnabled      = networkConfig.heapDebugEnabled;
+
+    // Save updated configuration
+    Serial.println("--- Saving to flash ---");
+    if (!ConfigStore::saveNetworkConfig(freshConfig)) {
+        Serial.println("ERROR: Failed to save configuration; keeping existing config.");
+        WiFi.disconnect(true);
+        return;
+    }
+
+    Serial.println("\n=== Refresh Complete! ===");
+    Serial.printf("Network: %s\n", freshConfig.networkName.c_str());
+    Serial.printf("Protocol: v%d (revision %d)\n", freshConfig.protocolVersion, freshConfig.revision);
+    Serial.printf("Units: %d\n", freshConfig.units.size());
+    Serial.printf("Groups: %d\n", freshConfig.groups.size());
+    Serial.printf("Scenes: %d\n", freshConfig.scenes.size());
+
+    checkCasambiVersions(freshConfig);
+
+    Serial.println("\nConfiguration updated. Restarting to apply...");
+    delay(2000);
+    ESP.restart();
+}
+
+// ============================================================================
 // COMMAND HANDLER
 // ============================================================================
 
@@ -734,43 +908,14 @@ void handleCommand(const String& cmd) {
             Serial.println("This will download fresh configuration from Casambi cloud.");
             Serial.println("Your local settings (auto-connect, debug) will be preserved.\n");
 
-            // Check WiFi connection
-            if (WiFi.status() != WL_CONNECTED) {
-                Serial.println("WiFi not connected. Connecting...");
-                WiFiCredentials wifiCreds;
-                if (!ConfigStore::loadWiFiCredentials(wifiCreds)) {
-                    Serial.println("ERROR: No WiFi credentials stored. Use 'wifi set' first.");
-                    return;
-                }
-                g_wifiCreds = wifiCreds;
-                g_wifiCredsLoaded = true;
-
-                WiFi.mode(WIFI_STA);
-                WiFi.begin(wifiCreds.ssid.c_str(), wifiCreds.password.c_str());
-
-                unsigned long start = millis();
-                while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                    delay(100);
-                    esp_task_wdt_reset();
-                    Serial.print(".");
-                }
-                Serial.println();
-
-                if (WiFi.status() != WL_CONNECTED) {
-                    Serial.println("ERROR: WiFi connection failed");
-                    return;
-                }
-                Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
-            }
-
             // Get network password: reuse the saved one if present (just press
             // Enter), or type a new one (e.g. after the password was changed).
             String password = networkConfig.casambiPassword;
             if (password.length() > 0) {
-                Serial.println("\nUsing saved network password.");
+                Serial.println("Using saved network password.");
                 Serial.println("Press Enter to keep it, or type a new password:");
             } else {
-                Serial.println("\nEnter your Casambi network password:");
+                Serial.println("Enter your Casambi network password:");
             }
             Serial.print("> ");
             while (!Serial.available()) {
@@ -787,103 +932,9 @@ void handleCommand(const String& cmd) {
                 return;
             }
 
-            // Preserve local settings
-            bool savedAutoConnect = networkConfig.autoConnectEnabled;
-            String savedAutoConnectAddr = networkConfig.autoConnectAddress;
-            bool savedBleDebug     = networkConfig.bleDebugEnabled;
-            bool savedCasambiDebug = networkConfig.casambiDebugEnabled;
-            bool savedWebDebug     = networkConfig.webDebugEnabled;
-            bool savedParseDebug   = networkConfig.parseDebugEnabled;
-            bool savedHeapDebug    = networkConfig.heapDebugEnabled;
-
-            // Free the BLE stack before talking to the cloud. The TLS
-            // handshake needs a large contiguous heap block; while the BLE
-            // controller/host is allocated that block isn't available and
-            // every HTTPS request fails with HTTP -1. The setup wizard works
-            // precisely because it deinits BLE first (see runSetupWizard).
-            // We mirror that and restart afterwards to re-enter operation
-            // mode cleanly with the refreshed config loaded from flash.
-            Serial.println("--- Releasing BLE for cloud download ---");
-            if (webServer) {
-                webServer->stop();
-            }
-            if (casambiClient) {
-                casambiClient->disconnect();
-            }
-            NimBLEDevice::deinit(true);
-            delay(500);
-
-            // From here on the BLE stack is gone, so we can no longer just
-            // return to the command loop; every exit path restarts the ESP.
-
-            // Get network ID from stored UUID
-            Serial.println("--- Fetching network ID ---");
-            String networkId;
-            CasambiAPIClient tempClient;
-            if (!tempClient.getNetworkId(networkConfig.networkUuid, networkId)) {
-                Serial.printf("ERROR: Failed to get network ID: %s\n", tempClient.getLastError().c_str());
-                Serial.println("Restarting...");
-                delay(2000);
-                ESP.restart();
-            }
-
-            // Create session
-            Serial.println("--- Creating session ---");
-            String sessionToken;
-            if (!tempClient.createSession(networkId, password, sessionToken)) {
-                Serial.printf("ERROR: Authentication failed: %s\n", tempClient.getLastError().c_str());
-                Serial.println("Restarting...");
-                delay(2000);
-                ESP.restart();
-            }
-
-            // Fetch fresh configuration
-            Serial.println("--- Downloading configuration ---");
-            NetworkConfig freshConfig;
-            if (!tempClient.fetchNetworkConfig(networkId, sessionToken, freshConfig)) {
-                Serial.printf("ERROR: Failed to fetch config: %s\n", tempClient.getLastError().c_str());
-                Serial.println("Restarting...");
-                delay(2000);
-                ESP.restart();
-            }
-
-            // Restore network identifiers
-            freshConfig.networkUuid = networkConfig.networkUuid;
-            freshConfig.networkId = networkId;
-
-            // Persist the password used for this refresh (saved or newly typed)
-            freshConfig.casambiPassword = password;
-
-            // Restore local settings
-            freshConfig.autoConnectEnabled    = savedAutoConnect;
-            freshConfig.autoConnectAddress    = savedAutoConnectAddr;
-            freshConfig.bleDebugEnabled       = savedBleDebug;
-            freshConfig.casambiDebugEnabled   = savedCasambiDebug;
-            freshConfig.webDebugEnabled       = savedWebDebug;
-            freshConfig.parseDebugEnabled     = savedParseDebug;
-            freshConfig.heapDebugEnabled      = savedHeapDebug;
-
-            // Save updated configuration
-            Serial.println("--- Saving to flash ---");
-            if (!ConfigStore::saveNetworkConfig(freshConfig)) {
-                Serial.println("ERROR: Failed to save configuration");
-                Serial.println("Restarting...");
-                delay(2000);
-                ESP.restart();
-            }
-
-            Serial.println("\n=== Refresh Complete! ===");
-            Serial.printf("Network: %s\n", freshConfig.networkName.c_str());
-            Serial.printf("Protocol: v%d (revision %d)\n", freshConfig.protocolVersion, freshConfig.revision);
-            Serial.printf("Units: %d\n", freshConfig.units.size());
-            Serial.printf("Groups: %d\n", freshConfig.groups.size());
-            Serial.printf("Scenes: %d\n", freshConfig.scenes.size());
-
-            checkCasambiVersions(freshConfig);
-
-            Serial.println("\nConfiguration updated. Restarting to apply...");
-            delay(2000);
-            ESP.restart();
+            // Schedule the refresh and reboot; the download runs early at the
+            // next boot (race-free, see requestCloudRefresh). Never returns.
+            requestCloudRefresh(password);
         }
         else if (cmd == "clearconfig") {
             ConfigStore::clearAll();

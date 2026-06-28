@@ -329,6 +329,21 @@ curl -X POST http://<ip>/api/groups/4/slider \
   -H "Content-Type: application/json" -d '{"value": 200}'
 ```
 
+#### Maintenance
+
+```bash
+# Re-read the configuration from the Casambi cloud using the stored password.
+# Returns {"status":"refreshing"} and reboots; the download runs at the next
+# boot and the device comes back up with the fresh config (see "refresh" below).
+curl -X POST http://<ip>/api/refreshCasambi
+
+# Reboot the device
+curl -X POST http://<ip>/api/reboot
+```
+
+`/api/refreshCasambi` responds with HTTP 409 if no configuration or no stored
+Casambi password is present yet (run `setup`/`refresh` once via serial first).
+
 ### Response Format
 
 **Success:** `{"success": true}`
@@ -663,7 +678,9 @@ refresh
 
 This re-downloads the full configuration from the Casambi cloud while preserving local settings (auto-connect address, per-category debug flags).
 
-The network password entered during `setup` is stored and reused automatically, so `refresh` no longer prompts for it — just press Enter at the password prompt to keep the saved one, or type a new password if it changed in the Casambi app. To free the heap needed for the TLS download, `refresh` releases the BLE connection and restarts the device when it finishes. The password is stored in flash in plaintext, alongside the WiFi password and the BLE keys.
+The network password entered during `setup` is stored and reused automatically, so `refresh` no longer prompts for it — just press Enter at the password prompt to keep the saved one, or type a new password if it changed in the Casambi app. The password is stored in flash in plaintext, alongside the WiFi password and the BLE keys.
+
+The actual cloud download runs early on the **next boot**, before the BLE stack and the web server are started: `refresh` only schedules the refresh and reboots. Running it on a clean boot (large contiguous heap for the TLS handshake, no concurrent BLE/network tasks) avoids the use-after-free that tearing those subsystems down at runtime would cause. The same mechanism backs the FHEM `set refreshCasambi` command and `POST /api/refreshCasambi`, so a refresh can be triggered entirely from home automation without a serial console. After the download the device reboots once more into normal operation with the fresh config.
 
 -----
 
@@ -672,7 +689,7 @@ The network password entered during `setup` is stored and reused automatically, 
 ### Setup Issues
 
 - **WiFi won’t connect:** Ensure 2.4 GHz network (ESP32 doesn’t support 5 GHz)
-- **`HTTP -1` during setup/refresh:** TLS handshake failure, almost always caused by insufficient contiguous heap for mbedTLS while the BLE stack is active — both `setup` and `refresh` free BLE before downloading from the cloud and restart afterwards. If it still occurs, it usually means too little free heap; reboot and retry
+- **`HTTP -1` during setup/refresh:** TLS handshake failure, almost always caused by insufficient contiguous heap for mbedTLS while the BLE stack is active — `setup` runs before BLE is initialised, and `refresh` performs its download early on the next boot for the same reason (BLE/web not yet started). If it still occurs, it usually means too little free heap; reboot and retry
 - **Network not found during scan:** Ensure Casambi devices are powered on and in BLE range
 
 ### Connection Issues
@@ -832,13 +849,21 @@ Structural changes — new or removed units — are held as **pending changes**
 and require explicit confirmation:
 
 ```
-set MyCasambi applyChanges    # create new / remove deleted unit devices
-set MyCasambi discardChanges  # ignore the pending changes
-set MyCasambi reconnect       # close and reopen the WebSocket connection
+set MyCasambi applyChanges     # create new / remove deleted unit devices
+set MyCasambi discardChanges   # ignore the pending changes
+set MyCasambi reconnect        # close and reopen the WebSocket connection
+set MyCasambi refreshCasambi   # re-read the config from the Casambi cloud
 ```
 
 This prevents unintended device creation or deletion caused by a transient
 network reconfiguration or gateway restart.
+
+`set refreshCasambi` tells the ESP32 to re-read its configuration from the
+Casambi cloud using the stored network password (equivalent to the serial
+`refresh`). The ESP downloads the fresh config and reboots; the gateway then
+reconnects automatically and any new or changed units show up as **pending
+changes** — adopt them with `applyChanges`. It requires that the ESP already
+has a stored Casambi password (set once via the serial `refresh`/`setup`).
 
 ### Unit devices
 

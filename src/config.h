@@ -44,6 +44,9 @@
 
 #define CONFIG_FILE_PATH          "/casambi_config.json"
 #define WIFI_FILE_PATH            "/wifi_config.json"
+// Marker file: when present at boot, the firmware re-reads the Casambi cloud
+// configuration before BLE/web are started, then reboots into normal operation.
+#define REFRESH_FLAG_PATH         "/refresh_pending"
 
 // ============================================================================
 // EVENT LOG

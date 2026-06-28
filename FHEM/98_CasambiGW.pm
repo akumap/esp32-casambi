@@ -185,13 +185,18 @@ sub CasambiGW_Set {
 
     if ($cmd eq "?") {
         return "Unknown argument $cmd, choose one of "
-             . "applyChanges:noArg discardChanges:noArg reconnect:noArg";
+             . "applyChanges:noArg discardChanges:noArg reconnect:noArg "
+             . "refreshCasambi:noArg";
     }
 
     if ($cmd eq "reconnect") {
         Log3 $name, 3, "$name: reconnect requested";
         CasambiGW_StartInfoPoll($hash);   # re-check /api/info, then connect
         return undef;
+    }
+
+    if ($cmd eq "refreshCasambi") {
+        return CasambiGW_RefreshCasambi($hash);
     }
 
     if ($cmd eq "applyChanges") {
@@ -208,7 +213,55 @@ sub CasambiGW_Set {
         return undef;
     }
 
-    return "Unknown command '$cmd', choose one of applyChanges:noArg discardChanges:noArg";
+    return "Unknown command '$cmd', choose one of applyChanges:noArg "
+         . "discardChanges:noArg reconnect:noArg refreshCasambi:noArg";
+}
+
+# ============================================================================
+# refreshCasambi — ask the ESP32 to re-read its configuration from the Casambi
+# cloud using the stored network password. The ESP frees BLE, downloads the
+# fresh config and reboots; afterwards our ReadyFn/InfoPoll reconnects the
+# WebSocket and CasambiGW_Read re-syncs the CasambiUnit devices (adding/updating
+# them). Because the ESP reboots right after accepting the request, a dropped
+# connection here is expected and not treated as an error.
+# ============================================================================
+
+sub CasambiGW_RefreshCasambi {
+    my $hash = shift;
+    my $name = $hash->{NAME};
+
+    my $ip   = $hash->{GW_IP};
+    my $port = $hash->{GW_PORT} // 80;
+    return "No gateway IP known yet — wait until the ESP32 is connected"
+        unless defined $ip && $ip ne "";
+
+    my $url = "http://$ip:$port/api/refreshCasambi";
+    Log3 $name, 3, "$name: refreshCasambi requested → POST $url";
+
+    HttpUtils_NonblockingGet({
+        url      => $url,
+        timeout  => 10,
+        method   => "POST",
+        header   => "Content-Type: application/json",
+        data     => "{}",
+        hash     => $hash,
+        callback => sub {
+            my ($param, $err, $data) = @_;
+            my $h = $param->{hash};
+            my $n = $h->{NAME};
+            # The ESP reboots immediately after accepting the request, so a
+            # connection reset / timeout after the POST is the normal case.
+            if ($err) {
+                Log3 $n, 4,
+                    "$n: refreshCasambi — connection dropped after request "
+                  . "(expected, ESP is rebooting): $err";
+            } else {
+                Log3 $n, 3, "$n: refreshCasambi accepted by ESP: $data";
+            }
+        }
+    });
+
+    return undef;
 }
 
 # ============================================================================
@@ -725,6 +778,15 @@ sub CasambiGW_Ready {
         <em>pendingSync</em></li>
     <li><b>discardChanges</b> &mdash; clear the pending list without making
         any structural changes</li>
+    <li><b>reconnect</b> &mdash; re-check <code>/api/info</code> and re-open the
+        WebSocket connection to the ESP32</li>
+    <li><b>refreshCasambi</b> &mdash; ask the ESP32 to re-read its configuration
+        from the Casambi cloud using the stored network password. The ESP
+        downloads the fresh config and reboots; afterwards the module reconnects
+        automatically and new/changed units appear as <em>pending changes</em>
+        (adopt them with <code>applyChanges</code>). Requires that the ESP has a
+        stored Casambi password (set once via the serial <code>refresh</code>
+        command or initial setup).</li>
   </ul>
   <br>
   <b>Attributes</b>

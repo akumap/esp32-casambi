@@ -70,6 +70,15 @@ public:
     void loop();
 
     /**
+     * Check (and clear) whether a Casambi cloud-config refresh was requested
+     * via POST /api/refresh. The actual refresh frees the BLE stack, talks to
+     * the cloud over TLS and reboots, so it must run from the loop task — never
+     * from inside the async request handler. Returns true exactly once per
+     * request.
+     */
+    bool consumeRefreshRequest();
+
+    /**
      * Broadcast a unit state change to all connected WebSocket clients.
      * Enriches the message with vertical/colorTemp/cctMin/cctMax from NetworkConfig
      * (already updated before this callback fires).
@@ -98,6 +107,11 @@ private:
 
     // Server state
     bool _running;
+
+    // Set by POST /api/refreshCasambi, drained by the loop task via
+    // consumeRefreshRequest(). volatile because it is written from the async
+    // web-server context and read from the main loop.
+    volatile bool _refreshRequested;
 
     // Queue of String* broadcast messages posted from the BLE task and drained
     // by loop() so _ws->textAll() is always called from the loop task.

@@ -354,3 +354,27 @@ void ConfigStore::clearAll() {
 
     Serial.println("Configuration cleared");
 }
+
+void ConfigStore::setRefreshPending() {
+    if (!_initialized && !init()) return;
+
+    File file = LittleFS.open(REFRESH_FLAG_PATH, "w");
+    if (file) {
+        file.print("1");
+        file.close();
+    }
+}
+
+bool ConfigStore::isRefreshPending() {
+    if (!_initialized && !init()) return false;
+
+    return LittleFS.exists(REFRESH_FLAG_PATH);
+}
+
+void ConfigStore::clearRefreshPending() {
+    if (!_initialized && !init()) return;
+
+    if (LittleFS.exists(REFRESH_FLAG_PATH)) {
+        LittleFS.remove(REFRESH_FLAG_PATH);
+    }
+}

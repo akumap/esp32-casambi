@@ -15,7 +15,7 @@
 
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
-      _broadcastQueue(nullptr) {
+      _refreshRequested(false), _broadcastQueue(nullptr) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
 }
 
@@ -88,6 +88,12 @@ void CasambiWebServer::loop() {
         // Enforce client limit: evict oldest clients beyond WS_MAX_CLIENTS.
         _ws->cleanupClients(WS_MAX_CLIENTS);
     }
+}
+
+bool CasambiWebServer::consumeRefreshRequest() {
+    if (!_refreshRequested) return false;
+    _refreshRequested = false;
+    return true;
 }
 
 // ============================================================================
@@ -314,6 +320,23 @@ void CasambiWebServer::_setupRoutes() {
         request->send(200, "application/json", "{\"status\":\"rebooting\"}");
         delay(1000);
         ESP.restart();
+    });
+
+    // Re-read the Casambi cloud configuration using the stored network password.
+    // This reboots the device (the download then runs early at the next boot),
+    // so it cannot run inside this async handler — we only flag the request and
+    // let the loop task carry it out (see consumeRefreshRequest).
+    _server->on("/api/refreshCasambi", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (!ConfigStore::hasValidConfig()) {
+            _sendJsonError(request, "No configuration found; run setup first", 409);
+            return;
+        }
+        if (_config->casambiPassword.length() == 0) {
+            _sendJsonError(request, "No stored Casambi password; refresh once via serial first", 409);
+            return;
+        }
+        _refreshRequested = true;
+        request->send(200, "application/json", "{\"status\":\"refreshing\"}");
     });
 
     // Catch-all request handler. ESPAsyncWebServer routes any request without a

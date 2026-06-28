@@ -56,6 +56,25 @@ public:
      */
     static void clearAll();
 
+    /**
+     * Schedule a Casambi cloud-config refresh for the next boot. Setting this
+     * marker and rebooting lets the refresh run early in setup() — before BLE
+     * and the async web server are started — which avoids the task races of
+     * tearing those down at runtime.
+     */
+    static void setRefreshPending();
+
+    /**
+     * @return true if a cloud-config refresh was scheduled for this boot.
+     */
+    static bool isRefreshPending();
+
+    /**
+     * Clear the refresh marker (call before attempting the refresh so a failed
+     * download cannot cause a reboot loop).
+     */
+    static void clearRefreshPending();
+
 private:
     static bool _initialized;
 };
