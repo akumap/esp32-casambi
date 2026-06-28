@@ -1,8 +1,8 @@
 # Konzept: Stabilität unter WebSocket-/TCP-Verbindungs-Churn (Issue #18)
 
-Status: **in Umsetzung.** Adressiert die in #18 dokumentierten Reboots unter
-hochfrequentem Verbindungs-Churn. Diagnose-Instrumentierung (`WSDBG`, `WiFiRC:`)
-und das Stress-Harness sind bereits in `main` (aus PR #19).
+Status: **verifiziert auf Hardware.** Adressiert die in #18 dokumentierten
+Reboots unter hochfrequentem Verbindungs-Churn. Diagnose-Instrumentierung
+(`WSDBG`, `WiFiRC:`) und das Stress-Harness sind bereits in `main` (aus PR #19).
 Branch: `claude/migrate-async-tcp-stack-esp32async`
 
 **Umsetzungsstand:**
@@ -14,8 +14,10 @@ Branch: `claude/migrate-async-tcp-stack-esp32async`
   Sonst keine Änderung an `webserver.cpp` (alle übrigen Berührungspunkte stabil).
 - ✅ Compile-Fix nach erstem Build-Versuch auf dem Host (Makro-Kollision mit dem
   Enum des neuen Stacks).
-- ⏳ Ausstehend: erfolgreicher Build auf dem PlatformIO-Host + zweistufige Abnahme
-  (Abschnitt 6) auf echter Hardware.
+- ✅ Build auf dem PlatformIO-Host erfolgreich; **zweistufige Abnahme bestanden**
+  (Ergebnisse in Abschnitt 6) — der neue Stack ist zudem spürbar schneller.
+- ⏳ Offen (optional/Abschluss): längerer Realistik-Soak; Entscheidung über die
+  Diagnose-Instrumentierung (entfernen vs. gegated lassen, Abschnitt 7); PR.
 
 ## 1. Ziel
 
@@ -278,12 +280,31 @@ Pass-Kriterien: kein `REBOOT DETECTED`, kein `Guru Meditation` (insb. kein
 `_accept` / `_lwip_fin`), freier Heap erholt sich, „largest block recovered".
 Der WSDBG-Trace zeigt keine Client-Akkumulation.
 
+### 6.1 Ergebnis (auf Hardware, ESP32 DevKit V4)
+
+- **Stufe 1 — Funktion:** `verify_tcp_stack.py` **10/10 bestanden**. Belege u. a.:
+  T5 kein Per-POST-Leck (60 POSTs, Drift ~1,3 KB ≪ Limit), T8 abgebrochene Bodys
+  ~0 B Drift (`onDisconnect`-Cleanup greift), T10 Cap als Obergrenze gehalten.
+- **Stufe 2 — Stabilität:** alle Profile **bestanden, kein Reboot, kein
+  `Guru Meditation`** (insb. kein `_accept` / `_lwip_fin`):
+  - `medium` (WS-Churn-only), `medium` (Mischlast), `realistic` — sauber.
+  - **`heavy`** (180 s, das vormalige „Breaking-Point"-Profil aus #17/#18):
+    5842 Requests, ~0,9 % Fehler (reine Timeouts / absichtliche Aborts unter
+    abusivem Churn). **Free-Heap RECOVERED** (90 KB → 58 KB unter Last →
+    96 KB nach Cooldown). **Largest block recovered** (39 KB → min 13 KB →
+    83 KB). Kein persistenter Leak, keine bleibende Fragmentierung.
+- Der neue Stack ist zudem **spürbar schneller** als der `*-esphome`-Fork.
+
+→ Die in #18 dokumentierten Churn-Crashes (`_accept` / `_lwip_fin`) treten auf
+dem ESP32Async-Stack **nicht mehr** auf; der watchdog-sichere Reconnect
+verhindert den `WiFi.begin()`-WDT-Hang. Damit ist #18 inhaltlich gelöst.
+
 ## 7. Aufräumen nach Verifikation
 
-- `WSDBG`-WS-Trace und `WiFiRC:`-Checkpoints (Untersuchungs-Gerüst) entfernen —
-  oder gegated lassen; bei Merge entscheiden.
-- `platformio.ini` auf **feste Version-Tags** (nicht floatend) für reproduzier-
-  bare Builds setzen.
+- ⏳ **Entscheidung offen:** `WSDBG`-WS-Trace (hinter `debug heap on`) und die
+  `WiFiRC:`-Checkpoints (in `main.cpp` unbedingt geloggt) — entfernen oder
+  gegated lassen? Bei Merge entscheiden.
+- ✅ `platformio.ini` auf feste Version-Tags gepinnt (erledigt).
 
 ## 8. Betroffene Dateien (geplant)
 
