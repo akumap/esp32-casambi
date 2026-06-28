@@ -456,11 +456,36 @@ def t9_ws_hello(host, port, r):
         s.close()
 
 
+def _ws_is_alive(s):
+    """Ping a WS client and classify the reply by opcode.
+
+    cleanupClients() evicts a client by QUEUING A CLOSE FRAME (opcode 0x8) — the
+    socket isn't gone yet, so a naive "any frame == alive" check miscounts an
+    evicted client (it just reads its own close frame). Survivors answer the ping
+    with a PONG (0xA). So: pong/data → alive; close (0x8), timeout, or a failed
+    send → evicted/dead. We read a few frames in case a queued text broadcast
+    precedes the pong."""
+    try:
+        ws_send(s, 0x9)  # ping
+    except Exception:
+        return False     # send failed → socket already torn down → evicted
+    for _ in range(4):
+        op, _ = ws_recv_frame(s, timeout=2)
+        if op is None:
+            return False      # timeout / closed
+        if op == 0x8:
+            return False      # close frame → evicted by cleanupClients
+        if op == 0xA or op in (0x1, 0x2):
+            return True       # pong or data → still a live client
+        # other control frame (e.g. ping) → keep reading for the pong
+    return False
+
+
 def t10_ws_client_cap(host, port, r, ws_max):
-    """Open ws_max + 2 clients. cleanupClients(WS_MAX_CLIENTS) runs in loop(),
-    so the oldest beyond the cap get evicted. Verify by reading /api/status
-    can still be served (server alive) and that the newest clients stay open
-    while at least one early client gets closed."""
+    """Open ws_max + 2 clients. cleanupClients(WS_MAX_CLIENTS) runs every loop()
+    and closes the oldest one per call, so the count converges to the cap within
+    a few iterations. Verify the surviving client count equals the cap (not more)
+    and the server stays alive."""
     n = ws_max + 2
     socks = []
     for _ in range(n):
@@ -471,26 +496,14 @@ def t10_ws_client_cap(host, port, r, ws_max):
         socks.append(s)
         time.sleep(0.25)  # give loop() time to run cleanupClients between opens
 
-    # Nudge loop() a few times.
-    for _ in range(3):
+    # Nudge loop() a few times so eviction (one client per call) converges.
+    for _ in range(5):
         get_status(host, port)
         time.sleep(0.3)
 
     opened = sum(1 for s in socks if s is not None)
 
-    # Probe liveness of each socket: a ping should get a pong from survivors;
-    # evicted ones error/close.
-    alive = 0
-    for s in socks:
-        if s is None:
-            continue
-        try:
-            ws_send(s, 0x9)  # ping
-            op, _ = ws_recv_frame(s, timeout=2)
-            if op is not None:
-                alive += 1
-        except Exception:
-            pass
+    alive = sum(1 for s in socks if s is not None and _ws_is_alive(s))
 
     for s in socks:
         if s:
@@ -503,10 +516,10 @@ def t10_ws_client_cap(host, port, r, ws_max):
             except Exception:
                 pass
 
-    # Server must still serve HTTP (didn't crash) and must not keep ALL clients
-    # (cap enforced). alive <= ws_max is the cap; server-alive is the key safety.
+    # Meaningful only if we actually opened more than the cap. Survivors must be
+    # trimmed to the cap (alive == ws_max) and the server must still serve HTTP.
     server_alive = free_heap(host, port) is not None
-    ok = server_alive and opened >= 1 and alive <= ws_max
+    ok = server_alive and opened > ws_max and alive == ws_max
     r.add("T10", "WS client cap enforced (cleanupClients)", ok,
           f"opened={opened} alive_after_cap={alive} cap={ws_max} server_alive={server_alive}")
 
