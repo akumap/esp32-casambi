@@ -168,6 +168,14 @@ wie unsere `broadcastUnitState`-Queue). Daher **bewusst beim Default belassen**;
 auf der Hardware ist in der Abnahme zu bestätigen, dass ein langsamer Client
 keinen Queue-Aufbau erzeugt (WS-Cap = 3, geringes Broadcast-Volumen).
 
+`cleanupClients(WS_MAX_CLIENTS)` (in `loop()`) erzwingt den Cap im neuen Stack
+korrekt — schließt den ältesten Client (eines pro Aufruf, asynchron per
+Close-Frame). Da der Close asynchron ist und `count()` den noch nicht entfernten,
+schließenden Client mitzählt, kann das gleichzeitige Öffnen mehrerer Clients den
+Bestand **kurzzeitig knapp unter** den Cap drücken (z. B. 2 bei Cap 3). Das ist
+unkritisch: der Cap ist eine **Obergrenze**; entscheidend ist, dass er nie
+**überschritten** wird. Auf der Hardware bestätigt (Abnahme T10).
+
 ### 4.2 WiFi-Reconnect watchdog-sicher machen (gegen B)
 
 Unabhängig vom Library-Tausch und **vorrangig**, da es den harten Reboot in

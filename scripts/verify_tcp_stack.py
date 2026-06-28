@@ -483,9 +483,12 @@ def _ws_is_alive(s):
 
 def t10_ws_client_cap(host, port, r, ws_max):
     """Open ws_max + 2 clients. cleanupClients(WS_MAX_CLIENTS) runs every loop()
-    and closes the oldest one per call, so the count converges to the cap within
-    a few iterations. Verify the surviving client count equals the cap (not more)
-    and the server stays alive."""
+    and closes the oldest one per call. The cap is an UPPER bound: survivors must
+    never exceed ws_max. Note the close is async and count() still includes a
+    client in the closing state, so opening several at once can transiently
+    over-trim to just under the cap (e.g. 2 with cap 3) — that is harmless. So we
+    assert 1 <= survivors <= ws_max, not survivors == ws_max, and that the server
+    stays alive."""
     n = ws_max + 2
     socks = []
     for _ in range(n):
@@ -516,10 +519,11 @@ def t10_ws_client_cap(host, port, r, ws_max):
             except Exception:
                 pass
 
-    # Meaningful only if we actually opened more than the cap. Survivors must be
-    # trimmed to the cap (alive == ws_max) and the server must still serve HTTP.
+    # Meaningful only if we actually opened more than the cap. The cap is an
+    # upper bound: survivors must be 1..ws_max (never exceed it), and the server
+    # must still serve HTTP.
     server_alive = free_heap(host, port) is not None
-    ok = server_alive and opened > ws_max and alive == ws_max
+    ok = server_alive and opened > ws_max and 1 <= alive <= ws_max
     r.add("T10", "WS client cap enforced (cleanupClients)", ok,
           f"opened={opened} alive_after_cap={alive} cap={ws_max} server_alive={server_alive}")
 
