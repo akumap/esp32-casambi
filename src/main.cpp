@@ -420,7 +420,26 @@ void checkAndReconnectWiFi() {
     lastWiFiCheck = now;
 
     if (WiFi.status() == WL_CONNECTED) {
-        g_wifiWasConnected = true;
+        // Handle the disconnected → connected transition exactly once, so NTP
+        // re-arm and the (defensive) web-server restart run only on a real
+        // recovery, not on every check while connected.
+        if (!g_wifiWasConnected) {
+            g_wifiWasConnected = true;
+            Serial.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
+            if (heapDebugEnabled) Serial.println("WiFiRC: <- reconnected");
+            EventLog::log(LOG_INFO, "WiFi reconnected (SSID %s)", WiFi.SSID().c_str());
+            syncTime();  // re-arm NTP after reconnect
+
+            // Restart web server only if it was torn down (defensive — it is
+            // normally kept alive across a WiFi drop).
+            if (casambiClient && !webServer) {
+                webServer = new CasambiWebServer(casambiClient, &networkConfig);
+                if (webServer->begin()) {
+                    Serial.printf("Web API restarted at: http://%s/api\n",
+                                  WiFi.localIP().toString().c_str());
+                }
+            }
+        }
         return;
     }
 
@@ -433,48 +452,24 @@ void checkAndReconnectWiFi() {
         g_wifiWasConnected = false;
     }
 
-    Serial.println("WiFi: Connection lost, attempting reconnect...");
-    // Checkpoint tracing: a WiFi-loss WDT hang was observed where loopTask
-    // stopped feeding the watchdog right after this point. These unconditional
-    // markers pinpoint which (normally non-blocking) WiFi call actually stalled,
-    // since the last line printed before the WDT reboot is the culprit.
+    // NON-BLOCKING reconnect (issue #18, part B).
+    // The old path blocked loopTask in WiFi.disconnect()+begin()+a 5 s wait
+    // loop. Under heap distress WiFi.begin() itself stalled for the full 30 s
+    // without returning, so loopTask stopped feeding the task watchdog → WDT
+    // reboot. We now never block here:
+    //   * WiFi.setAutoReconnect(true) (set at first connect) already makes the
+    //     IDF WiFi task retry on its own — that is the primary recovery path.
+    //   * We only give it a periodic nudge via WiFi.reconnect(), which reuses
+    //     the stored config (lighter than begin()) and returns immediately;
+    //     the new status is observed on a later tick, not awaited here.
+    // The WiFiRC: checkpoints are kept (gated behind 'debug heap on', like WSDBG)
+    // so a future stall (if any) is still localizable from the last line printed
+    // before a reboot. The esp_task_wdt_reset() calls stay UNCONDITIONAL — they
+    // feed the watchdog and are functional, not diagnostics.
     esp_task_wdt_reset();
-    Serial.println("WiFiRC: -> disconnect()");
-    WiFi.disconnect();
+    if (heapDebugEnabled) Serial.println("WiFiRC: -> reconnect() [non-blocking]");
+    WiFi.reconnect();
     esp_task_wdt_reset();
-    Serial.println("WiFiRC: -> delay(100)");
-    delay(100);
-    esp_task_wdt_reset();
-    Serial.println("WiFiRC: -> begin()");
-    WiFi.begin(g_wifiCreds.ssid.c_str(), g_wifiCreds.password.c_str());
-    esp_task_wdt_reset();
-    Serial.println("WiFiRC: -> wait loop");
-
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
-        delay(100);
-        esp_task_wdt_reset();  // Feed watchdog during WiFi connect
-    }
-    Serial.println("WiFiRC: <- wait done");
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
-        g_wifiWasConnected = true;
-        syncTime();  // re-arm NTP after reconnect
-
-        // Restart web server
-        if (casambiClient && !webServer) {
-            webServer = new CasambiWebServer(casambiClient, &networkConfig);
-            if (webServer->begin()) {
-                Serial.printf("Web API restarted at: http://%s/api\n",
-                              WiFi.localIP().toString().c_str());
-            }
-        }
-    } else {
-        if (bleDebugEnabled) {
-            Serial.println("WiFi: Reconnect failed, will retry later");
-        }
-    }
 }
 
 // ============================================================================

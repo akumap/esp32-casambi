@@ -175,7 +175,9 @@ bool SetupPortal::begin() {
 void SetupPortal::_setupRoutes() {
     // Portal page (and captive-portal catch-all)
     auto sendPage = [](AsyncWebServerRequest* req) {
-        req->send_P(200, "text/html", PORTAL_HTML);
+        // send() (not the deprecated send_P): on ESP32 flash is memory-mapped,
+        // so the PROGMEM string is read directly through the const char* overload.
+        req->send(200, "text/html", PORTAL_HTML);
     };
     _server->on("/", HTTP_GET, sendPage);
     _server->onNotFound(sendPage);
