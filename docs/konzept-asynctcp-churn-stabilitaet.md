@@ -16,8 +16,10 @@ Branch: `claude/migrate-async-tcp-stack-esp32async`
   Enum des neuen Stacks).
 - ✅ Build auf dem PlatformIO-Host erfolgreich; **zweistufige Abnahme bestanden**
   (Ergebnisse in Abschnitt 6) — der neue Stack ist zudem spürbar schneller.
-- ⏳ Offen (optional/Abschluss): längerer Realistik-Soak; Entscheidung über die
-  Diagnose-Instrumentierung (entfernen vs. gegated lassen, Abschnitt 7); PR.
+- ✅ Langzeit-Soak (`realistic`, 900 s) sauber durchgelaufen — kein Leak im
+  Produktionsmodus.
+- ✅ Diagnose-Instrumentierung gegated, `README.md`-Instabilitätshinweise
+  entfernt (Abschnitt 7).
 
 ## 1. Ziel
 
@@ -293,6 +295,8 @@ Der WSDBG-Trace zeigt keine Client-Akkumulation.
     abusivem Churn). **Free-Heap RECOVERED** (90 KB → 58 KB unter Last →
     96 KB nach Cooldown). **Largest block recovered** (39 KB → min 13 KB →
     83 KB). Kein persistenter Leak, keine bleibende Fragmentierung.
+  - **Langzeit-Soak** (`realistic`, 900 s): sauber durchgelaufen, kein Reboot,
+    Heap stabil — kein langsamer Leak im Produktionsmodus.
 - Der neue Stack ist zudem **spürbar schneller** als der `*-esphome`-Fork.
 
 → Die in #18 dokumentierten Churn-Crashes (`_accept` / `_lwip_fin`) treten auf
