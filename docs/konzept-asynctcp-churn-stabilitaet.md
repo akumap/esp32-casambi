@@ -4,7 +4,7 @@ Status: **Vorschlag / noch nicht umgesetzt.** Adressiert die in #18 dokumentiert
 Reboots unter hochfrequentem Verbindungs-Churn. Diagnose-Instrumentierung
 (`WSDBG`, `WiFiRC:`) und das Stress-Harness sind bereits in `main` (aus PR #19);
 dieses Konzept beschreibt den **Fix**, nicht die Diagnose.
-Branch: `claude/issue-19-body-comments-3fa3ju`
+Branch: `claude/migrate-async-tcp-stack-esp32async`
 
 ## 1. Ziel
 
@@ -140,9 +140,65 @@ Die `WiFiRC:`-Checkpoints bleiben zur Verifikation drin.
 > bereits entschärfen. Der watchdog-sichere Reconnect ist dennoch nötig, weil er
 > das Verhalten auch unter Heap-Druck graceful hält.
 
-## 5. Abnahme (muss bestehen, bevor #18 als gelöst gilt)
+## 5. Risikomitigation
 
-Flashen, `debug heap on`, dann mit `scripts/stress_test.py`:
+Eine Stack-Migration ist riskant, weil sich das Verhalten **subtil** ändern
+kann, ohne dass etwas offensichtlich bricht: die `*-esphome`- und die
+ESP32Async-Forks teilen dieselbe API-Oberfläche, aber das **Verhalten** der
+Catch-all-Callbacks, des Chunked-Response-Pfads oder der WS-Client-Verwaltung
+kann abweichen. Reine Stress-Tests (`stress_test.py`) finden Abstürze und Lecks,
+prüfen aber **nicht**, ob jede Funktion auf dem neuen Stack noch *korrekt*
+arbeitet. Genau diese Lücke schließt die Mitigation.
+
+### 5.1 Strategie
+- **Branch-basiert rückrollbar** (wie BLE/NimBLE): die `*-esphome`-Versionen
+  bleiben oben notiert; bei Regression Branch verwerfen und zurück-pinnen.
+- **Kleine, prüfbare Schritte**: erst nur `lib_deps`/Flags tauschen und bauen,
+  dann Compile-Fixes, dann funktionale Verifikation, erst zuletzt Stress.
+- **Zwei-stufige Abnahme**: eine **funktionale** Verifikation der
+  migrations-empfindlichen Punkte (5.2) *vor* der bereits vorhandenen
+  **Stress-/Churn**-Abnahme (Abschnitt 6). Funktion zuerst — ein Stack, der
+  unter Last nicht abstürzt, aber Bodies falsch puffert, ist keine Lösung.
+
+### 5.2 Funktions-Verifikationsskript `scripts/verify_tcp_stack.py`
+
+Neues, eigenständiges Skript (reine stdlib, gleiche WS-/HTTP-Helfer wie
+`stress_test.py`). Es **belastet das Gerät nicht**, sondern prüft gezielt die
+**API-Berührungspunkte, die sich durch den Stack-Wechsel verschieben können** —
+jeder Punkt aus 4.1 Schritt 4 bekommt eine eigene Assertion. CI-tauglich:
+Exit-Code 0 = alle Checks grün, 1 = mindestens einer rot.
+
+| ID | Prüft | Migrations-Bezug |
+|---|---|---|
+| T1 | CORS-Header auf jeder Antwort | `DefaultHeaders::Instance().addHeader` |
+| T2 | GET-Routen liefern gültiges JSON | `server.on()`-GET-Pfade |
+| T3 | `/api/log` streamt gültiges JSON-Array (`?n=`, `?n=0`) | `beginChunkedResponse` |
+| T4 | POST-Body erreicht den Handler (kein „missing body") | `onRequestBody` → `_tempObject` → `onNotFound`-Dispatch |
+| T5 | Kein Per-POST-Leck über einen Burst | **Single-Response** (PR-#19-Regression darf nicht zurückkehren) |
+| T6 | Übergroßer POST → 413 | `contentLength()`-Reject in `onNotFound` |
+| T7 | Ungültiges JSON / leerer Body → 400 | saubere Einzelantwort der Handler |
+| T8 | Abgebrochener Body wird freigegeben | `request->onDisconnect()`-Cleanup |
+| T9 | WS-Handshake + `hello`-Snapshot beim Connect | `AsyncWebSocket`-Upgrade + `client->text()` |
+| T10 | WS-Client-Cap wird durchgesetzt | `cleanupClients(WS_MAX_CLIENTS)` |
+
+T5 und T8 vergleichen den Heap (`free_heap` aus `/api/status`) vor/nach einem
+Burst, damit auch ein langsames Leck auffällt. Am Ende prüft das Skript per
+`boot_count`, dass das Gerät während der Checks **nicht rebootet** ist.
+
+Aufruf:
+```
+python3 scripts/verify_tcp_stack.py --host <ip> --ws-max-clients 3
+```
+Wird vor BLE-Verbindung ausgeführt, ist T4 mit `503` (statt `200`) zufrieden —
+entscheidend ist nur, dass der Body ankommt, nicht der BLE-Erfolg.
+
+## 6. Abnahme (muss bestehen, bevor #18 als gelöst gilt)
+
+**Stufe 1 — Funktion** (siehe 5.2): `verify_tcp_stack.py` muss mit Exit-Code 0
+durchlaufen. Erst dann Stufe 2.
+
+**Stufe 2 — Stabilität:** Flashen, `debug heap on`, dann mit
+`scripts/stress_test.py`:
 
 ```
 # WS-Churn — das, was _accept / _lwip_fin vorher zum Absturz brachte
@@ -160,22 +216,24 @@ Pass-Kriterien: kein `REBOOT DETECTED`, kein `Guru Meditation` (insb. kein
 `_accept` / `_lwip_fin`), freier Heap erholt sich, „largest block recovered".
 Der WSDBG-Trace zeigt keine Client-Akkumulation.
 
-## 6. Aufräumen nach Verifikation
+## 7. Aufräumen nach Verifikation
 
 - `WSDBG`-WS-Trace und `WiFiRC:`-Checkpoints (Untersuchungs-Gerüst) entfernen —
   oder gegated lassen; bei Merge entscheiden.
 - `platformio.ini` auf **feste Version-Tags** (nicht floatend) für reproduzier-
   bare Builds setzen.
 
-## 7. Betroffene Dateien (geplant)
+## 8. Betroffene Dateien (geplant)
 
 - `platformio.ini` — `lib_deps` auf ESP32Async, Versions-Pins, ggf.
   `CONFIG_ASYNC_TCP_*`-Flags
 - `src/web/webserver.cpp` / `.h` — API-Anpassungen an den neuen Stack,
   Re-Verifikation des Single-Response-Verhaltens
 - `src/main.cpp` — nicht-blockierender, watchdog-sicherer WiFi-Reconnect
+- `scripts/verify_tcp_stack.py` — **neu**: funktionale Verifikation der
+  migrations-empfindlichen API-Punkte (Risikomitigation, siehe 5.2)
 
-## 8. Referenzen
+## 9. Referenzen
 
 - Crash-Backtraces: #18-Body (`_accept` AsyncTCP.cpp:1421, `_lwip_fin`
   AsyncTCP.cpp:920).
