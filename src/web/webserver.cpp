@@ -323,9 +323,9 @@ void CasambiWebServer::_setupRoutes() {
     });
 
     // Re-read the Casambi cloud configuration using the stored network password.
-    // The download frees the BLE stack, performs a TLS request and reboots, so
-    // it cannot run inside this async handler — we only flag the request and let
-    // the loop task carry it out (see consumeRefreshRequest / performCloudRefresh).
+    // This reboots the device (the download then runs early at the next boot),
+    // so it cannot run inside this async handler — we only flag the request and
+    // let the loop task carry it out (see consumeRefreshRequest).
     _server->on("/api/refreshCasambi", HTTP_POST, [this](AsyncWebServerRequest* request) {
         if (!ConfigStore::hasValidConfig()) {
             _sendJsonError(request, "No configuration found; run setup first", 409);
