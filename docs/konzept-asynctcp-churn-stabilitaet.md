@@ -1,10 +1,19 @@
 # Konzept: Stabilität unter WebSocket-/TCP-Verbindungs-Churn (Issue #18)
 
-Status: **Vorschlag / noch nicht umgesetzt.** Adressiert die in #18 dokumentierten
-Reboots unter hochfrequentem Verbindungs-Churn. Diagnose-Instrumentierung
-(`WSDBG`, `WiFiRC:`) und das Stress-Harness sind bereits in `main` (aus PR #19);
-dieses Konzept beschreibt den **Fix**, nicht die Diagnose.
+Status: **in Umsetzung.** Adressiert die in #18 dokumentierten Reboots unter
+hochfrequentem Verbindungs-Churn. Diagnose-Instrumentierung (`WSDBG`, `WiFiRC:`)
+und das Stress-Harness sind bereits in `main` (aus PR #19).
 Branch: `claude/migrate-async-tcp-stack-esp32async`
+
+**Umsetzungsstand:**
+- ✅ `platformio.ini`: Async-Stack auf `ESP32Async/AsyncTCP#v3.4.10` +
+  `ESP32Async/ESPAsyncWebServer#v3.11.1` umgestellt (feste Git-Tags).
+- ✅ `src/main.cpp`: WiFi-Reconnect ist jetzt nicht-blockierend / watchdog-sicher.
+- ✅ `src/web/webserver.*`: API-Review abgeschlossen — **keine** Quelländerung
+  nötig (alle Berührungspunkte sind über die me-no-dev → ESP32Async-Linie
+  stabil; Details in 4.1.1).
+- ⏳ Ausstehend: Build auf dem PlatformIO-Host + zweistufige Abnahme (Abschnitt 6)
+  auf echter Hardware.
 
 ## 1. Ziel
 
@@ -121,20 +130,52 @@ werden.
      Control-/Invalid-Isolation erneut laufen lassen, damit kein Per-Request-Leck
      zurückkehrt.
 
+#### 4.1.1 Ergebnis des API-Reviews (umgesetzt)
+Der Review aller Berührungspunkte ergab: **keine Quelländerung an
+`src/web/webserver.cpp` / `.h` nötig.** Die ESP32Async-Bibliotheken stammen aus
+derselben me-no-dev-Linie wie die `*-esphome`-Forks; alle genutzten Signaturen
+sind unverändert:
+- `request->_tempObject` (`void*`), `request->onDisconnect(...)`,
+  `request->beginChunkedResponse("application/json", filler)` mit
+  `size_t(uint8_t*, size_t, size_t)`-Lambda — unverändert.
+- `AsyncWebSocket`: `cleanupClients`, `textAll`, `count`, `client->text/close/id`
+  und die Event-Callback-Signatur — unverändert.
+- `DefaultHeaders::Instance().addHeader(...)` — unverändert.
+- Der `HTTP_GET/POST/DELETE`-Makro-Workaround in `webserver.h` (vor dem Include,
+  greift via `#ifndef HTTP_ANY`-Guard der Lib) bleibt gültig: die
+  `WebRequestMethod`-Enumwerte (`GET=1`, `POST=2`, `DELETE=4`) sind identisch.
+
+**Eine relevante Verhaltensänderung** (kein Compile-Bruch): Ab
+ESPAsyncWebServer v3.11.0 ist `CloseClientOnQueueFull` per Default **`false`** —
+ein WS-Client mit voller Sende-Queue wird **nicht** mehr getrennt, sondern die
+Nachricht verworfen. Das passt zu unserem Broadcast-Modell (jede `unit_state`-/
+`connection_state`-Nachricht ist ein **vollständiger** Zustands-Snapshot; eine
+verworfene Nachricht wird von der nächsten korrigiert — dieselbe Drop-Toleranz
+wie unsere `broadcastUnitState`-Queue). Daher **bewusst beim Default belassen**;
+auf der Hardware ist in der Abnahme zu bestätigen, dass ein langsamer Client
+keinen Queue-Aufbau erzeugt (WS-Cap = 3, geringes Broadcast-Volumen).
+
 ### 4.2 WiFi-Reconnect watchdog-sicher machen (gegen B)
 
 Unabhängig vom Library-Tausch und **vorrangig**, da es den harten Reboot in
 einen sanften Retry verwandelt — selbst bei niedrigem Heap.
 
-Aktueller Pfad `checkAndReconnectWiFi()` (`main.cpp:417`) ruft im loopTask
-nacheinander `WiFi.disconnect()` → `delay(100)` → **`WiFi.begin()`** → Warte-
-Schleife. `WiFi.begin()` ist hier die blockierende Stelle.
+Der alte Pfad `checkAndReconnectWiFi()` rief im loopTask nacheinander
+`WiFi.disconnect()` → `delay(100)` → **`WiFi.begin()`** → eine 5-s-Warte-Schleife.
+`WiFi.begin()` war die blockierende Stelle.
 
-Ansatz: **nicht-blockierender Reconnect**, der auf das bereits aktive
-`WiFi.setAutoReconnect(true)` (`main.cpp:238`) setzt, statt `WiFi.begin()` im
-loopTask zu blockieren — der loopTask kehrt sofort zurück und füttert weiter den
-Watchdog; der nächste `checkAndReconnectWiFi()`-Tick prüft den Status erneut.
-Die `WiFiRC:`-Checkpoints bleiben zur Verifikation drin.
+**Umgesetzt** (`src/main.cpp`): nicht-blockierender Reconnect.
+- Die blockierende `begin()`+Warte-Schleife ist **entfernt**.
+- Primäre Recovery über das bereits beim Erstconnect aktive
+  `WiFi.setAutoReconnect(true)` (`main.cpp:238`) — der IDF-WiFi-Task verbindet
+  selbst neu.
+- Pro 30-s-Tick nur ein **nicht-blockierender Nudge** via `WiFi.reconnect()`
+  (nutzt die gespeicherte Config, leichter als `begin()`, kehrt sofort zurück);
+  der neue Status wird auf einem späteren Tick beobachtet, nicht hier abgewartet.
+- Die Nacharbeiten bei Wiederverbindung (NTP-Re-Arm, defensiver Web-Server-
+  Restart) laufen jetzt **einmalig** beim Übergang *disconnected → connected*.
+- Die `WiFiRC:`-Checkpoints bleiben zur Verifikation drin (jetzt
+  `-> reconnect() [non-blocking]` bzw. `<- reconnected`).
 
 > Hinweis: Da (B) heap-getrieben ist, kann der Leak-Fix aus PR #19 den Auslöser
 > bereits entschärfen. Der watchdog-sichere Reconnect ist dennoch nötig, weil er
