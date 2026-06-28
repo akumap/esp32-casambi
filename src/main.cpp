@@ -426,7 +426,7 @@ void checkAndReconnectWiFi() {
         if (!g_wifiWasConnected) {
             g_wifiWasConnected = true;
             Serial.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
-            Serial.println("WiFiRC: <- reconnected");
+            if (heapDebugEnabled) Serial.println("WiFiRC: <- reconnected");
             EventLog::log(LOG_INFO, "WiFi reconnected (SSID %s)", WiFi.SSID().c_str());
             syncTime();  // re-arm NTP after reconnect
 
@@ -462,10 +462,12 @@ void checkAndReconnectWiFi() {
     //   * We only give it a periodic nudge via WiFi.reconnect(), which reuses
     //     the stored config (lighter than begin()) and returns immediately;
     //     the new status is observed on a later tick, not awaited here.
-    // The WiFiRC: checkpoints are kept so a future stall (if any) is still
-    // localizable from the last line printed before a reboot.
+    // The WiFiRC: checkpoints are kept (gated behind 'debug heap on', like WSDBG)
+    // so a future stall (if any) is still localizable from the last line printed
+    // before a reboot. The esp_task_wdt_reset() calls stay UNCONDITIONAL — they
+    // feed the watchdog and are functional, not diagnostics.
     esp_task_wdt_reset();
-    Serial.println("WiFiRC: -> reconnect() [non-blocking]");
+    if (heapDebugEnabled) Serial.println("WiFiRC: -> reconnect() [non-blocking]");
     WiFi.reconnect();
     esp_task_wdt_reset();
 }

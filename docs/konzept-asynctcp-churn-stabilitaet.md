@@ -301,10 +301,15 @@ verhindert den `WiFi.begin()`-WDT-Hang. Damit ist #18 inhaltlich gelöst.
 
 ## 7. Aufräumen nach Verifikation
 
-- ⏳ **Entscheidung offen:** `WSDBG`-WS-Trace (hinter `debug heap on`) und die
-  `WiFiRC:`-Checkpoints (in `main.cpp` unbedingt geloggt) — entfernen oder
-  gegated lassen? Bei Merge entscheiden.
-- ✅ `platformio.ini` auf feste Version-Tags gepinnt (erledigt).
+- ✅ Diagnose-Instrumentierung **gegated statt entfernt**: `WSDBG` bleibt hinter
+  `debug heap on`; die zuvor unbedingten `WiFiRC:`-Prints laufen jetzt ebenfalls
+  hinter `heapDebugEnabled` (`debug heap on`). Die `esp_task_wdt_reset()`-Aufrufe
+  im Reconnect bleiben unbedingt (Funktion, kein Debug). So bleibt das
+  #18-Toolkit für künftige Analysen reaktivierbar, ohne Produktions-Rauschen.
+- ✅ `platformio.ini` auf feste Version-Tags gepinnt.
+- ✅ `README.md`: veraltete Instabilitäts-Hinweise (ESPAsyncWebServer-Crash unter
+  Polling, „nicht öfter als 1×/min pollen") entfernt; durch eine korrekte Notiz
+  zum stresstesteten ESP32Async-Stack ersetzt.
 
 ## 8. Betroffene Dateien (geplant)
 

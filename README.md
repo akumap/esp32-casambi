@@ -517,9 +517,14 @@ This is the same formula used by the REST `/api/units` endpoint.
 
 ### Stability
 
-- **Spontaneous reboots** have been observed under certain conditions. The most likely cause is the ESPAsyncWebServer library crashing under regular HTTP polling. Avoid polling more frequently than once per minute. A BLE-level keepalive (`readValue()`) is a more robust alternative to HTTP polling for connection monitoring.
+- **Web server / WebSocket load:** The HTTP + WebSocket stack runs on the
+  maintained [ESP32Async](https://github.com/ESP32Async) libraries and is
+  stress-tested (see `scripts/stress_test.py` and `scripts/verify_tcp_stack.py`).
+  It stays stable under heavy concurrent HTTP/WebSocket load with full heap
+  recovery, so HTTP polling at normal rates is fine and no polling-rate limit is
+  required.
 - **Long-term BLE stability** has not been exhaustively tested. The auto-reconnect mechanism mitigates most connection drops, but edge cases may exist.
-- The **hardware watchdog** (30s) and **heap monitoring** provide safety nets against hangs and memory leaks, but do not address root causes.
+- The **hardware watchdog** (30s) and **heap monitoring** provide safety nets against hangs and memory leaks.
 
 ### Untested or Partially Tested Features
 
@@ -679,8 +684,7 @@ The network password entered during `setup` is stored and reused automatically, 
 ### Spontaneous Reboots
 
 - Ensure PSRAM flags are **not** set in `platformio.ini` for boards without PSRAM
-- ESPAsyncWebServer can crash under frequent HTTP requests — avoid polling more than once per minute
-- Check `status` for heap values; decreasing free heap indicates a memory leak
+- Check `status` for heap values; a steadily decreasing free heap indicates a memory leak
 - Build with `pio run -e debug` for full stack traces on crash
 
 ### Control Issues
