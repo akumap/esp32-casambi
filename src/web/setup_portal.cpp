@@ -342,7 +342,7 @@ void SetupPortal::_runProvision() {
     }
     if (WiFi.status() != WL_CONNECTED) {
         _prov = ProvState::Error;
-        _provMsg = "WLAN-Verbindung fehlgeschlagen";
+        _provMsg = "Wi-Fi connection failed";
         return;
     }
     Serial.printf("Portal: WiFi connected, IP %s\n", WiFi.localIP().toString().c_str());
@@ -358,7 +358,7 @@ void SetupPortal::_runProvision() {
     }
     if (candidates.empty()) {
         _prov = ProvState::Error;
-        _provMsg = "Kein Casambi-Gateway gefunden";
+        _provMsg = "No Casambi gateway found";
         return;
     }
 
@@ -387,7 +387,7 @@ void SetupPortal::_runProvision() {
 
     if (!ok) {
         _prov = ProvState::Error;
-        _provMsg = "Authentifizierung/Cloud fehlgeschlagen";
+        _provMsg = "Authentication/cloud request failed";
         if (lastErr.length()) _provMsg += ": " + lastErr;
         return;
     }
@@ -404,12 +404,12 @@ void SetupPortal::_runProvision() {
 
     if (!ConfigStore::saveNetworkConfig(cfg)) {
         _prov = ProvState::Error;
-        _provMsg = "Speichern fehlgeschlagen";
+        _provMsg = "Saving configuration failed";
         return;
     }
 
     _provNetworkName = cfg.networkName;
-    _provMsg = "Fertig";
+    _provMsg = "Done";
     _prov = ProvState::Done;
     _rebootAt = millis() + 4000;       // let the browser poll the success state
     Serial.printf("Portal: provisioned network '%s'\n", cfg.networkName.c_str());

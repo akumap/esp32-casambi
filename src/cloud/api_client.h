@@ -9,6 +9,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "network_config.h"
@@ -69,7 +70,17 @@ public:
 
 private:
     String _lastError;
+    WiFiClientSecure _tls;   // server-authenticated transport for the cloud API
     HTTPClient _http;
+
+    /**
+     * Begin an HTTPS request with the TLS transport configured for server-
+     * certificate validation (or setInsecure() when built with
+     * -DCASAMBI_TLS_INSECURE). Must be called instead of _http.begin(url) so the
+     * Casambi password / session token never travel over an unauthenticated
+     * channel. Always paired with _http.end() like the previous begin() calls.
+     */
+    void _beginRequest(const String& url);
 
     /**
      * Parse network configuration JSON

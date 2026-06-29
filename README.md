@@ -585,6 +585,20 @@ unauthorized LAN devices and cross-origin browser scripts out. Because the LAN
 HTTP/WebSocket traffic is **not** TLS-encrypted, it does not defend against an
 attacker who can already passively sniff your network.
 
+### Cloud API transport (TLS)
+The connection to `api.casambi.com` — used during setup and on `refresh`, and
+carrying the Casambi network password and session token — is HTTPS with the
+**server certificate validated against the Mozilla root-CA bundle** embedded in
+the arduino-esp32 core (`api_client.cpp`). This authenticates the cloud endpoint
+and prevents a man-in-the-middle from capturing the network password. Validation
+uses the full root bundle rather than a pinned certificate, so it keeps working
+when Casambi rotates its CA.
+
+> If a particular core build does not export the bundle symbol and the cloud
+> calls fail to compile/link, you can build with `-DCASAMBI_TLS_INSECURE` to fall
+> back to the previous, unauthenticated behaviour. This re-opens the cloud
+> channel to MITM and is logged loudly at runtime — avoid it for production.
+
 ### Sensitive data at rest
 Wi-Fi credentials (`/wifi_config.json`) and the Casambi AES keys plus network
 password (`/casambi_config.json`) are stored in the LittleFS partition as

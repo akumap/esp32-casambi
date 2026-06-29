@@ -184,6 +184,16 @@
 #define API_NETWORK_SESSION_PATH  "/network/"
 #define API_NETWORK_CONFIG_PATH   "/network/"
 
+// Cloud TLS: the requests above carry the Casambi network password and the
+// session token, so the HTTPS server certificate is validated against the
+// Mozilla root-CA bundle embedded in the arduino-esp32 core (see
+// api_client.cpp). This is the default and requires no configuration here.
+//
+// Escape hatch: building with -DCASAMBI_TLS_INSECURE disables that validation
+// (restores the old, MITM-exposed behaviour) for core builds that do not export
+// the bundle symbol. It is logged loudly at runtime and should not be used in
+// production.
+
 // ============================================================================
 // GLOBAL FLAGS
 // ============================================================================

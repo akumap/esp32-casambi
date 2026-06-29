@@ -5,7 +5,36 @@
 #include "api_client.h"
 #include <ArduinoJson.h>
 
+#ifndef CASAMBI_TLS_INSECURE
+// Mozilla root-CA bundle embedded by the arduino-esp32 core. Validating against
+// the whole bundle (instead of pinning one certificate) authenticates
+// api.casambi.com without breaking when Casambi rotates its CA. If a particular
+// core build does not export this symbol, build with -DCASAMBI_TLS_INSECURE to
+// fall back to the previous (unauthenticated) behaviour.
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
+#endif
+
 CasambiAPIClient::CasambiAPIClient() {
+}
+
+void CasambiAPIClient::_beginRequest(const String& url) {
+#ifdef CASAMBI_TLS_INSECURE
+    // Explicit opt-out: no server-certificate validation. The cloud channel
+    // carries the Casambi password and is then exposed to MITM — only for
+    // builds where the CA bundle is unavailable.
+    static bool warned = false;
+    if (!warned) {
+        Serial.println("API: WARNING - TLS certificate validation DISABLED "
+                       "(CASAMBI_TLS_INSECURE)");
+        warned = true;
+    }
+    _tls.setInsecure();
+#else
+    // Server-authenticated TLS: reject any certificate that does not chain to a
+    // trusted root in the embedded bundle.
+    _tls.setCACertBundle(rootca_crt_bundle_start);
+#endif
+    _http.begin(_tls, url);
 }
 
 CasambiAPIClient::~CasambiAPIClient() {
@@ -52,7 +81,7 @@ bool CasambiAPIClient::getNetworkId(const String& uuid, String& networkId) {
 
     Serial.printf("API: GET %s\n", url.c_str());
 
-    _http.begin(url);
+    _beginRequest(url);
     _http.setTimeout(API_REQUEST_TIMEOUT_MS);
 
     int httpCode = _http.GET();
@@ -106,7 +135,7 @@ bool CasambiAPIClient::createSession(const String& networkId, const String& pass
     String requestBody;
     serializeJson(doc, requestBody);
 
-    _http.begin(url);
+    _beginRequest(url);
     _http.setTimeout(API_REQUEST_TIMEOUT_MS);
     _http.addHeader("Content-Type", "application/json");
 
@@ -167,7 +196,7 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
     String requestBody;
     serializeJson(doc, requestBody);
 
-    _http.begin(url);
+    _beginRequest(url);
     _http.setTimeout(API_REQUEST_TIMEOUT_MS);
     _http.addHeader("Content-Type", "application/json");
     _http.addHeader("X-Casambi-Session", sessionToken);
