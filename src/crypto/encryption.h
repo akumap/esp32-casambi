@@ -47,6 +47,14 @@ public:
         size_t headerLen = PACKET_HEADER_LEN
     );
 
+    /**
+     * Validate the AES-CMAC implementation against the official RFC 4493
+     * Appendix D test vectors (subkey generation + MAC over the 0/16/40/64-byte
+     * example messages). Returns true if all vectors match. Intended as a
+     * one-shot boot self-test; logs a message on failure.
+     */
+    static bool selfTestRFC4493();
+
 private:
     uint8_t _key[AES_KEY_SIZE];
 

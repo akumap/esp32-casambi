@@ -79,6 +79,14 @@ public:
     bool consumeRefreshRequest();
 
     /**
+     * Check (and clear) whether a reboot was requested via POST /api/reboot.
+     * The async handler must not call ESP.restart()/delay() itself (it would
+     * block the TCP task before the response is flushed), so it only flags the
+     * request and the loop task carries it out. Returns true exactly once.
+     */
+    bool consumeRebootRequest();
+
+    /**
      * Broadcast a unit state change to all connected WebSocket clients.
      * Enriches the message with vertical/colorTemp/cctMin/cctMax from NetworkConfig
      * (already updated before this callback fires).
@@ -113,12 +121,36 @@ private:
     // web-server context and read from the main loop.
     volatile bool _refreshRequested;
 
+    // Set by POST /api/reboot, drained by the loop task via consumeRebootRequest().
+    volatile bool _rebootRequested;
+
+    // Derived API token (hex of SHA-256(prefix||casambiPassword)). Empty string
+    // means authentication is disabled (no Casambi password stored). Computed
+    // once in begin().
+    String _apiToken;
+
     // Queue of String* broadcast messages posted from the BLE task and drained
     // by loop() so _ws->textAll() is always called from the loop task.
     QueueHandle_t _broadcastQueue;
 
     // Setup route handlers
     void _setupRoutes();
+
+    // Authentication ---------------------------------------------------------
+    // Derive _apiToken from the stored Casambi password (no-op → empty token,
+    // i.e. auth disabled, when no password is stored).
+    void _deriveApiToken();
+    // Reject the request with 401 unless the X-API-Key header matches the token
+    // (or auth is disabled). Returns true when the request may proceed; on
+    // failure it has already sent the 401 response. Frees a buffered POST body
+    // (_tempObject) so an unauthenticated POST does not leak it.
+    bool _authOk(AsyncWebServerRequest* request);
+    // Same check for the WebSocket upgrade, used as the handler filter. Accepts
+    // the token via X-API-Key header or "?k=" query param (browsers cannot set
+    // custom headers on a WebSocket handshake). Does not send a response.
+    bool _wsAuthOk(AsyncWebServerRequest* request) const;
+    // Constant-time string compare (no early exit) to avoid a timing oracle.
+    static bool _constantTimeEquals(const String& a, const String& b);
 
     // Status endpoints
     void _handleGetStatus(AsyncWebServerRequest* request);

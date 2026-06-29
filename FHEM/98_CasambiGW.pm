@@ -1,6 +1,7 @@
 package main;
 use JSON;
 use MIME::Base64;
+use Digest::SHA qw(sha256_hex);
 
 # ============================================================================
 # CasambiGW — FHEM gateway module for the ESP32 Casambi BLE bridge
@@ -54,9 +55,39 @@ sub CasambiGW_Initialize {
     $hash->{SetFn}    = "CasambiGW_Set";
     $hash->{ReadFn}   = "CasambiGW_Read";
     $hash->{ReadyFn}  = "CasambiGW_Ready";
-    $hash->{AttrList} = "autocreate:0,1 deleteRemovedUnits:0,1 "
+    $hash->{AttrList} = "autocreate:0,1 deleteRemovedUnits:0,1 casambiPassword "
                       . $readingFnAttributes;
     return undef;
+}
+
+# ============================================================================
+# API authentication
+#
+# The ESP32 protects its REST/WebSocket API once a Casambi network password is
+# stored. The token sent on every request is NOT the raw password but a derived
+# value that the ESP computes the same way:
+#   apiToken = hex( SHA-256( "casambi-api:" . <password> ) )
+# Configure the password via:  attr <gw> casambiPassword <casambi-network-pw>
+# Returns "" when no password is set (then the ESP must also be running without
+# auth, e.g. a config predating this feature).
+# ============================================================================
+
+sub CasambiGW_ApiToken {
+    my $hash = shift;
+    my $pw   = AttrVal($hash->{NAME}, "casambiPassword", "");
+    return "" if !defined $pw || $pw eq "";
+    return sha256_hex("casambi-api:" . $pw);
+}
+
+# Build an HTTP header string for HttpUtils, appending the X-API-Key line when a
+# token is configured. $base may be undef/empty.
+sub CasambiGW_AuthHeader {
+    my ($hash, $base) = @_;
+    my $token = CasambiGW_ApiToken($hash);
+    my @lines;
+    push @lines, $base if defined $base && $base ne "";
+    push @lines, "X-API-Key: $token" if $token ne "";
+    return join("\r\n", @lines);
 }
 
 # ============================================================================
@@ -242,7 +273,7 @@ sub CasambiGW_RefreshCasambi {
         url      => $url,
         timeout  => 10,
         method   => "POST",
-        header   => "Content-Type: application/json",
+        header   => CasambiGW_AuthHeader($hash, "Content-Type: application/json"),
         data     => "{}",
         hash     => $hash,
         callback => sub {
@@ -278,13 +309,16 @@ sub CasambiGW_WsHandshake {
     my $key = encode_base64(pack("C16", map { int(rand(256)) } 1..16), "");
     $hash->{wsKey} = $key;
 
-    my $host = $hash->{GW_IP};
+    my $host  = $hash->{GW_IP};
+    my $token = CasambiGW_ApiToken($hash);
+    my $auth  = $token ne "" ? "X-API-Key: $token\r\n" : "";
     my $req  = "GET /ws HTTP/1.1\r\n"
              . "Host: $host\r\n"
              . "Upgrade: websocket\r\n"
              . "Connection: Upgrade\r\n"
              . "Sec-WebSocket-Key: $key\r\n"
              . "Sec-WebSocket-Version: 13\r\n"
+             . $auth
              . "\r\n";
     DevIo_SimpleWrite($hash, $req, 0);
     Log3 $name, 4, "$name: WebSocket handshake sent";
@@ -681,6 +715,16 @@ sub CasambiGW_CreateUnit {
     $devName =~ s/\s+/_/g;
     $devName =~ s/[^a-zA-Z0-9_\-\.]//g;
 
+    # Validate the MAC before interpolating it into a fhem() command. The
+    # address comes from the network config / hello message; rejecting anything
+    # that is not a plain colon-separated MAC prevents command injection via a
+    # crafted address field.
+    if ($mac !~ /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i) {
+        Log3 $name, 2,
+            "$name: refusing to create unit '$raw' — invalid MAC address '$mac'";
+        return undef;
+    }
+
     # Ensure uniqueness
     my $base = $devName;
     my $i    = 2;
@@ -730,7 +774,7 @@ sub CasambiGW_SendCommand {
         url      => $url,
         timeout  => 5,
         method   => "POST",
-        header   => "Content-Type: application/json",
+        header   => CasambiGW_AuthHeader($gwHash, "Content-Type: application/json"),
         data     => $json,
         callback => sub {
             my ($param, $err, $data) = @_;

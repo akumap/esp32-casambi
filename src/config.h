@@ -90,6 +90,22 @@
 #define ECDH_KEY_SIZE             32
 
 // ============================================================================
+// WEB API AUTHENTICATION
+// ============================================================================
+
+// HTTP header carrying the API token on every protected REST request and on
+// the WebSocket upgrade.
+#define API_KEY_HEADER            "X-API-Key"
+
+// Domain-separation prefix mixed into the token derivation so the value on the
+// wire is NOT the raw Casambi cloud password:
+//   apiToken = hex( SHA-256( API_TOKEN_PREFIX || casambiPassword ) )
+// FHEM derives the same token from the password the user configures. Auth is
+// only enforced when a Casambi password is stored (empty password = open, e.g.
+// for old configs predating this field).
+#define API_TOKEN_PREFIX          "casambi-api:"
+
+// ============================================================================
 // TIMEOUTS
 // ============================================================================
 

@@ -10,12 +10,13 @@
 #include <WiFi.h>
 #include <time.h>
 #include <memory>
+#include <mbedtls/sha256.h>
 
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
 
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
-      _refreshRequested(false), _broadcastQueue(nullptr) {
+      _refreshRequested(false), _rebootRequested(false), _broadcastQueue(nullptr) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
 }
 
@@ -31,11 +32,26 @@ bool CasambiWebServer::begin(uint16_t port) {
 
     _server = new AsyncWebServer(port);
 
+    // Derive the API token from the stored Casambi password. Empty when no
+    // password is stored → authentication stays disabled (backward compatible).
+    _deriveApiToken();
+    if (_apiToken.isEmpty()) {
+        Serial.println("Web: API auth DISABLED (no Casambi password stored)");
+    } else {
+        WEB_LOG("Web: API auth enabled (X-API-Key required)\n");
+    }
+
     // Create WebSocket endpoint
     _ws = new AsyncWebSocket("/ws");
     _ws->onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client,
                         AwsEventType type, void* arg, uint8_t* data, size_t len) {
         _handleWebSocketEvent(server, client, type, arg, data, len);
+    });
+    // Gate the WebSocket upgrade on the API token. A rejected handshake is not
+    // handled here and falls through to onNotFound (the client then sees a
+    // non-101 response and retries via /api/info — see the FHEM module).
+    _ws->setFilter([this](AsyncWebServerRequest* request) {
+        return _wsAuthOk(request);
     });
     _server->addHandler(_ws);
 
@@ -94,6 +110,82 @@ bool CasambiWebServer::consumeRefreshRequest() {
     if (!_refreshRequested) return false;
     _refreshRequested = false;
     return true;
+}
+
+bool CasambiWebServer::consumeRebootRequest() {
+    if (!_rebootRequested) return false;
+    _rebootRequested = false;
+    return true;
+}
+
+// ============================================================================
+// Authentication
+// ============================================================================
+
+void CasambiWebServer::_deriveApiToken() {
+    _apiToken = "";
+    if (!_config || _config->casambiPassword.isEmpty()) return;
+
+    // apiToken = hex( SHA-256( API_TOKEN_PREFIX || casambiPassword ) )
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);   // 0 = SHA-256 (not SHA-224)
+    mbedtls_sha256_update(&ctx, (const uint8_t*)API_TOKEN_PREFIX, strlen(API_TOKEN_PREFIX));
+    mbedtls_sha256_update(&ctx, (const uint8_t*)_config->casambiPassword.c_str(),
+                          _config->casambiPassword.length());
+    uint8_t hash[32];
+    mbedtls_sha256_finish(&ctx, hash);
+    mbedtls_sha256_free(&ctx);
+
+    char hex[sizeof(hash) * 2 + 1];
+    for (size_t i = 0; i < sizeof(hash); i++) sprintf(hex + i * 2, "%02x", hash[i]);
+    hex[sizeof(hash) * 2] = '\0';
+    _apiToken = String(hex);
+}
+
+bool CasambiWebServer::_constantTimeEquals(const String& a, const String& b) {
+    // Compare without an early exit so the time taken does not reveal how many
+    // leading characters matched. Length mismatch still short-circuits (lengths
+    // are not secret), but equal-length comparisons run in constant time.
+    if (a.length() != b.length()) return false;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < a.length(); i++) diff |= (uint8_t)a[i] ^ (uint8_t)b[i];
+    return diff == 0;
+}
+
+bool CasambiWebServer::_authOk(AsyncWebServerRequest* request) {
+    if (_apiToken.isEmpty()) return true;  // auth disabled
+
+    if (request->hasHeader(API_KEY_HEADER) &&
+        _constantTimeEquals(request->header(API_KEY_HEADER), _apiToken)) {
+        return true;
+    }
+
+    // An unauthenticated POST may already have a buffered body in _tempObject
+    // (onRequestBody runs before this dispatch). Free it here so the rejected
+    // request does not leak it.
+    if (request->_tempObject) {
+        delete static_cast<String*>(request->_tempObject);
+        request->_tempObject = nullptr;
+    }
+    WEB_LOG("Web: 401 unauthenticated request to %s\n", request->url().c_str());
+    _sendJsonError(request, "Unauthorized", 401);
+    return false;
+}
+
+bool CasambiWebServer::_wsAuthOk(AsyncWebServerRequest* request) const {
+    if (_apiToken.isEmpty()) return true;  // auth disabled
+    if (request->hasHeader(API_KEY_HEADER) &&
+        _constantTimeEquals(request->header(API_KEY_HEADER), _apiToken)) {
+        return true;
+    }
+    // Browsers cannot set custom headers on a WebSocket handshake; allow the
+    // token as a query parameter too (?k=<token>).
+    if (request->hasParam("k") &&
+        _constantTimeEquals(request->getParam("k")->value(), _apiToken)) {
+        return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -267,20 +359,20 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
 }
 
 void CasambiWebServer::_setupRoutes() {
-    // Enable CORS for all endpoints
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
+    // No CORS headers: the control API is not meant to be called from arbitrary
+    // browser origins. Omitting Access-Control-Allow-Origin makes browsers block
+    // cross-origin JavaScript (closing the wildcard-CORS access path); FHEM and
+    // other same-origin/non-browser clients are unaffected.
 
     // Discovery: lets FHEM tell a configured gateway apart from one still in
     // setup mode (the portal serves the same path with configured:false).
+    // Intentionally LEFT UNAUTHENTICATED so discovery works before the client
+    // knows the token — but reduced to the two fields FHEM actually needs, so it
+    // no longer leaks network name / MAC / IP without auth.
     _server->on("/api/info", HTTP_GET, [this](AsyncWebServerRequest* request) {
         JsonDocument d;
         d["configured"] = true;
         d["build"]      = FIRMWARE_BUILD;
-        d["network"]    = _config->networkName;
-        d["mac"]        = WiFi.macAddress();
-        d["ip"]         = WiFi.localIP().toString();
         String out; serializeJson(d, out);
         request->send(200, "application/json", out);
     });
@@ -315,11 +407,13 @@ void CasambiWebServer::_setupRoutes() {
         _handleGetNtp(request);
     });
 
-    // Reboot endpoint
+    // Reboot endpoint. Only flag the request and let the loop task restart;
+    // calling delay()/ESP.restart() here would block the TCP task before the
+    // response is flushed (same pattern as refreshCasambi below).
     _server->on("/api/reboot", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (!_authOk(request)) return;
+        _rebootRequested = true;
         request->send(200, "application/json", "{\"status\":\"rebooting\"}");
-        delay(1000);
-        ESP.restart();
     });
 
     // Re-read the Casambi cloud configuration using the stored network password.
@@ -327,6 +421,7 @@ void CasambiWebServer::_setupRoutes() {
     // so it cannot run inside this async handler — we only flag the request and
     // let the loop task carry it out (see consumeRefreshRequest).
     _server->on("/api/refreshCasambi", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (!_authOk(request)) return;
         if (!ConfigStore::hasValidConfig()) {
             _sendJsonError(request, "No configuration found; run setup first", 409);
             return;
@@ -352,6 +447,10 @@ void CasambiWebServer::_setupRoutes() {
             _sendJsonError(request, "Endpoint not found", 404);
             return;
         }
+
+        // Single auth gate for every dynamic POST control route (scenes/units/
+        // groups/ntp). _authOk frees any buffered body before rejecting.
+        if (!_authOk(request)) return;
 
         String path = request->url();
 
@@ -474,6 +573,7 @@ void CasambiWebServer::_setupRoutes() {
 // ============================================================================
 
 void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
     JsonDocument doc;
 
     doc["ble_connected"] = _client->isAuthenticated();
@@ -523,6 +623,7 @@ WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
 }
 
 void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
     WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
     JsonDocument doc;
     JsonArray units = doc["units"].to<JsonArray>();
@@ -549,6 +650,7 @@ void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleGetGroups(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
     JsonDocument doc;
     JsonArray groups = doc["groups"].to<JsonArray>();
 
@@ -569,6 +671,7 @@ void CasambiWebServer::_handleGetGroups(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleGetScenes(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
     JsonDocument doc;
     JsonArray scenes = doc["scenes"].to<JsonArray>();
 
@@ -688,6 +791,7 @@ struct LogJsonSource {
 }  // namespace
 
 void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
     WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
 
     // Default to the newest 25 entries (~3.5 KB JSON) so a plain GET fits in a
@@ -718,6 +822,7 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleDeleteLog(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
     WEB_LOG("Web: DELETE /api/log from %s\n", _getClientIP(request).c_str());
     EventLog::clear();
     _sendJsonSuccess(request);
@@ -728,6 +833,7 @@ void CasambiWebServer::_handleDeleteLog(AsyncWebServerRequest* request) {
 // ============================================================================
 
 void CasambiWebServer::_handleGetNtp(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
     JsonDocument doc;
     doc["ntp_server"] = _config->ntpServer;
 
@@ -1407,8 +1513,8 @@ void CasambiWebServer::_sendJsonSuccess(AsyncWebServerRequest* request) {
 }
 
 String CasambiWebServer::_getClientIP(AsyncWebServerRequest* request) {
-    if (request->hasHeader("X-Forwarded-For")) {
-        return request->header("X-Forwarded-For");
-    }
+    // Use the real peer address only. X-Forwarded-For is attacker-controlled
+    // (any client can set it) and there is no trusted reverse proxy in front of
+    // this device, so honoring it would just let clients spoof the IP in logs.
     return request->client()->remoteIP().toString();
 }

@@ -15,6 +15,7 @@
 #include "cloud/api_client.h"
 #include "storage/config_store.h"
 #include "ble/casambi_client.h"
+#include "crypto/encryption.h"
 #include "web/webserver.h"
 #include "web/setup_portal.h"
 #include "log/event_log.h"
@@ -152,6 +153,15 @@ void setup() {
     // Initialize the non-volatile event log. This flushes any RTC "last words"
     // from a previous crash into LittleFS and records this boot's reset reason.
     EventLog::begin();
+
+    // Validate the AES-CMAC implementation against the RFC 4493 test vectors
+    // once at boot. A failure here means the BLE crypto cannot be trusted.
+    if (CasambiEncryption::selfTestRFC4493()) {
+        Serial.println("CMAC self-test: PASS (RFC 4493 vectors)");
+    } else {
+        Serial.println("CMAC self-test: FAIL — BLE crypto is broken!");
+        EventLog::log(LOG_ERROR, "CMAC self-test failed (RFC 4493)");
+    }
 
     // Check if we have configuration
     if (ConfigStore::hasValidConfig()) {
@@ -370,6 +380,15 @@ void loop() {
         if (webServer->consumeRefreshRequest()) {
             Serial.println("\n*** Cloud refresh requested via API ***");
             requestCloudRefresh(networkConfig.casambiPassword);  // never returns
+        }
+
+        // Reboot requested via POST /api/reboot. Carried out here (not in the
+        // async handler) so the HTTP response is flushed first. The short delay
+        // gives the TCP task time to send the queued 200 before the reset.
+        if (webServer->consumeRebootRequest()) {
+            Serial.println("\n*** Reboot requested via API ***");
+            delay(250);
+            ESP.restart();
         }
     }
 
@@ -821,7 +840,14 @@ void runScheduledCloudRefresh() {
 // ============================================================================
 
 void handleCommand(const String& cmd) {
-	Serial.printf(">>> CMD: %s\n", cmd.c_str());
+	// Echo the command, but never log credentials. `wifi set <ssid> <password>`
+	// carries the WiFi password as a plain argument, so mask everything after
+	// the subcommand for password-bearing commands.
+	if (cmd.startsWith("wifi set")) {
+		Serial.println(">>> CMD: wifi set <redacted>");
+	} else {
+		Serial.printf(">>> CMD: %s\n", cmd.c_str());
+	}
         if (cmd == "help") {
             Serial.println("\n=== Commands ===");
             Serial.println("help          - Show this help");
