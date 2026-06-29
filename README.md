@@ -32,7 +32,6 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 ### ESP32 Boards
 
 - [AZDelivery ESP32 Dev Kit C V4](https://www.amazon.de/dp/B07Z83MF5W) — Primary development and test board (PSRAM not required)
-- [ESP32-C3 Super Mini](https://www.amazon.de/dp/B0DMNBWTFD) — Compact alternative
 
 ### Build Host
 
@@ -75,9 +74,6 @@ The controller should work with any Casambi-enabled luminaire. Capabilities are 
    ```bash
    # For ESP32 Dev Kit V4 (default)
    pio run -e devkit-v4 -t upload
-   
-   # For ESP32-C3 Super Mini
-   pio run -e esp32-c3 -t upload
    ```
 1. **Open serial monitor:**
    
@@ -818,7 +814,6 @@ The actual cloud download runs early on the **next boot**, before the BLE stack 
 |Environment|Purpose                                          |
 |-----------|-------------------------------------------------|
 |`devkit-v4`|ESP32 Dev Kit V4 (default)                       |
-|`esp32-c3` |ESP32-C3 Super Mini                              |
 |`debug`    |Verbose logging, debug symbols, exception decoder|
 |`release`  |Size-optimized production build                  |
 
