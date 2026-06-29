@@ -614,7 +614,10 @@ is caught immediately rather than silently failing BLE authentication.
   stress-tested (see `scripts/stress_test.py` and `scripts/verify_tcp_stack.py`).
   It stays stable under heavy concurrent HTTP/WebSocket load with full heap
   recovery, so HTTP polling at normal rates is fine and no polling-rate limit is
-  required.
+  required. When the device has auth enabled, pass the Casambi password to the
+  scripts so they can reach the protected endpoints, e.g.
+  `python3 scripts/stress_test.py --host <ip> --password <casambi-pw>`
+  (both scripts also accept a pre-derived `--token`).
 - **Long-term BLE stability** has not been exhaustively tested. The auto-reconnect mechanism mitigates most connection drops, but edge cases may exist.
 - The **hardware watchdog** (30s) and **heap monitoring** provide safety nets against hangs and memory leaks.
 

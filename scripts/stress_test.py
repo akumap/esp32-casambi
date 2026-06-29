@@ -43,6 +43,7 @@ Overrides (take precedence over the profile):
 import argparse
 import base64
 import collections
+import hashlib
 import http.client
 import json
 import os
@@ -194,6 +195,28 @@ stop_evt = threading.Event()   # set when active load should stop
 
 
 # ---------------------------------------------------------------------------
+# API authentication
+# ---------------------------------------------------------------------------
+# When the device has a Casambi password stored, every endpoint except
+# /api/info requires the X-API-Key token (and so does the WebSocket upgrade).
+# API_TOKEN is set from --password/--token in main(); None = no auth (open
+# device, backward compatible).
+API_TOKEN = None
+
+
+def derive_token(password):
+    """apiToken = hex(SHA-256("casambi-api:" + password)) — same as the firmware."""
+    return hashlib.sha256(("casambi-api:" + password).encode()).hexdigest()
+
+
+def _auth_headers(base=None):
+    h = dict(base) if base else {}
+    if API_TOKEN:
+        h["X-API-Key"] = API_TOKEN
+    return h
+
+
+# ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only — no external dependencies)
 # ---------------------------------------------------------------------------
 
@@ -201,7 +224,7 @@ def http_get(host, port, path, timeout=5):
     t0 = time.monotonic()
     try:
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
-        conn.request("GET", path, headers={"Connection": "close"})
+        conn.request("GET", path, headers=_auth_headers({"Connection": "close"}))
         resp = conn.getresponse()
         body = resp.read()
         conn.close()
@@ -216,11 +239,11 @@ def http_post(host, port, path, body_bytes, timeout=5):
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
         conn.request(
             "POST", path, body=body_bytes,
-            headers={
+            headers=_auth_headers({
                 "Content-Type":   "application/json",
                 "Content-Length": str(len(body_bytes)),
                 "Connection":     "close",
-            },
+            }),
         )
         resp = conn.getresponse()
         resp.read()
@@ -236,11 +259,13 @@ def http_post_abort(host, port, path, partial_body):
     try:
         s = socket.create_connection((host, port), timeout=3)
         claimed_len = len(partial_body) + 300
+        auth = f"X-API-Key: {API_TOKEN}\r\n" if API_TOKEN else ""
         header = (
             f"POST {path} HTTP/1.1\r\n"
             f"Host: {host}:{port}\r\n"
             f"Content-Type: application/json\r\n"
             f"Content-Length: {claimed_len}\r\n"
+            f"{auth}"
             f"\r\n"
         ).encode()
         s.sendall(header + partial_body)
@@ -260,6 +285,7 @@ def _ws_connect(host, port, path="/ws", timeout=5):
     key = base64.b64encode(bytes(random.randint(0, 255) for _ in range(16))).decode()
     try:
         s = socket.create_connection((host, port), timeout=timeout)
+        auth = f"X-API-Key: {API_TOKEN}\r\n" if API_TOKEN else ""
         s.sendall((
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}:{port}\r\n"
@@ -267,6 +293,7 @@ def _ws_connect(host, port, path="/ws", timeout=5):
             f"Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\n"
             f"Sec-WebSocket-Version: 13\r\n"
+            f"{auth}"
             f"\r\n"
         ).encode())
         buf = b""
@@ -362,7 +389,7 @@ def worker_get_flood(host, port, rate, keepalive=False):
             try:
                 if conn is None:
                     conn = http.client.HTTPConnection(host, port, timeout=5)
-                conn.request("GET", path)          # no Connection: close
+                conn.request("GET", path, headers=_auth_headers())  # no Connection: close
                 resp = conn.getresponse()
                 resp.read()
                 ok = resp.status == 200
@@ -573,6 +600,11 @@ def main():
     )
     parser.add_argument("--host",     required=True, help="ESP32 IP address")
     parser.add_argument("--port",     type=int, default=80)
+    parser.add_argument("--password", help="Casambi network password; the API "
+                        "token is derived from it. Required if the device has "
+                        "auth enabled (omit for an open/unconfigured device).")
+    parser.add_argument("--token",    help="Pre-derived API token (X-API-Key). "
+                        "Overrides --password if both are given.")
     parser.add_argument("--profile",  choices=list(PROFILES), default="realistic",
                         help="Load profile (default: realistic)")
     parser.add_argument("--duration", type=int, default=60,
@@ -607,6 +639,12 @@ def main():
                         help="Disable the aborted-connection POST worker")
     args = parser.parse_args()
 
+    global API_TOKEN
+    if args.token:
+        API_TOKEN = args.token
+    elif args.password:
+        API_TOKEN = derive_token(args.password)
+
     prof = dict(PROFILES[args.profile])   # copy so overrides don't mutate the table
 
     # Apply overrides
@@ -636,6 +674,7 @@ def main():
 
     print(f"\nESP32 Casambi — Web Server Stress Test")
     print(f"Target   : http://{args.host}:{args.port}/")
+    print(f"Auth     : {'X-API-Key (token set)' if API_TOKEN else 'none (open device)'}")
     print(f"Profile  : {args.profile}")
     print(f"Test unit: {args.unit}  (ONLY this unit is switched)")
     print(f"Duration : {args.duration}s active  +  {args.cooldown}s cooldown"
