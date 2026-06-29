@@ -32,7 +32,6 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 ### ESP32 Boards
 
 - [AZDelivery ESP32 Dev Kit C V4](https://www.amazon.de/dp/B07Z83MF5W) — Primary development and test board (PSRAM not required)
-- [ESP32-C3 Super Mini](https://www.amazon.de/dp/B0DMNBWTFD) — Compact alternative
 
 ### Build Host
 
@@ -75,9 +74,6 @@ The controller should work with any Casambi-enabled luminaire. Capabilities are 
    ```bash
    # For ESP32 Dev Kit V4 (default)
    pio run -e devkit-v4 -t upload
-   
-   # For ESP32-C3 Super Mini
-   pio run -e esp32-c3 -t upload
    ```
 1. **Open serial monitor:**
    
@@ -585,6 +581,20 @@ unauthorized LAN devices and cross-origin browser scripts out. Because the LAN
 HTTP/WebSocket traffic is **not** TLS-encrypted, it does not defend against an
 attacker who can already passively sniff your network.
 
+### Cloud API transport (TLS)
+The connection to `api.casambi.com` — used during setup and on `refresh`, and
+carrying the Casambi network password and session token — is HTTPS with the
+**server certificate validated against the Mozilla root-CA bundle** embedded in
+the arduino-esp32 core (`api_client.cpp`). This authenticates the cloud endpoint
+and prevents a man-in-the-middle from capturing the network password. Validation
+uses the full root bundle rather than a pinned certificate, so it keeps working
+when Casambi rotates its CA.
+
+> If a particular core build does not export the bundle symbol and the cloud
+> calls fail to compile/link, you can build with `-DCASAMBI_TLS_INSECURE` to fall
+> back to the previous, unauthenticated behaviour. This re-opens the cloud
+> channel to MITM and is logged loudly at runtime — avoid it for production.
+
 ### Sensitive data at rest
 Wi-Fi credentials (`/wifi_config.json`) and the Casambi AES keys plus network
 password (`/casambi_config.json`) are stored in the LittleFS partition as
@@ -804,7 +814,6 @@ The actual cloud download runs early on the **next boot**, before the BLE stack 
 |Environment|Purpose                                          |
 |-----------|-------------------------------------------------|
 |`devkit-v4`|ESP32 Dev Kit V4 (default)                       |
-|`esp32-c3` |ESP32-C3 Super Mini                              |
 |`debug`    |Verbose logging, debug symbols, exception decoder|
 |`release`  |Size-optimized production build                  |
 

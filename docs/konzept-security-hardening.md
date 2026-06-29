@@ -1,9 +1,36 @@
 # Konzept: Security-Hardening (Issue #11)
 
-Status: Konzept (noch nicht umgesetzt).
+Status: **größtenteils umgesetzt** (Web-Auth, Reboot-Fix, Krypto-Härtung,
+Logging/Validierung und Cloud-TLS sind im Code; siehe „Umsetzungsstand" unten).
 Branch: `claude/issue-11-concept-scgdix`
 Bezug: Issue #11 „Harden device from security point of view" inkl. Security-Review
 (14 Findings) im Issue-Kommentar.
+
+## Umsetzungsstand
+
+Dieses Dokument beschreibt weiterhin die *Planung*; der reale Code-Stand ist
+inzwischen:
+
+| Finding(s) | Status | Fundstelle |
+|---|---|---|
+| #1 Web-Auth + CORS-Wildcard | ✅ umgesetzt | `webserver.cpp` `_authOk`/`_deriveApiToken`/`_constantTimeEquals`; kein CORS-Header mehr |
+| #9 WebSocket-Auth | ✅ umgesetzt | `webserver.cpp` `_wsAuthOk` (Header `X-API-Key` oder `?k=`), `setFilter` |
+| #2 Reboot (Auth + kein `delay()`) | ✅ umgesetzt | `webserver.cpp` `/api/reboot` hinter `_authOk`, Flag in `loop()` |
+| #12 `/api/info`-Leak | ✅ umgesetzt | nur noch `{configured, build}` |
+| #6 constant-time CMAC | ✅ umgesetzt | `encryption.cpp` OR-Akkumulator |
+| #13 Secret-Zeroization | ✅ umgesetzt | `key_exchange.cpp:218` |
+| #14 RFC-4493-Testvektoren | ✅ umgesetzt | `encryption.cpp` `selfTestRFC4493`, Aufruf in `setup()` |
+| #7 `X-Forwarded-For` | ✅ umgesetzt | `webserver.cpp` `_getClientIP` nutzt nur Peer-IP |
+| #8 BLE-MAC-Injection (FHEM) | ✅ umgesetzt | `98_CasambiGW.pm` MAC-Regex-Validierung |
+| #11 WiFi-PW im Serial-Echo | ✅ umgesetzt | `main.cpp` `handleCommand` maskiert `wifi set` |
+| #3 `_tempObject`-Leak | ✅ erledigt | `onDisconnect`-Handler in `onRequestBody` |
+| **Cloud-API-TLS-Validierung** | ✅ umgesetzt | `api_client.cpp` `_beginRequest` → `setCACertBundle` (war im ursprünglichen Review nicht erfasst) |
+| #4 Daten at-rest | 🟡 dokumentiert | Flash-Encryption als Empfehlung (README), nicht erzwungen |
+| #10 Nonce-Reuse bei Reconnect | 🟠 offen | benötigt Hardware-Verifikation |
+| #5 XOR-Fold Transport-Key | ⏸️ bewusst belassen | Protokolltreue, nur kommentiert |
+
+Die folgenden Abschnitte sind die ursprüngliche Planungsgrundlage und werden zur
+Nachvollziehbarkeit beibehalten.
 
 ## 1. Ziel und Schutzziele
 
