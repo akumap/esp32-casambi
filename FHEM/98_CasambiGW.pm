@@ -36,6 +36,9 @@ use Digest::SHA qw(sha256_hex);
 #   deleteRemovedUnits  0|1  Delete FHEM device when applyChanges is called
 #                            and unit is gone from Casambi network (default: 1)
 #                            When 0: device stays but "online" is set to false
+#   casambiPassword          Casambi network password; the X-API-Key token is
+#                            derived from it. Required once the ESP32 has API
+#                            authentication enabled.
 # ============================================================================
 
 use constant WS_PING_INTERVAL    => 30;   # seconds between WS keepalive pings
@@ -840,6 +843,12 @@ sub CasambiGW_Ready {
     <li><b>deleteRemovedUnits</b> 0|1 &mdash; whether applyChanges deletes
         the FHEM device (1) or only sets <em>online</em> to false (0)
         for units gone from the Casambi network (default: 1)</li>
+    <li><b>casambiPassword</b> &mdash; Casambi network password. Required once
+        the ESP32 has API authentication enabled: the module derives the
+        <code>X-API-Key</code> token from it
+        (SHA-256 of "casambi-api:" + password) for REST calls and the
+        WebSocket handshake. Leave unset only for a device with no stored
+        password.</li>
   </ul>
   <br>
   <b>Readings</b>

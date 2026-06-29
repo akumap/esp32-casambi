@@ -332,6 +332,11 @@ Fields like `vertical` and `colorTemp` only appear for units that support these 
 
 ### Control Endpoints
 
+> All endpoints below (and the status/log/NTP endpoints above) require the
+> `X-API-Key` header when the device has auth enabled — see
+> [Authentication](#authentication). It is omitted from the examples for brevity;
+> add `-H "X-API-Key: $TOKEN"` to each call.
+
 #### Scenes
 
 ```bash
@@ -920,6 +925,7 @@ automatically on link loss or FHEM startup.
 |-----------|---------|-------------|
 | `autocreate` | `1` | Create new `CasambiUnit` devices when `applyChanges` is called |
 | `deleteRemovedUnits` | `1` | Delete the FHEM device (`1`) or only set `online false` (`0`) for units removed from the Casambi network |
+| `casambiPassword` | *(none)* | Casambi network password. Required once the ESP32 has auth enabled: the module derives the `X-API-Key` token from it for REST calls and the WebSocket handshake. Leave unset only for a device without stored password. |
 
 ### Automatic unit sync
 
