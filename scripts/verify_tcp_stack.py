@@ -50,6 +50,7 @@ Exit code 0 = all checks passed, 1 = at least one failed (CI-friendly).
 
 import argparse
 import base64
+import hashlib
 import http.client
 import json
 import random
@@ -88,6 +89,22 @@ class Results:
 
 
 # ---------------------------------------------------------------------------
+# API authentication
+# ---------------------------------------------------------------------------
+# When the device has a Casambi password stored, every endpoint except
+# /api/info requires the X-API-Key token (and so does the WebSocket upgrade).
+# API_TOKEN is set from --password/--token in main(); None = no auth (open
+# device, backward compatible). http_request and ws_connect attach it
+# automatically.
+API_TOKEN = None
+
+
+def derive_token(password):
+    """apiToken = hex(SHA-256("casambi-api:" + password)) — same as the firmware."""
+    return hashlib.sha256(("casambi-api:" + password).encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
 # ---------------------------------------------------------------------------
 
@@ -100,6 +117,8 @@ def http_request(host, port, method, path, body=None, extra_headers=None,
         if body is not None:
             headers["Content-Type"] = "application/json"
             headers["Content-Length"] = str(len(body))
+        if API_TOKEN:
+            headers["X-API-Key"] = API_TOKEN
         if extra_headers:
             headers.update(extra_headers)
         conn.request(method, path, body=body, headers=headers)
@@ -142,6 +161,7 @@ def ws_connect(host, port, path="/ws", timeout=5):
     key = base64.b64encode(bytes(random.randint(0, 255) for _ in range(16))).decode()
     try:
         s = socket.create_connection((host, port), timeout=timeout)
+        auth = f"X-API-Key: {API_TOKEN}\r\n" if API_TOKEN else ""
         s.sendall((
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}:{port}\r\n"
@@ -149,6 +169,7 @@ def ws_connect(host, port, path="/ws", timeout=5):
             f"Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\n"
             f"Sec-WebSocket-Version: 13\r\n"
+            f"{auth}"
             f"\r\n"
         ).encode())
         buf = b""
@@ -537,6 +558,11 @@ def main():
         description="Functional verification of the new ESP32Async TCP/web stack.")
     ap.add_argument("--host", required=True, help="ESP32 IP address")
     ap.add_argument("--port", type=int, default=80)
+    ap.add_argument("--password", help="Casambi network password; the API token "
+                    "is derived from it. Required if the device has auth enabled "
+                    "(omit for an open/unconfigured device).")
+    ap.add_argument("--token", help="Pre-derived API token (X-API-Key). "
+                    "Overrides --password if both are given.")
     ap.add_argument("--ws-max-clients", type=int, default=3,
                     help="WS_MAX_CLIENTS from config.h (default 3)")
     ap.add_argument("--leak-burst", type=int, default=60,
@@ -544,9 +570,16 @@ def main():
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
+    global API_TOKEN
+    if args.token:
+        API_TOKEN = args.token
+    elif args.password:
+        API_TOKEN = derive_token(args.password)
+
     print("=" * 62)
     print("ESP32 Casambi — New TCP/Web Stack Functional Verification")
     print(f"Target: http://{args.host}:{args.port}   WS_MAX_CLIENTS={args.ws_max_clients}")
+    print(f"Auth:   {'X-API-Key (token set)' if API_TOKEN else 'none (open device)'}")
     print("=" * 62)
 
     # Reachability gate.

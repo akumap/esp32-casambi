@@ -208,18 +208,58 @@ http://<esp32-ip>/api
 
 The IP address is displayed in the serial console on boot.
 
+### Authentication
+
+Once a Casambi network password is stored on the device (after provisioning),
+**every endpoint except `GET /api/info` requires an API token** in the
+`X-API-Key` request header; the WebSocket upgrade requires it too (as the
+`X-API-Key` header or a `?k=<token>` query parameter). Unauthenticated requests
+get `401 Unauthorized`.
+
+The token is **not** the raw Casambi password — it is derived from it, so the
+cloud password never travels on the wire:
+
+```
+apiToken = SHA-256( "casambi-api:" + <casambi-network-password> )   # lowercase hex
+```
+
+Compute it once and send it with each request, e.g.:
+
+```bash
+TOKEN=$(printf 'casambi-api:%s' "$CASAMBI_PASSWORD" | sha256sum | cut -d' ' -f1)
+curl -H "X-API-Key: $TOKEN" http://<esp32-ip>/api/status
+```
+
+The **FHEM module derives the token automatically** — just set the password:
+
+```
+attr <gw> casambiPassword <casambi-network-password>
+```
+
+Notes:
+- A device with **no** stored Casambi password (e.g. a config predating this
+  feature) keeps the API **open** for backward compatibility. Re-provisioning or
+  `refreshCasambi` stores the password and switches auth on.
+- This protects against unauthorized LAN devices and cross-origin browser
+  scripts. It is **not** a substitute for transport encryption: there is no TLS,
+  so a party that can already sniff your LAN can capture the token. Treat the
+  controller as a trusted-LAN device.
+
 ### Status & Discovery
 
 **GET /api/info** — Lightweight discovery endpoint (used by the FHEM module)
 
 ```json
-{ "configured": true, "build": 42, "network": "My Home", "mac": "aa:bb:cc:dd:ee:01", "ip": "192.168.1.100" }
+{ "configured": true, "build": 42 }
 ```
 
 Served in both modes: while the device is still in the setup portal it returns
-`"configured": false` (plus `hostname`/`ip` of the access point); once provisioned
-it returns `"configured": true`. A client can poll this to tell a ready gateway
-apart from one still in setup, and connect automatically once it becomes ready.
+`"configured": false`; once provisioned it returns `"configured": true`. A client
+can poll this to tell a ready gateway apart from one still in setup, and connect
+automatically once it becomes ready. This is the **only** endpoint that stays
+unauthenticated (so discovery works before the client knows the token), and it
+deliberately exposes nothing beyond `configured`/`build` — no network name, MAC
+or IP.
 
 **GET /api/status**
 
@@ -291,6 +331,11 @@ Fields like `vertical` and `colorTemp` only appear for units that support these 
 **GET /api/scenes** — List all scenes
 
 ### Control Endpoints
+
+> All endpoints below (and the status/log/NTP endpoints above) require the
+> `X-API-Key` header when the device has auth enabled — see
+> [Authentication](#authentication). It is omitted from the examples for brevity;
+> add `-H "X-API-Key: $TOKEN"` to each call.
 
 #### Scenes
 
@@ -528,6 +573,43 @@ This is the same formula used by the REST `/api/units` endpoint.
 
 -----
 
+## Security
+
+The controller is intended for use on a **trusted home LAN**, not on an exposed
+or DMZ network.
+
+### Web API authentication
+Control endpoints are protected with an API token derived from the Casambi
+network password — see [Authentication](#authentication) above. This keeps
+unauthorized LAN devices and cross-origin browser scripts out. Because the LAN
+HTTP/WebSocket traffic is **not** TLS-encrypted, it does not defend against an
+attacker who can already passively sniff your network.
+
+### Sensitive data at rest
+Wi-Fi credentials (`/wifi_config.json`) and the Casambi AES keys plus network
+password (`/casambi_config.json`) are stored in the LittleFS partition as
+**plaintext JSON**. Anyone with physical access to the board can read the flash
+and recover them.
+
+For deployments where physical access is a concern, enable **ESP32 flash
+encryption** so the entire flash (including LittleFS) is encrypted with a
+per-device key fused into the chip:
+
+- Build with the IDF option `CONFIG_FLASH_ENCRYPTION_ENABLED` (Release mode for
+  production). The application code needs no changes — encryption is transparent
+  to LittleFS.
+- ⚠️ Flash encryption is **irreversible** once the eFuses are burned, can
+  complicate re-flashing/debugging, and is therefore **not enabled by default**
+  to keep the standard flashing workflow intact. Enable it deliberately for
+  hardened/production units.
+
+### BLE crypto self-check
+On boot the firmware validates its AES-CMAC implementation against the RFC 4493
+test vectors (`CMAC self-test: PASS/FAIL` on serial), so a broken crypto build
+is caught immediately rather than silently failing BLE authentication.
+
+-----
+
 ## Known Limitations & Stability Notes
 
 ### Stability
@@ -537,7 +619,10 @@ This is the same formula used by the REST `/api/units` endpoint.
   stress-tested (see `scripts/stress_test.py` and `scripts/verify_tcp_stack.py`).
   It stays stable under heavy concurrent HTTP/WebSocket load with full heap
   recovery, so HTTP polling at normal rates is fine and no polling-rate limit is
-  required.
+  required. When the device has auth enabled, pass the Casambi password to the
+  scripts so they can reach the protected endpoints, e.g.
+  `python3 scripts/stress_test.py --host <ip> --password <casambi-pw>`
+  (both scripts also accept a pre-derived `--token`).
 - **Long-term BLE stability** has not been exhaustively tested. The auto-reconnect mechanism mitigates most connection drops, but edge cases may exist.
 - The **hardware watchdog** (30s) and **heap monitoring** provide safety nets against hangs and memory leaks.
 
@@ -840,6 +925,7 @@ automatically on link loss or FHEM startup.
 |-----------|---------|-------------|
 | `autocreate` | `1` | Create new `CasambiUnit` devices when `applyChanges` is called |
 | `deleteRemovedUnits` | `1` | Delete the FHEM device (`1`) or only set `online false` (`0`) for units removed from the Casambi network |
+| `casambiPassword` | *(none)* | Casambi network password. Required once the ESP32 has auth enabled: the module derives the `X-API-Key` token from it for REST calls and the WebSocket handshake. Leave unset only for a device without stored password. |
 
 ### Automatic unit sync
 

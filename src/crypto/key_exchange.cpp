@@ -213,6 +213,12 @@ std::vector<uint8_t> ECDHKeyExchange::deriveTransportKey() {
         result[i] = hash[i] ^ hash[16 + i];
     }
 
+    // Wipe the intermediate secret material from the stack so it does not linger
+    // in reusable memory after the key has been derived.
+    memset(secret_bytes, 0, sizeof(secret_bytes));
+    memset(hash, 0, sizeof(hash));
+    if (!secret_reversed.empty()) memset(secret_reversed.data(), 0, secret_reversed.size());
+
     if (bleDebugEnabled) {
         Serial.println("ECDH: Transport key derived");
     }
