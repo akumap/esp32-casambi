@@ -14,14 +14,37 @@
 
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
 
+// Copy a mutable NetworkConfig string field under g_configMutex so a
+// concurrent writer on the loop task cannot reallocate the String buffer
+// while the async_tcp task is reading it.
+static String lockedCopy(const String& s) {
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    String out = s;
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    return out;
+}
+
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
-      _refreshRequested(false), _rebootRequested(false), _broadcastQueue(nullptr) {
+      _refreshRequested(false), _rebootRequested(false), _ntpRequested(false),
+      _broadcastQueue(nullptr) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
 }
 
 CasambiWebServer::~CasambiWebServer() {
     stop();
+    // stop() drains the queue, but a broadcast may still have been posted
+    // between drain and here; drain again, then free the queue itself (it was
+    // leaked before). Callers must ensure no task can still hold a pointer to
+    // this instance (see the teardown sequence in main.cpp).
+    if (_broadcastQueue) {
+        String* msg = nullptr;
+        while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
+            delete msg;
+        }
+        vQueueDelete(_broadcastQueue);
+        _broadcastQueue = nullptr;
+    }
 }
 
 bool CasambiWebServer::begin(uint16_t port) {
@@ -115,6 +138,16 @@ bool CasambiWebServer::consumeRefreshRequest() {
 bool CasambiWebServer::consumeRebootRequest() {
     if (!_rebootRequested) return false;
     _rebootRequested = false;
+    return true;
+}
+
+bool CasambiWebServer::consumeNtpRequest(String& serverOut) {
+    if (!_ntpRequested) return false;
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    serverOut = _pendingNtpServer;
+    _pendingNtpServer = "";
+    _ntpRequested = false;
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
     return true;
 }
 
@@ -240,16 +273,22 @@ String CasambiWebServer::_gatewayName(const String& mac) const {
     String want = mac; want.replace(":", ""); want.toLowerCase();
 
     // Try to resolve via the unit list (works only if the gateway advertises
-    // its hardware MAC rather than a random static address).
+    // its hardware MAC rather than a random static address). Unit strings are
+    // only written before the web server exists (boot/refresh), so reading
+    // them here without the config mutex is safe.
     for (const auto& u : _config->units) {
         String a = u.address; a.replace(":", ""); a.toLowerCase();
         if (a == want) return u.name;
     }
 
     // Fallback: the advertised name captured at provisioning for this gateway.
-    String ac = _config->autoConnectAddress; ac.replace(":", ""); ac.toLowerCase();
-    if (!ac.isEmpty() && ac == want && _config->gatewayName.length())
-        return _config->gatewayName;
+    // autoConnectAddress can be rewritten at runtime ('autoconnect set',
+    // connect command) → copy it under the config mutex.
+    String ac = lockedCopy(_config->autoConnectAddress);
+    ac.replace(":", ""); ac.toLowerCase();
+    String gwName = lockedCopy(_config->gatewayName);
+    if (!ac.isEmpty() && ac == want && gwName.length())
+        return gwName;
 
     // No reliable name: the connection endpoint is typically a random network
     // gateway address that maps to no named unit. Leave empty rather than
@@ -358,6 +397,20 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
     }
 }
 
+// The dynamic POST routes that carry a JSON body. Shared by onRequestBody
+// (buffer only for these — bodies sent to any other endpoint are ignored, so
+// nothing is allocated that no handler would ever free) and by the onNotFound
+// dispatcher.
+static bool isBodyPostEndpoint(const String& path) {
+    return (path.indexOf("/api/scenes/") == 0 && path.endsWith("/level")) ||
+           (path.indexOf("/api/units/")  == 0 && (path.endsWith("/level") ||
+               path.endsWith("/color") || path.endsWith("/temperature") ||
+               path.endsWith("/slider") || path.endsWith("/vertical"))) ||
+           (path.indexOf("/api/groups/") == 0 && (path.endsWith("/level") ||
+               path.endsWith("/slider") || path.endsWith("/vertical"))) ||
+           (path == "/api/ntp");
+}
+
 void CasambiWebServer::_setupRoutes() {
     // No CORS headers: the control API is not meant to be called from arbitrary
     // browser origins. Omitting Access-Control-Allow-Origin makes browsers block
@@ -426,7 +479,7 @@ void CasambiWebServer::_setupRoutes() {
             _sendJsonError(request, "No configuration found; run setup first", 409);
             return;
         }
-        if (_config->casambiPassword.length() == 0) {
+        if (lockedCopy(_config->casambiPassword).length() == 0) {
             _sendJsonError(request, "No stored Casambi password; refresh once via serial first", 409);
             return;
         }
@@ -464,16 +517,7 @@ void CasambiWebServer::_setupRoutes() {
         }
 
         // --- Body endpoints (body buffered into _tempObject by onRequestBody) ---
-        bool bodyEndpoint =
-            (path.indexOf("/api/scenes/") == 0 && path.endsWith("/level")) ||
-            (path.indexOf("/api/units/")  == 0 && (path.endsWith("/level") ||
-                path.endsWith("/color") || path.endsWith("/temperature") ||
-                path.endsWith("/slider") || path.endsWith("/vertical"))) ||
-            (path.indexOf("/api/groups/") == 0 && (path.endsWith("/level") ||
-                path.endsWith("/slider") || path.endsWith("/vertical"))) ||
-            (path == "/api/ntp");
-
-        if (bodyEndpoint) {
+        if (isBodyPostEndpoint(path)) {
             // Oversized payloads are not buffered by onRequestBody; reject here
             // (this is still the single response point, so no double-send).
             if (request->contentLength() > 512) {
@@ -511,7 +555,12 @@ void CasambiWebServer::_setupRoutes() {
     // request body into _tempObject; dispatch and the single response happen in
     // onNotFound above. (Sending from here as well would double-respond.)
     _server->onRequestBody([this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-        if (request->method() != HTTP_POST || !request->url().startsWith("/api/")) {
+        // Buffer ONLY for the known body endpoints. Buffering for every
+        // /api/* POST allocated a String that the no-body handlers (e.g.
+        // /api/reboot, /on, /off) never freed — held until connection close
+        // and, with keep-alive request-object reuse, overwritten (leaked) by
+        // the next bodied request on the same connection.
+        if (request->method() != HTTP_POST || !isBodyPostEndpoint(request->url())) {
             return;
         }
 
@@ -525,6 +574,12 @@ void CasambiWebServer::_setupRoutes() {
         // an aborted (incomplete) body is freed — onNotFound never runs for a
         // request that never completes, so this is the only cleanup path then.
         if (index == 0) {
+            // Defensive: free a stale buffer a previous request on the same
+            // (kept-alive) connection may have left behind.
+            if (request->_tempObject) {
+                delete static_cast<String*>(request->_tempObject);
+                request->_tempObject = nullptr;
+            }
             String* body = new String();
             body->reserve(total);
             request->_tempObject = body;
@@ -590,7 +645,7 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["largest_block"] = ESP.getMaxAllocHeap();
     doc["min_free_heap"] = ESP.getMinFreeHeap();
     doc["boot_count"] = EventLog::bootCount();
-    doc["ntp_server"] = _config->ntpServer;
+    doc["ntp_server"] = lockedCopy(_config->ntpServer);
 
     // Wall-clock time (UTC). Only meaningful once NTP has synced.
     time_t nowSec = time(nullptr);
@@ -835,7 +890,7 @@ void CasambiWebServer::_handleDeleteLog(AsyncWebServerRequest* request) {
 void CasambiWebServer::_handleGetNtp(AsyncWebServerRequest* request) {
     if (!_authOk(request)) return;
     JsonDocument doc;
-    doc["ntp_server"] = _config->ntpServer;
+    doc["ntp_server"] = lockedCopy(_config->ntpServer);
 
     time_t nowSec = time(nullptr);
     bool timeSynced = nowSec >= 1577836800;
@@ -884,14 +939,16 @@ void CasambiWebServer::_handleSetNtp(AsyncWebServerRequest* request) {
         return;
     }
 
-    _config->ntpServer = server;
-    ConfigStore::saveNetworkConfig(*_config);
+    // Only hand the value to the loop task (consumeNtpRequest). Mutating
+    // _config and writing LittleFS here would (a) race the loop task on the
+    // ntpServer String and (b) block the async_tcp task on a flash write.
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    _pendingNtpServer = server;
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    _ntpRequested = true;
 
-    // Re-arm NTP immediately (WiFi is up since the web server is running).
-    configTime(0, 0, server.c_str());
-
-    WEB_LOG("Web: NTP server set to %s from %s\n", server.c_str(), _getClientIP(request).c_str());
-    EventLog::log(LOG_INFO, "NTP server changed to %s", server.c_str());
+    WEB_LOG("Web: NTP server change to %s requested from %s\n",
+            server.c_str(), _getClientIP(request).c_str());
 
     JsonDocument resp;
     resp["success"] = true;

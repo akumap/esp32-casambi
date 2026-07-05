@@ -11,6 +11,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <functional>
+#include <atomic>
 #include "../config.h"
 #include "../cloud/network_config.h"
 #include "../crypto/encryption.h"
@@ -166,7 +167,10 @@ private:
     NimBLEClient* _bleClient;
     NimBLERemoteCharacteristic* _authChar;
 
-    ConnectionState _state;
+    // Written by the NimBLE host task (notification handlers) and polled by the
+    // loop task (connect wait loops) — atomic so the cross-task hand-off is
+    // well-defined instead of relying on delay() forcing a reload.
+    std::atomic<ConnectionState> _state;
     ECDHKeyExchange* _keyExchange;
     CasambiEncryption* _encryption;
 
@@ -210,9 +214,23 @@ private:
     bool _authenticate();
 
     /**
-     * Internal disconnect with reason tracking
+     * Connect flow body. Assumes _mutex is held (public connect() takes it so
+     * the reconnect path cannot free _bleClient/_authChar under a control
+     * command that is mid-write).
+     */
+    bool _connectLocked(const String& address);
+
+    /**
+     * Internal disconnect with reason tracking. Takes _mutex; if the mutex is
+     * busy the disconnect is skipped (the next health check retries) rather
+     * than racing a concurrent sender.
      */
     void _disconnectInternal(DisconnectReason reason);
+
+    /**
+     * Disconnect body. Assumes _mutex is held.
+     */
+    void _disconnectLocked(DisconnectReason reason);
 
     /**
      * Update state and fire callback

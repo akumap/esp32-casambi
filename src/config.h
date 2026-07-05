@@ -198,6 +198,17 @@
 // GLOBAL FLAGS
 // ============================================================================
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+// Guards the NetworkConfig String fields that can change at runtime
+// (ntpServer, autoConnectAddress, casambiPassword). All writers run on the
+// loop task; the async_tcp task copies these strings under this mutex before
+// use, so a concurrent String reassignment cannot free the buffer mid-read.
+// The bool/uint8 state fields are NOT guarded (torn reads are impossible,
+// momentary inconsistency is acceptable). Defined in main.cpp.
+extern SemaphoreHandle_t g_configMutex;
+
 extern bool bleDebugEnabled;      // BLE/crypto verbose debug (defined in main.cpp)
 extern bool casambiDebugEnabled;  // Casambi network events: unit states, echo, callbacks (defined in main.cpp)
 extern bool webDebugEnabled;      // Web API request logging (defined in main.cpp)

@@ -37,13 +37,27 @@ CasambiClient::~CasambiClient() {
 }
 
 bool CasambiClient::connect(const String& address) {
+    // Serialize against the control setters (web/serial): they hold _mutex
+    // across _sendOperation (including the GATT write), so once we own the
+    // mutex no sender can still be using _bleClient/_authChar when the
+    // reconnect path below frees them via deleteClient().
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        Serial.println("BLE: connect: mutex timeout, try again");
+        return false;
+    }
+    bool ok = _connectLocked(address);
+    xSemaphoreGive(_mutex);
+    return ok;
+}
+
+bool CasambiClient::_connectLocked(const String& address) {
     if (bleDebugEnabled) {
         Serial.printf("BLE: Connecting to %s\n", address.c_str());
     }
 
     if (_state != ConnectionState::None) {
         Serial.println("BLE: Already connected/connecting, disconnecting first...");
-        _disconnectInternal(DisconnectReason::UserRequested);
+        _disconnectLocked(DisconnectReason::UserRequested);
         delay(500);
     }
 
@@ -64,6 +78,11 @@ bool CasambiClient::connect(const String& address) {
     }
     _bleClient = NimBLEDevice::createClient();
 
+    // Bound the blocking connect attempt: NimBLE's default (30 s) matches the
+    // task-WDT timeout exactly, so a hanging connect on the loop task would
+    // race the watchdog. 10 s keeps well clear of it.
+    _bleClient->setConnectTimeout(BLE_CONNECT_TIMEOUT_MS);
+
     // Casambi gateways are reconnected by their stored MAC (no live scan). NimBLE
     // requires the peer address type; mirror the old Bluedroid default (public).
     // If a gateway turns out to advertise a random address, see concept 6.3.
@@ -81,14 +100,14 @@ bool CasambiClient::connect(const String& address) {
     NimBLERemoteService* service = _bleClient->getService(NimBLEUUID(CASAMBI_SERVICE_UUID));
     if (!service) {
         Serial.println("BLE: Service not found");
-        _disconnectInternal(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError);
         return false;
     }
 
     _authChar = service->getCharacteristic(NimBLEUUID(CASAMBI_AUTH_CHAR_UUID));
     if (!_authChar) {
         Serial.println("BLE: Auth characteristic not found");
-        _disconnectInternal(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError);
         return false;
     }
 
@@ -101,19 +120,19 @@ bool CasambiClient::connect(const String& address) {
 
     if (!_keyExchange->generateKeyPair()) {
         Serial.println("BLE: Failed to generate key pair");
-        _disconnectInternal(DisconnectReason::KeyExchangeFailed);
+        _disconnectLocked(DisconnectReason::KeyExchangeFailed);
         return false;
     }
 
     if (!_readDeviceInfo()) {
         Serial.println("BLE: Failed to read device info");
-        _disconnectInternal(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError);
         return false;
     }
 
     if (!_performKeyExchange()) {
         Serial.println("BLE: Key exchange failed");
-        _disconnectInternal(DisconnectReason::KeyExchangeFailed);
+        _disconnectLocked(DisconnectReason::KeyExchangeFailed);
         return false;
     }
 
@@ -121,7 +140,7 @@ bool CasambiClient::connect(const String& address) {
     if (key) {
         if (!_authenticate()) {
             Serial.println("BLE: Authentication failed");
-            _disconnectInternal(DisconnectReason::AuthFailed);
+            _disconnectLocked(DisconnectReason::AuthFailed);
             return false;
         }
     } else {
@@ -138,6 +157,19 @@ void CasambiClient::disconnect() {
 }
 
 void CasambiClient::_disconnectInternal(DisconnectReason reason) {
+    // Wait for any in-flight sender (they hold _mutex across the GATT write)
+    // before tearing the link state down. If the mutex stays busy — the holders
+    // are bounded by NimBLE's own timeouts — skip this attempt instead of
+    // racing the holder; the periodic health check will retry.
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("BLE: disconnect skipped (mutex busy), will retry");
+        return;
+    }
+    _disconnectLocked(reason);
+    xSemaphoreGive(_mutex);
+}
+
+void CasambiClient::_disconnectLocked(DisconnectReason reason) {
     if (_bleClient && _bleClient->isConnected()) {
         _bleClient->disconnect();
     }
@@ -351,7 +383,8 @@ bool CasambiClient::_readDeviceInfo() {
     }
 
     std::string value = _authChar->readValue();
-    if (value.length() < 21) {
+    // 7 header bytes (type, version, mtu, unitId x2, flags x2) + 16-byte nonce
+    if (value.length() < 7 + NONCE_SIZE) {
         Serial.printf("BLE: Invalid device info length: %d\n", value.length());
         return false;
     }
@@ -550,7 +583,9 @@ void CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
 
     if (!isBLEConnected()) {
         Serial.println("BLE: Link lost, cannot send operation");
-        _disconnectInternal(DisconnectReason::BLELinkLoss);
+        // Callers (the control setters) hold _mutex, so use the locked variant
+        // directly — _disconnectInternal would deadlock on the same mutex.
+        _disconnectLocked(DisconnectReason::BLELinkLoss);
         return;
     }
 

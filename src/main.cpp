@@ -27,6 +27,14 @@ CasambiClient* casambiClient = nullptr;
 CasambiAPIClient* apiClient = nullptr;
 CasambiWebServer* webServer = nullptr;
 SetupPortal* setupPortal = nullptr;
+
+// Guards the runtime-mutable NetworkConfig String fields (see config.h). All
+// writers run on the loop task; the async_tcp task copies under this mutex.
+SemaphoreHandle_t g_configMutex = nullptr;
+
+// Take/give g_configMutex around a String mutation on the loop task.
+static void configLock()   { if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY); }
+static void configUnlock() { if (g_configMutex) xSemaphoreGive(g_configMutex); }
 bool bleDebugEnabled     = false;
 bool casambiDebugEnabled = true;
 bool webDebugEnabled     = true;
@@ -130,6 +138,8 @@ void syncTime() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
+    g_configMutex = xSemaphoreCreateMutex();
 
     Serial.println("\n================================");
     Serial.println("  ESP32 Casambi Controller");
@@ -369,9 +379,27 @@ void loop() {
     // Monitor heap usage
     monitorHeap();
 
+    // Persist event-log entries that other tasks (BLE host, async_tcp) queued
+    // in RTC RAM — those tasks must not block on LittleFS writes themselves.
+    EventLog::flush();
+
     // WebSocket housekeeping (clean up disconnected clients)
     if (webServer) {
         webServer->loop();
+
+        // NTP server change submitted via POST /api/ntp. Applied here so the
+        // config String is only ever mutated on the loop task and the LittleFS
+        // save never blocks the async_tcp task.
+        String newNtpServer;
+        if (webServer->consumeNtpRequest(newNtpServer)) {
+            configLock();
+            networkConfig.ntpServer = newNtpServer;
+            configUnlock();
+            ConfigStore::saveNetworkConfig(networkConfig);
+            g_timeSynced = false;
+            syncTime();  // re-arm SNTP with the new server
+            EventLog::log(LOG_INFO, "NTP server changed to %s", newNtpServer.c_str());
+        }
 
         // FHEM-triggered cloud-config refresh (POST /api/refreshCasambi). Handle
         // it here in the loop task — never from the async web-server context. It
@@ -708,7 +736,9 @@ void requestCloudRefresh(const String& password) {
     // Persist the password to use after the reboot (saved one, or one newly
     // typed at the serial prompt).
     if (password != networkConfig.casambiPassword) {
+        configLock();
         networkConfig.casambiPassword = password;
+        configUnlock();
         if (!ConfigStore::saveNetworkConfig(networkConfig)) {
             Serial.println("ERROR: Failed to store password for refresh");
             return;
@@ -992,7 +1022,9 @@ void handleCommand(const String& cmd) {
                 if (server.length() == 0) {
                     Serial.println("Usage: ntp set <hostname|ip>  (e.g. pool.ntp.org or 192.168.1.1)");
                 } else {
+                    configLock();
                     networkConfig.ntpServer = server;
+                    configUnlock();
                     ConfigStore::saveNetworkConfig(networkConfig);
                     Serial.printf("NTP server set to: %s\n", server.c_str());
                     if (WiFi.status() == WL_CONNECTED) {
@@ -1082,7 +1114,9 @@ void handleCommand(const String& cmd) {
             else if (subcmd.startsWith("set ")) {
                 String mac = subcmd.substring(4);
                 mac.trim();
+                configLock();
                 networkConfig.autoConnectAddress = mac;
+                configUnlock();
                 ConfigStore::saveNetworkConfig(networkConfig);
                 Serial.printf("Auto-connect MAC set to: %s\n", mac.c_str());
             }
@@ -1119,11 +1153,18 @@ void handleCommand(const String& cmd) {
                         Serial.printf("WiFi credentials updated (SSID: %s)\n", newSsid.c_str());
                         Serial.println("Reconnecting to WiFi...");
 
-                        // Stop web server if running
+                        // Stop web server if running. Publish the nulled
+                        // pointer FIRST and give in-flight users a grace
+                        // period: the BLE task checks `webServer` before
+                        // calling broadcast*() and the async_tcp task may
+                        // still be inside a request handler — deleting
+                        // immediately would be a use-after-free for both.
                         if (webServer) {
-                            webServer->stop();
-                            delete webServer;
+                            CasambiWebServer* oldServer = webServer;
                             webServer = nullptr;
+                            delay(250);
+                            oldServer->stop();
+                            delete oldServer;
                         }
 
                         // Disconnect old WiFi
@@ -1639,7 +1680,9 @@ void connectToDevice(int index) {
 
         // Auto-save MAC address for auto-connect
         if (networkConfig.autoConnectAddress != dev.address) {
+            configLock();
             networkConfig.autoConnectAddress = dev.address;
+            configUnlock();
             ConfigStore::saveNetworkConfig(networkConfig);
             Serial.printf("Saved MAC address for auto-connect: %s\n", dev.address.c_str());
         }

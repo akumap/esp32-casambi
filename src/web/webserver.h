@@ -87,6 +87,16 @@ public:
     bool consumeRebootRequest();
 
     /**
+     * Check (and clear) whether POST /api/ntp submitted a new NTP server.
+     * The async handler only validates and stores the value; applying it
+     * (config mutation, LittleFS save, SNTP re-arm) runs in the loop task so
+     * the flash write never blocks the async_tcp task and the config String
+     * is only ever written from the loop task. Returns true exactly once and
+     * copies the server into `serverOut`.
+     */
+    bool consumeNtpRequest(String& serverOut);
+
+    /**
      * Broadcast a unit state change to all connected WebSocket clients.
      * Enriches the message with vertical/colorTemp/cctMin/cctMax from NetworkConfig
      * (already updated before this callback fires).
@@ -123,6 +133,12 @@ private:
 
     // Set by POST /api/reboot, drained by the loop task via consumeRebootRequest().
     volatile bool _rebootRequested;
+
+    // Set by POST /api/ntp, drained by the loop task via consumeNtpRequest().
+    // _pendingNtpServer is written on the async_tcp task and read on the loop
+    // task, so both sides access it under g_configMutex.
+    volatile bool _ntpRequested;
+    String _pendingNtpServer;
 
     // Derived API token (hex of SHA-256(prefix||casambiPassword)). Empty string
     // means authentication is disabled (no Casambi password stored). Computed
