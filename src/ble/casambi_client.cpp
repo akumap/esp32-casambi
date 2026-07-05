@@ -711,7 +711,7 @@ void CasambiClient::_handleNotification(uint8_t* data, size_t len) {
             break;
 
         default:
-            Serial.printf("BLE: Unexpected notification in state %d\n", static_cast<int>(_state));
+            Serial.printf("BLE: Unexpected notification in state %d\n", static_cast<int>(_state.load()));
             break;
     }
 }
