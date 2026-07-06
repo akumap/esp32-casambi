@@ -20,6 +20,7 @@ CasambiClient::CasambiClient(NetworkConfig* config)
       _mtu(0), _unitId(0), _flags(0), _outPacketCount(2), _inPacketCount(1), _origin(1),
       _connectedAddress(""), _connectTime(0), _lastNotificationTime(0),
       _totalReceivedPackets(0), _lastDisconnectReason(DisconnectReason::None),
+      _lastDisconnectSource("-"), _lastRssi(0),
       _unitStateCallback(nullptr), _connStateCallback(nullptr) {
     memset(_nonce, 0, NONCE_SIZE);
     _mutex    = xSemaphoreCreateMutex();
@@ -57,7 +58,7 @@ bool CasambiClient::_connectLocked(const String& address) {
 
     if (_state != ConnectionState::None) {
         Serial.println("BLE: Already connected/connecting, disconnecting first...");
-        _disconnectLocked(DisconnectReason::UserRequested);
+        _disconnectLocked(DisconnectReason::UserRequested, "connect");
         delay(500);
     }
 
@@ -100,14 +101,14 @@ bool CasambiClient::_connectLocked(const String& address) {
     NimBLERemoteService* service = _bleClient->getService(NimBLEUUID(CASAMBI_SERVICE_UUID));
     if (!service) {
         Serial.println("BLE: Service not found");
-        _disconnectLocked(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
     }
 
     _authChar = service->getCharacteristic(NimBLEUUID(CASAMBI_AUTH_CHAR_UUID));
     if (!_authChar) {
         Serial.println("BLE: Auth characteristic not found");
-        _disconnectLocked(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
     }
 
@@ -120,19 +121,19 @@ bool CasambiClient::_connectLocked(const String& address) {
 
     if (!_keyExchange->generateKeyPair()) {
         Serial.println("BLE: Failed to generate key pair");
-        _disconnectLocked(DisconnectReason::KeyExchangeFailed);
+        _disconnectLocked(DisconnectReason::KeyExchangeFailed, "connect");
         return false;
     }
 
     if (!_readDeviceInfo()) {
         Serial.println("BLE: Failed to read device info");
-        _disconnectLocked(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
     }
 
     if (!_performKeyExchange()) {
         Serial.println("BLE: Key exchange failed");
-        _disconnectLocked(DisconnectReason::KeyExchangeFailed);
+        _disconnectLocked(DisconnectReason::KeyExchangeFailed, "connect");
         return false;
     }
 
@@ -140,7 +141,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     if (key) {
         if (!_authenticate()) {
             Serial.println("BLE: Authentication failed");
-            _disconnectLocked(DisconnectReason::AuthFailed);
+            _disconnectLocked(DisconnectReason::AuthFailed, "connect");
             return false;
         }
     } else {
@@ -148,15 +149,18 @@ bool CasambiClient::_connectLocked(const String& address) {
         _setState(ConnectionState::Authenticated);
     }
 
-    Serial.println("BLE: Ready!");
+    // Initial link RSSI; refreshed by every health check (~10 s).
+    _lastRssi = _bleClient->getRssi();
+
+    Serial.printf("BLE: Ready! (RSSI %d dBm)\n", _lastRssi);
     return true;
 }
 
 void CasambiClient::disconnect() {
-    _disconnectInternal(DisconnectReason::UserRequested);
+    _disconnectInternal(DisconnectReason::UserRequested, "user");
 }
 
-void CasambiClient::_disconnectInternal(DisconnectReason reason) {
+void CasambiClient::_disconnectInternal(DisconnectReason reason, const char* source) {
     // Wait for any in-flight sender (they hold _mutex across the GATT write)
     // before tearing the link state down. If the mutex stays busy — the holders
     // are bounded by NimBLE's own timeouts — skip this attempt instead of
@@ -165,15 +169,16 @@ void CasambiClient::_disconnectInternal(DisconnectReason reason) {
         Serial.println("BLE: disconnect skipped (mutex busy), will retry");
         return;
     }
-    _disconnectLocked(reason);
+    _disconnectLocked(reason, source);
     xSemaphoreGive(_mutex);
 }
 
-void CasambiClient::_disconnectLocked(DisconnectReason reason) {
+void CasambiClient::_disconnectLocked(DisconnectReason reason, const char* source) {
     if (_bleClient && _bleClient->isConnected()) {
         _bleClient->disconnect();
     }
     _lastDisconnectReason = reason;
+    _lastDisconnectSource = source ? source : "-";
     _authChar = nullptr;
 
     // Acquire _encMutex so that any in-flight BLE-task notification handler
@@ -222,7 +227,7 @@ bool CasambiClient::sendKeepalive() {
 
     if (value.length() == 0) {
         Serial.println("BLE: Keepalive failed - no response");
-        _disconnectInternal(DisconnectReason::BLELinkLoss);
+        _disconnectInternal(DisconnectReason::BLELinkLoss, "keepalive");
         return false;
     }
 
@@ -244,9 +249,15 @@ bool CasambiClient::checkConnectionHealth() {
     if (_state == ConnectionState::Authenticated) {
         if (!isBLEConnected()) {
             Serial.println("BLE: Silent disconnect detected! Link lost.");
-            _disconnectInternal(DisconnectReason::BLELinkLoss);
+            _disconnectInternal(DisconnectReason::BLELinkLoss, "silent");
             return false;
         }
+
+        // Refresh the cached link RSSI (cheap HCI query, loop task). Keep the
+        // previous value on failure (getRssi() returns 0 then) so a disconnect
+        // right after still logs the last real reading.
+        int rssi = _bleClient->getRssi();
+        if (rssi != 0) _lastRssi = rssi;
 
         unsigned long silentDuration = millis() - _lastNotificationTime;
         if (silentDuration > 300000UL) {
@@ -585,7 +596,7 @@ void CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
         Serial.println("BLE: Link lost, cannot send operation");
         // Callers (the control setters) hold _mutex, so use the locked variant
         // directly — _disconnectInternal would deadlock on the same mutex.
-        _disconnectLocked(DisconnectReason::BLELinkLoss);
+        _disconnectLocked(DisconnectReason::BLELinkLoss, "send");
         return;
     }
 

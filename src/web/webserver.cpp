@@ -666,10 +666,14 @@ WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
         doc["gateway_mac"] = _client->getConnectedAddress();
         doc["connection_uptime_ms"] = _client->getConnectionUptime();
         doc["packets_received"] = _client->getReceivedPacketCount();
+        // Cached value (refreshed by the loop task's health check) — never a
+        // live BLE stack call from the async_tcp task.
+        doc["gateway_rssi"] = _client->getLastRssi();
     }
 
     if (_client->getLastDisconnectReason() != DisconnectReason::None) {
         doc["last_disconnect_reason"] = static_cast<int>(_client->getLastDisconnectReason());
+        doc["last_disconnect_source"] = _client->getLastDisconnectSource();
     }
 
     String response;

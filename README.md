@@ -276,12 +276,22 @@ or IP.
   "time_utc_ms": 1781946942000,
   "gateway_mac": "aa:bb:cc:dd:ee:01",
   "connection_uptime_ms": 98765,
-  "packets_received": 42
+  "packets_received": 42,
+  "gateway_rssi": -67
 }
 ```
 
 `boot_count` is a power-loss-surviving counter (stored in NVS). `time_synced`
 is `false` until NTP has set the clock; `time_utc*` fields appear only once synced.
+`gateway_rssi` is the BLE link strength to the gateway in dBm (refreshed every
+~10 s; `0` = not measured yet). After a disconnect the response additionally
+carries `last_disconnect_reason` (numeric `DisconnectReason`) and
+`last_disconnect_source` — which detector saw the loss: `silent` (health check
+found the link dead), `keepalive` (no response to the periodic read), `send`
+(link dead when sending a command), `connect` (failure during setup) or `user`.
+The same reason/source pair and the last known RSSI are written to the event
+log on every loss, and each successful auto-reconnect logs the attempt count
+and offline duration.
 
 **GET /api/units** — List all units with current state
 

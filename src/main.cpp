@@ -64,6 +64,10 @@ static unsigned long bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;
 static uint8_t consecutiveReconnectFailures = 0;
 static bool bleReconnectEnabled = true;  // Can be disabled via command
 
+// millis() when the BLE link was lost (0 = not currently lost). Set by the
+// connection-state callback, cleared by the reconnect success log.
+static unsigned long bleLostAt = 0;
+
 // WiFi monitoring state
 static unsigned long lastWiFiCheck = 0;
 
@@ -276,12 +280,17 @@ void setup() {
                         Serial.printf("*** BLE connection lost (reason: %d) - will auto-reconnect ***\n",
                                       static_cast<int>(reason));
                         // Auth/key-exchange failures are errors; a plain link
-                        // loss is a warning.
+                        // loss is a warning. Include which detector fired and
+                        // the last known link RSSI so drops can be attributed
+                        // (weak signal vs. sudden loss) from the log alone.
                         bool authIssue = (reason == DisconnectReason::AuthFailed ||
                                           reason == DisconnectReason::KeyExchangeFailed);
                         EventLog::log(authIssue ? LOG_ERROR : LOG_WARN,
-                                      "BLE connection lost (reason=%d)",
-                                      static_cast<int>(reason));
+                                      "BLE connection lost (reason=%d/%s, rssi=%d)",
+                                      static_cast<int>(reason),
+                                      casambiClient->getLastDisconnectSource(),
+                                      casambiClient->getLastRssi());
+                        if (bleLostAt == 0) bleLostAt = millis();
                         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;
                         lastBLEReconnectAttempt = millis();
                     }
@@ -504,6 +513,13 @@ void checkAndReconnectBLE() {
 
     if (casambiClient->connect(networkConfig.autoConnectAddress)) {
         Serial.println("BLE: Reconnect successful!");
+        // Record the recovery: attempts needed and how long the link was down.
+        // Together with the loss entry this shows outage windows in the log.
+        unsigned long offlineSecs = bleLostAt ? (millis() - bleLostAt) / 1000 : 0;
+        EventLog::log(LOG_INFO, "BLE reconnected (attempt %u, offline %lus, rssi=%d)",
+                      (unsigned)(consecutiveReconnectFailures + 1), offlineSecs,
+                      casambiClient->getLastRssi());
+        bleLostAt = 0;
         consecutiveReconnectFailures = 0;
         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;  // Reset backoff
 
@@ -665,11 +681,13 @@ void printStatus() {
                           uptime / 3600000, (uptime / 60000) % 60, (uptime / 1000) % 60);
             Serial.printf("  Packets received: %u\n", casambiClient->getReceivedPacketCount());
             Serial.printf("  Connected to: %s\n", casambiClient->getConnectedAddress().c_str());
+            Serial.printf("  RSSI: %d dBm\n", casambiClient->getLastRssi());
         }
 
         if (casambiClient->getLastDisconnectReason() != DisconnectReason::None) {
-            Serial.printf("  Last disconnect reason: %d\n",
-                          static_cast<int>(casambiClient->getLastDisconnectReason()));
+            Serial.printf("  Last disconnect: reason=%d/%s\n",
+                          static_cast<int>(casambiClient->getLastDisconnectReason()),
+                          casambiClient->getLastDisconnectSource());
         }
     } else {
         Serial.println("BLE: Setup mode - no client");
@@ -1091,7 +1109,11 @@ void handleCommand(const String& cmd) {
                     }
                 }
             } else {
-                Serial.printf("NTP server: %s\n", networkConfig.ntpServer.c_str());
+                bool isDefault = (networkConfig.ntpServer == NTP_SERVER_DEFAULT ||
+                                  networkConfig.ntpServer.length() == 0);
+                Serial.printf("NTP server (configured): %s%s\n",
+                              networkConfig.ntpServer.c_str(),
+                              isDefault ? " (default; local router tried first)" : "");
                 if (g_ntpCandidates.length() > 0) {
                     Serial.printf("Server order: %s\n", g_ntpCandidates.c_str());
                 }
@@ -1738,6 +1760,7 @@ void connectToDevice(int index) {
     if (casambiClient->connect(dev.address)) {
         Serial.println("Connected and authenticated successfully!");
         consecutiveReconnectFailures = 0;
+        bleLostAt = 0;  // manual recovery — don't attribute the next loss to the old outage
 
         // Auto-save MAC address for auto-connect
         if (networkConfig.autoConnectAddress != dev.address) {
