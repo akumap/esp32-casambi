@@ -121,14 +121,72 @@ static bool g_wifiWasConnected = false;
 // TIME SYNCHRONISATION (NTP, UTC)
 // ============================================================================
 
-// Kick off SNTP using the configured server. Non-blocking: the first call from
-// setup() starts the query; the loop re-checks and logs once time is valid.
+// True for RFC 1918 private IPv4 addresses (typical home-LAN router/DNS).
+static bool isPrivateIPv4(const IPAddress& ip) {
+    uint8_t a = ip[0], b = ip[1];
+    return (a == 10) ||
+           (a == 172 && b >= 16 && b <= 31) ||
+           (a == 192 && b == 168);
+}
+
+// Candidate order of the last syncTime() call, for 'ntp status'.
+static String g_ntpCandidates;
+
+// Kick off SNTP. Non-blocking: the first call from setup() starts the query;
+// the loop re-checks and logs once time is valid.
+//
+// Local-first: while the configured server is still the untouched default
+// (pool.ntp.org), the DHCP-provided DNS server and the gateway — in home
+// networks usually the router, which typically serves NTP — are tried first.
+// lwIP-SNTP is built with SNTP_MAX_SERVERS=3 and cycles to the next candidate
+// on timeout, so a router without NTP only delays the first sync by a few
+// seconds, while a network without internet still gets valid time from the
+// router. An explicitly configured server ('ntp set' / POST /api/ntp) always
+// takes precedence alone — no auto-detection in that case.
 void syncTime() {
-    const char* server = networkConfig.ntpServer.length() > 0
-                             ? networkConfig.ntpServer.c_str()
-                             : NTP_SERVER_DEFAULT;
-    configTime(0, 0, server);  // UTC (no offset, no DST)
-    Serial.printf("NTP: time sync requested from %s (UTC)\n", server);
+    // lwIP's sntp_setservername() stores the passed POINTER, not a copy, so
+    // every string handed to configTime() must stay valid for the lifetime of
+    // the SNTP session. Static buffers make that unconditional (the heap
+    // buffer of networkConfig.ntpServer can move when the setting changes).
+    static char cfgServer[65];
+    static char dnsServer[16];
+    static char gwServer[16];
+
+    String cfg = networkConfig.ntpServer.length() > 0
+                     ? networkConfig.ntpServer
+                     : String(NTP_SERVER_DEFAULT);
+    strlcpy(cfgServer, cfg.c_str(), sizeof(cfgServer));
+
+    const char* localDns = nullptr;
+    const char* localGw  = nullptr;
+    if (cfg == NTP_SERVER_DEFAULT) {
+        IPAddress dns = WiFi.dnsIP();
+        IPAddress gw  = WiFi.gatewayIP();
+        if (isPrivateIPv4(dns)) {
+            strlcpy(dnsServer, dns.toString().c_str(), sizeof(dnsServer));
+            localDns = dnsServer;
+        }
+        if (isPrivateIPv4(gw) && !(gw == dns)) {
+            strlcpy(gwServer, gw.toString().c_str(), sizeof(gwServer));
+            localGw = gwServer;
+        }
+    }
+
+    if (localDns && localGw) {
+        configTime(0, 0, localDns, localGw, cfgServer);  // UTC (no offset, no DST)
+        g_ntpCandidates = String(localDns) + " (DNS), " + localGw + " (gateway), " + cfgServer;
+    } else if (localDns) {
+        configTime(0, 0, localDns, cfgServer);
+        g_ntpCandidates = String(localDns) + " (DNS), " + cfgServer;
+    } else if (localGw) {
+        configTime(0, 0, localGw, cfgServer);
+        g_ntpCandidates = String(localGw) + " (gateway), " + cfgServer;
+    } else {
+        configTime(0, 0, cfgServer);
+        g_ntpCandidates = cfgServer;
+    }
+    Serial.printf("NTP: time sync requested, server order: %s (UTC)\n",
+                  g_ntpCandidates.c_str());
 }
 
 // ============================================================================
@@ -1034,6 +1092,9 @@ void handleCommand(const String& cmd) {
                 }
             } else {
                 Serial.printf("NTP server: %s\n", networkConfig.ntpServer.c_str());
+                if (g_ntpCandidates.length() > 0) {
+                    Serial.printf("Server order: %s\n", g_ntpCandidates.c_str());
+                }
                 Serial.printf("Time synced: %s\n", g_timeSynced ? "yes" : "no");
                 if (g_timeSynced) {
                     time_t nowSec = time(nullptr);

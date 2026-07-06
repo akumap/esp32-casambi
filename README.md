@@ -440,6 +440,15 @@ curl -X POST http://<ip>/api/ntp \
   -H "Content-Type: application/json" -d '{"server": "192.168.1.1"}'
 ```
 
+While the NTP server is the untouched default (`pool.ntp.org`), the device
+tries the **local router first**: the DHCP-provided DNS server and the gateway
+(when they are private RFC 1918 addresses) are queried before the public pool.
+Most home routers serve NTP, so time sync then works even without internet
+access; if the router does not answer, SNTP falls through to the pool after a
+few seconds. Setting a server explicitly (`ntp set` or `POST /api/ntp`)
+disables this auto-detection — the configured server is then used exclusively.
+The effective candidate order is shown by the serial `ntp status` command.
+
 Each log entry:
 
 ```json
