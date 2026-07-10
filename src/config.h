@@ -146,6 +146,24 @@
 // Maximum consecutive BLE reconnect failures before ESP restart
 #define MAX_RECONNECT_FAILURES          10
 
+// --- RSSI quality gate on connect ("gateway re-roll") -----------------------
+// All units of a Casambi network advertise the SAME virtual address, so the
+// physical unit serving a session is whichever advertisement the ESP32 happens
+// to catch first — a lottery. If the settled link RSSI after a successful
+// connect is below this threshold (dBm), the link is dropped and re-connected
+// to re-roll onto a closer unit (e.g. an always-powered actor next to the
+// ESP32). Set to 0 to disable the gate.
+#define BLE_MIN_CONNECT_RSSI            (-85)
+
+// Maximum re-rolls per connect() call. After that the LAST roll is accepted
+// regardless of RSSI (a previous, better unit cannot be re-targeted — every
+// re-connect is a fresh lottery), so connectivity always wins over quality.
+#define BLE_RSSI_REROLL_MAX             2
+
+// Settle time before the gate reads the RSSI. Readings taken immediately
+// after the connect can be far off (unaveraged controller value).
+#define BLE_RSSI_SETTLE_MS              2000
+
 // ============================================================================
 // WEBSERVER / WEBSOCKET SETTINGS
 // ============================================================================

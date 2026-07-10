@@ -293,6 +293,16 @@ The same reason/source pair and the last known RSSI are written to the event
 log on every loss, and each successful auto-reconnect logs the attempt count
 and offline duration.
 
+All units of a Casambi network advertise the **same virtual BLE address**, so
+each connect lands on a random physical unit ("gateway lottery"). To avoid
+getting stuck on a distant luminaire for a whole session, an **RSSI quality
+gate** re-rolls the connection: if the settled link RSSI after connect is below
+`BLE_MIN_CONNECT_RSSI` (default −85 dBm, `config.h`), the link is dropped and
+re-connected (up to `BLE_RSSI_REROLL_MAX` times, then the last roll is accepted
+regardless — connectivity beats quality). With an always-powered unit near the
+ESP32 the re-roll almost always lands there. Re-rolls appear in the event log
+(`BLE gateway re-roll 1/2: rssi=-91 < -85`).
+
 **GET /api/units** — List all units with current state
 
 ```json

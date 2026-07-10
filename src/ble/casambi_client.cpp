@@ -7,6 +7,7 @@
 
 #include "casambi_client.h"
 #include "packet.h"
+#include "../log/event_log.h"
 #include <NimBLEDevice.h>
 #include <mbedtls/sha256.h>
 #include <esp_task_wdt.h>
@@ -46,7 +47,52 @@ bool CasambiClient::connect(const String& address) {
         Serial.println("BLE: connect: mutex timeout, try again");
         return false;
     }
-    bool ok = _connectLocked(address);
+
+    // RSSI quality gate ("gateway re-roll", see config.h): all units of the
+    // network advertise the same virtual address, so each connect lands on a
+    // random physical unit. A weak link (typically a distant luminaire) is
+    // dropped and re-connected — with a strong advertiser nearby (e.g. an
+    // always-powered actor) the re-roll almost always lands there.
+    bool ok = false;
+    for (int reroll = 0; ; reroll++) {
+        ok = _connectLocked(address);
+        if (!ok || BLE_MIN_CONNECT_RSSI == 0) break;
+
+        // Let the controller settle before judging the link — the reading
+        // right after the connect can be far off. Keep feeding the WDT.
+        unsigned long settleStart = millis();
+        while (millis() - settleStart < BLE_RSSI_SETTLE_MS) {
+            delay(50);
+            esp_task_wdt_reset();
+        }
+
+        if (!isBLEConnected()) {
+            // Link died while settling — count it as a failed roll.
+            _disconnectLocked(DisconnectReason::BLELinkLoss, "connect");
+            if (reroll >= BLE_RSSI_REROLL_MAX) { ok = false; break; }
+            continue;
+        }
+
+        int rssi = _bleClient->getRssi();
+        if (rssi != 0) _lastRssi = rssi;
+
+        // Accept a good link, or one we cannot measure (rssi == 0).
+        if (rssi == 0 || rssi >= BLE_MIN_CONNECT_RSSI) break;
+
+        if (reroll >= BLE_RSSI_REROLL_MAX) {
+            // Budget exhausted: connectivity beats quality. Accept the LAST
+            // roll — a previous, better unit cannot be re-targeted anyway.
+            EventLog::log(LOG_WARN, "BLE link weak (rssi=%d < %d), accepted after %d re-rolls",
+                          rssi, BLE_MIN_CONNECT_RSSI, reroll);
+            break;
+        }
+
+        EventLog::log(LOG_INFO, "BLE gateway re-roll %d/%d: rssi=%d < %d",
+                      reroll + 1, BLE_RSSI_REROLL_MAX, rssi, BLE_MIN_CONNECT_RSSI);
+        _disconnectLocked(DisconnectReason::UserRequested, "reroll");
+        delay(300);  // brief gap so the peer sees the disconnect before we re-initiate
+    }
+
     xSemaphoreGive(_mutex);
     return ok;
 }
