@@ -260,7 +260,7 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
     }
 
     uint16_t flags = (data[0] << 8) | data[1];
-    uint8_t payloadLen = flags & 0x07FF;
+    uint16_t payloadLen = flags & 0x07FF;
 
     echo.opcode = data[2];
 

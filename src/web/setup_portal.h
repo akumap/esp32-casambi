@@ -50,18 +50,23 @@ private:
     DNSServer       _dns;
     bool            _bleInited;       // BLE stack currently initialised?
 
+    // Guards the members shared between the async_tcp request handlers and
+    // the loop-task state machine: _scanResults and the provisioning Strings
+    // below. Held only for short copy/swap sections, never across the scan or
+    // the cloud requests themselves.
+    SemaphoreHandle_t _mutex;
+
     // BLE scan
     volatile bool _scanRequested;
-    ScanState     _scan;
-    std::vector<CasambiScanResult> _scanResults;
+    volatile ScanState _scan;
+    std::vector<CasambiScanResult> _scanResults;   // guarded by _mutex
 
     // Provisioning
     volatile bool _provisionRequested;
-    ProvState     _prov;
-    String        _provMsg;
-    String        _provNetworkName;
-    String        _ssid, _wifiPw, _casambiPw, _chosenUuid;
-    String        _provBody;          // accumulates POST body chunks
+    volatile ProvState _prov;
+    String        _provMsg;           // guarded by _mutex
+    String        _provNetworkName;   // guarded by _mutex
+    String        _ssid, _wifiPw, _casambiPw, _chosenUuid;  // guarded by _mutex
     unsigned long _rebootAt;
 
     void _setupRoutes();

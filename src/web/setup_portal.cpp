@@ -136,9 +136,12 @@ async function provision(){
 
 SetupPortal::SetupPortal()
     : _server(nullptr), _bleInited(false),
+      _mutex(nullptr),
       _scanRequested(false), _scan(ScanState::Idle),
       _provisionRequested(false), _prov(ProvState::Idle),
-      _rebootAt(0) {}
+      _rebootAt(0) {
+    _mutex = xSemaphoreCreateMutex();
+}
 
 SetupPortal::~SetupPortal() {
     if (_server) {
@@ -147,6 +150,7 @@ SetupPortal::~SetupPortal() {
         _server = nullptr;
     }
     _dns.stop();
+    if (_mutex) vSemaphoreDelete(_mutex);
 }
 
 bool SetupPortal::begin() {
@@ -242,30 +246,67 @@ void SetupPortal::_setupRoutes() {
         nullptr,
         [this](AsyncWebServerRequest* req, uint8_t* data, size_t len,
                size_t index, size_t total) {
-            if (index == 0) _provBody = "";
-            for (size_t i = 0; i < len; i++) _provBody += (char)data[i];
+            // Buffer per request (_tempObject), not in a shared member: two
+            // overlapping POSTs would interleave their chunks otherwise. The
+            // onDisconnect hook frees the buffer if the body never completes.
+            if (index == 0) {
+                if (req->_tempObject) {
+                    delete static_cast<String*>(req->_tempObject);
+                }
+                String* buf = new String();
+                buf->reserve(total);
+                req->_tempObject = buf;
+                req->onDisconnect([req]() {
+                    if (req->_tempObject) {
+                        delete static_cast<String*>(req->_tempObject);
+                        req->_tempObject = nullptr;
+                    }
+                });
+            }
+            String* body = static_cast<String*>(req->_tempObject);
+            if (!body) return;
+            body->concat((const char*)data, len);
             if (index + len < total) return;   // wait for the rest
 
             JsonDocument d;
-            DeserializationError err = deserializeJson(d, _provBody);
-            _provBody = "";
+            DeserializationError err = deserializeJson(d, *body);
+            delete body;
+            req->_tempObject = nullptr;
             if (err) {
                 req->send(400, "application/json", "{\"error\":\"bad json\"}");
                 return;
             }
-            _ssid       = d["ssid"]            | "";
-            _wifiPw     = d["wifiPassword"]    | "";
-            _casambiPw  = d["casambiPassword"] | "";
-            _chosenUuid = d["networkUuid"]     | "";
 
-            if (_ssid.isEmpty() || _casambiPw.isEmpty()) {
+            // Reject while a provisioning run is active: _runProvision (loop
+            // task) is reading the parameter Strings; overwriting them now
+            // would race it.
+            if (_provisionRequested ||
+                _prov == ProvState::Connecting || _prov == ProvState::Fetching) {
+                req->send(409, "application/json",
+                          "{\"error\":\"provisioning already in progress\"}");
+                return;
+            }
+
+            String ssid       = d["ssid"]            | "";
+            String wifiPw     = d["wifiPassword"]    | "";
+            String casambiPw  = d["casambiPassword"] | "";
+            String chosenUuid = d["networkUuid"]     | "";
+
+            if (ssid.isEmpty() || casambiPw.isEmpty()) {
                 req->send(400, "application/json", "{\"error\":\"missing fields\"}");
                 return;
             }
 
+            if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+                _ssid       = ssid;
+                _wifiPw     = wifiPw;
+                _casambiPw  = casambiPw;
+                _chosenUuid = chosenUuid;
+                _provMsg = "";
+                _provNetworkName = "";
+                xSemaphoreGive(_mutex);
+            }
             _prov = ProvState::Connecting;
-            _provMsg = "";
-            _provNetworkName = "";
             _provisionRequested = true;
             req->send(202, "application/json", "{\"state\":\"accepted\"}");
         });
@@ -307,7 +348,17 @@ void SetupPortal::_runScan() {
         NimBLEDevice::init("Casambi-Setup");
         _bleInited = true;
     }
-    CasambiScan::run(PORTAL_BLE_SCAN_SECONDS, _scanResults);
+
+    // Scan into a local vector and swap under the mutex: a GET /api/ble-scan
+    // on the async_tcp task may be serializing _scanResults right now, and the
+    // scan itself takes seconds — far too long to hold the lock.
+    std::vector<CasambiScanResult> results;
+    CasambiScan::run(PORTAL_BLE_SCAN_SECONDS, results);
+
+    if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+        _scanResults = std::move(results);
+        xSemaphoreGive(_mutex);
+    }
 
     Serial.printf("Portal: BLE scan done, %d device(s)\n", _scanResults.size());
     _scan = ScanState::Done;
@@ -316,10 +367,30 @@ void SetupPortal::_runScan() {
 void SetupPortal::_runProvision() {
     _prov = ProvState::Connecting;
 
+    // Snapshot the parameters under the mutex. The POST handler rejects new
+    // submissions while a run is active, but the local copy makes this robust
+    // even if that gate is ever bypassed.
+    String ssid, wifiPw, casambiPw, chosenUuid;
+    if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+        ssid       = _ssid;
+        wifiPw     = _wifiPw;
+        casambiPw  = _casambiPw;
+        chosenUuid = _chosenUuid;
+        xSemaphoreGive(_mutex);
+    }
+
+    // Status-string writer: _statusJson() reads these on the async_tcp task.
+    auto setProvMsg = [this](const String& msg) {
+        if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+            _provMsg = msg;
+            xSemaphoreGive(_mutex);
+        }
+    };
+
     // Persist WLAN credentials early so a later operation boot can reconnect.
     WiFiCredentials wc;
-    wc.ssid = _ssid;
-    wc.password = _wifiPw;
+    wc.ssid = ssid;
+    wc.password = wifiPw;
     ConfigStore::saveWiFiCredentials(wc);
 
     // Release the BLE controller memory now (once) so the TLS handshake has a
@@ -333,7 +404,7 @@ void SetupPortal::_runProvision() {
 
     // Bring up STA alongside the AP so the portal page stays reachable.
     WiFi.mode(WIFI_AP_STA);
-    WiFi.begin(_ssid.c_str(), _wifiPw.c_str());
+    WiFi.begin(ssid.c_str(), wifiPw.c_str());
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < PORTAL_WIFI_TIMEOUT_MS) {
@@ -341,8 +412,8 @@ void SetupPortal::_runProvision() {
         esp_task_wdt_reset();
     }
     if (WiFi.status() != WL_CONNECTED) {
+        setProvMsg("Wi-Fi connection failed");
         _prov = ProvState::Error;
-        _provMsg = "Wi-Fi connection failed";
         return;
     }
     Serial.printf("Portal: WiFi connected, IP %s\n", WiFi.localIP().toString().c_str());
@@ -351,14 +422,17 @@ void SetupPortal::_runProvision() {
 
     // Candidate uuids: the chosen one, or every scanned device (password probe).
     std::vector<String> candidates;
-    if (!_chosenUuid.isEmpty()) {
-        candidates.push_back(_chosenUuid);
+    if (!chosenUuid.isEmpty()) {
+        candidates.push_back(chosenUuid);
     } else {
-        for (const auto& r : _scanResults) candidates.push_back(r.uuid);
+        if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+            for (const auto& r : _scanResults) candidates.push_back(r.uuid);
+            xSemaphoreGive(_mutex);
+        }
     }
     if (candidates.empty()) {
+        setProvMsg("No Casambi gateway found");
         _prov = ProvState::Error;
-        _provMsg = "No Casambi gateway found";
         return;
     }
 
@@ -373,7 +447,7 @@ void SetupPortal::_runProvision() {
         if (!api.getNetworkId(uuid, nid)) { lastErr = api.getLastError(); continue; }
         esp_task_wdt_reset();
         String token;
-        if (!api.createSession(nid, _casambiPw, token)) { lastErr = api.getLastError(); continue; }
+        if (!api.createSession(nid, casambiPw, token)) { lastErr = api.getLastError(); continue; }
         esp_task_wdt_reset();
         NetworkConfig tmp;
         if (!api.fetchNetworkConfig(nid, token, tmp)) { lastErr = api.getLastError(); continue; }
@@ -386,30 +460,37 @@ void SetupPortal::_runProvision() {
     }
 
     if (!ok) {
+        String msg = "Authentication/cloud request failed";
+        if (lastErr.length()) msg += ": " + lastErr;
+        setProvMsg(msg);
         _prov = ProvState::Error;
-        _provMsg = "Authentication/cloud request failed";
-        if (lastErr.length()) _provMsg += ": " + lastErr;
         return;
     }
 
-    cfg.casambiPassword    = _casambiPw;
+    cfg.casambiPassword    = casambiPw;
     cfg.autoConnectAddress = macFromUuid(usedUuid);   // preferred first target
     cfg.autoConnectEnabled = true;
 
     // Remember the advertised name of the chosen gateway (the connected BLE
     // address is usually a random static address and won't resolve to a unit).
-    for (const auto& r : _scanResults) {
-        if (r.uuid == usedUuid) { cfg.gatewayName = r.name; break; }
+    if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+        for (const auto& r : _scanResults) {
+            if (r.uuid == usedUuid) { cfg.gatewayName = r.name; break; }
+        }
+        xSemaphoreGive(_mutex);
     }
 
     if (!ConfigStore::saveNetworkConfig(cfg)) {
+        setProvMsg("Saving configuration failed");
         _prov = ProvState::Error;
-        _provMsg = "Saving configuration failed";
         return;
     }
 
-    _provNetworkName = cfg.networkName;
-    _provMsg = "Done";
+    if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+        _provNetworkName = cfg.networkName;
+        _provMsg = "Done";
+        xSemaphoreGive(_mutex);
+    }
     _prov = ProvState::Done;
     _rebootAt = millis() + 4000;       // let the browser poll the success state
     Serial.printf("Portal: provisioned network '%s'\n", cfg.networkName.c_str());
@@ -426,14 +507,19 @@ String SetupPortal::_bleScanJson() const {
                : "idle";
     if (_scan == ScanState::Done) {
         JsonArray a = d["devices"].to<JsonArray>();
-        for (const auto& r : _scanResults) {
-            JsonObject o = a.add<JsonObject>();
-            o["uuid"] = r.uuid;
-            o["mac"]  = r.mac;
-            o["name"] = r.name;
-            o["rssi"] = r.rssi;
-            if (r.mfgData.length()) o["mfgData"] = r.mfgData;
-            if (r.svcData.length()) o["svcData"] = r.svcData;
+        // Runs on the async_tcp task; _runScan (loop task) swaps the vector
+        // under the same mutex.
+        if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+            for (const auto& r : _scanResults) {
+                JsonObject o = a.add<JsonObject>();
+                o["uuid"] = r.uuid;
+                o["mac"]  = r.mac;
+                o["name"] = r.name;
+                o["rssi"] = r.rssi;
+                if (r.mfgData.length()) o["mfgData"] = r.mfgData;
+                if (r.svcData.length()) o["svcData"] = r.svcData;
+            }
+            xSemaphoreGive(_mutex);
         }
     }
     String out; serializeJson(d, out);
@@ -448,8 +534,13 @@ String SetupPortal::_statusJson() const {
         _prov == ProvState::Error      ? "error"           : "idle";
     JsonDocument d;
     d["state"] = s;
-    if (_provMsg.length())         d["msg"] = _provMsg;
-    if (_provNetworkName.length()) d["networkName"] = _provNetworkName;
+    // Copy the Strings under the mutex: _runProvision (loop task) writes them
+    // while this runs on the async_tcp task.
+    if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+        if (_provMsg.length())         d["msg"] = _provMsg;
+        if (_provNetworkName.length()) d["networkName"] = _provNetworkName;
+        xSemaphoreGive(_mutex);
+    }
     String out; serializeJson(d, out);
     return out;
 }

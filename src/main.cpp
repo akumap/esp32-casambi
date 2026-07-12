@@ -27,6 +27,14 @@ CasambiClient* casambiClient = nullptr;
 CasambiAPIClient* apiClient = nullptr;
 CasambiWebServer* webServer = nullptr;
 SetupPortal* setupPortal = nullptr;
+
+// Guards the runtime-mutable NetworkConfig String fields (see config.h). All
+// writers run on the loop task; the async_tcp task copies under this mutex.
+SemaphoreHandle_t g_configMutex = nullptr;
+
+// Take/give g_configMutex around a String mutation on the loop task.
+static void configLock()   { if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY); }
+static void configUnlock() { if (g_configMutex) xSemaphoreGive(g_configMutex); }
 bool bleDebugEnabled     = false;
 bool casambiDebugEnabled = true;
 bool webDebugEnabled     = true;
@@ -55,6 +63,10 @@ static unsigned long lastBLEReconnectAttempt = 0;
 static unsigned long bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;
 static uint8_t consecutiveReconnectFailures = 0;
 static bool bleReconnectEnabled = true;  // Can be disabled via command
+
+// millis() when the BLE link was lost (0 = not currently lost). Set by the
+// connection-state callback, cleared by the reconnect success log.
+static unsigned long bleLostAt = 0;
 
 // WiFi monitoring state
 static unsigned long lastWiFiCheck = 0;
@@ -113,14 +125,72 @@ static bool g_wifiWasConnected = false;
 // TIME SYNCHRONISATION (NTP, UTC)
 // ============================================================================
 
-// Kick off SNTP using the configured server. Non-blocking: the first call from
-// setup() starts the query; the loop re-checks and logs once time is valid.
+// True for RFC 1918 private IPv4 addresses (typical home-LAN router/DNS).
+static bool isPrivateIPv4(const IPAddress& ip) {
+    uint8_t a = ip[0], b = ip[1];
+    return (a == 10) ||
+           (a == 172 && b >= 16 && b <= 31) ||
+           (a == 192 && b == 168);
+}
+
+// Candidate order of the last syncTime() call, for 'ntp status'.
+static String g_ntpCandidates;
+
+// Kick off SNTP. Non-blocking: the first call from setup() starts the query;
+// the loop re-checks and logs once time is valid.
+//
+// Local-first: while the configured server is still the untouched default
+// (pool.ntp.org), the DHCP-provided DNS server and the gateway — in home
+// networks usually the router, which typically serves NTP — are tried first.
+// lwIP-SNTP is built with SNTP_MAX_SERVERS=3 and cycles to the next candidate
+// on timeout, so a router without NTP only delays the first sync by a few
+// seconds, while a network without internet still gets valid time from the
+// router. An explicitly configured server ('ntp set' / POST /api/ntp) always
+// takes precedence alone — no auto-detection in that case.
 void syncTime() {
-    const char* server = networkConfig.ntpServer.length() > 0
-                             ? networkConfig.ntpServer.c_str()
-                             : NTP_SERVER_DEFAULT;
-    configTime(0, 0, server);  // UTC (no offset, no DST)
-    Serial.printf("NTP: time sync requested from %s (UTC)\n", server);
+    // lwIP's sntp_setservername() stores the passed POINTER, not a copy, so
+    // every string handed to configTime() must stay valid for the lifetime of
+    // the SNTP session. Static buffers make that unconditional (the heap
+    // buffer of networkConfig.ntpServer can move when the setting changes).
+    static char cfgServer[65];
+    static char dnsServer[16];
+    static char gwServer[16];
+
+    String cfg = networkConfig.ntpServer.length() > 0
+                     ? networkConfig.ntpServer
+                     : String(NTP_SERVER_DEFAULT);
+    strlcpy(cfgServer, cfg.c_str(), sizeof(cfgServer));
+
+    const char* localDns = nullptr;
+    const char* localGw  = nullptr;
+    if (cfg == NTP_SERVER_DEFAULT) {
+        IPAddress dns = WiFi.dnsIP();
+        IPAddress gw  = WiFi.gatewayIP();
+        if (isPrivateIPv4(dns)) {
+            strlcpy(dnsServer, dns.toString().c_str(), sizeof(dnsServer));
+            localDns = dnsServer;
+        }
+        if (isPrivateIPv4(gw) && !(gw == dns)) {
+            strlcpy(gwServer, gw.toString().c_str(), sizeof(gwServer));
+            localGw = gwServer;
+        }
+    }
+
+    if (localDns && localGw) {
+        configTime(0, 0, localDns, localGw, cfgServer);  // UTC (no offset, no DST)
+        g_ntpCandidates = String(localDns) + " (DNS), " + localGw + " (gateway), " + cfgServer;
+    } else if (localDns) {
+        configTime(0, 0, localDns, cfgServer);
+        g_ntpCandidates = String(localDns) + " (DNS), " + cfgServer;
+    } else if (localGw) {
+        configTime(0, 0, localGw, cfgServer);
+        g_ntpCandidates = String(localGw) + " (gateway), " + cfgServer;
+    } else {
+        configTime(0, 0, cfgServer);
+        g_ntpCandidates = cfgServer;
+    }
+    Serial.printf("NTP: time sync requested, server order: %s (UTC)\n",
+                  g_ntpCandidates.c_str());
 }
 
 // ============================================================================
@@ -130,6 +200,8 @@ void syncTime() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
+    g_configMutex = xSemaphoreCreateMutex();
 
     Serial.println("\n================================");
     Serial.println("  ESP32 Casambi Controller");
@@ -208,12 +280,17 @@ void setup() {
                         Serial.printf("*** BLE connection lost (reason: %d) - will auto-reconnect ***\n",
                                       static_cast<int>(reason));
                         // Auth/key-exchange failures are errors; a plain link
-                        // loss is a warning.
+                        // loss is a warning. Include which detector fired and
+                        // the last known link RSSI so drops can be attributed
+                        // (weak signal vs. sudden loss) from the log alone.
                         bool authIssue = (reason == DisconnectReason::AuthFailed ||
                                           reason == DisconnectReason::KeyExchangeFailed);
                         EventLog::log(authIssue ? LOG_ERROR : LOG_WARN,
-                                      "BLE connection lost (reason=%d)",
-                                      static_cast<int>(reason));
+                                      "BLE connection lost (reason=%d/%s, rssi=%d)",
+                                      static_cast<int>(reason),
+                                      casambiClient->getLastDisconnectSource(),
+                                      casambiClient->getLastRssi());
+                        if (bleLostAt == 0) bleLostAt = millis();
                         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;
                         lastBLEReconnectAttempt = millis();
                     }
@@ -369,9 +446,27 @@ void loop() {
     // Monitor heap usage
     monitorHeap();
 
+    // Persist event-log entries that other tasks (BLE host, async_tcp) queued
+    // in RTC RAM — those tasks must not block on LittleFS writes themselves.
+    EventLog::flush();
+
     // WebSocket housekeeping (clean up disconnected clients)
     if (webServer) {
         webServer->loop();
+
+        // NTP server change submitted via POST /api/ntp. Applied here so the
+        // config String is only ever mutated on the loop task and the LittleFS
+        // save never blocks the async_tcp task.
+        String newNtpServer;
+        if (webServer->consumeNtpRequest(newNtpServer)) {
+            configLock();
+            networkConfig.ntpServer = newNtpServer;
+            configUnlock();
+            ConfigStore::saveNetworkConfig(networkConfig);
+            g_timeSynced = false;
+            syncTime();  // re-arm SNTP with the new server
+            EventLog::log(LOG_INFO, "NTP server changed to %s", newNtpServer.c_str());
+        }
 
         // FHEM-triggered cloud-config refresh (POST /api/refreshCasambi). Handle
         // it here in the loop task — never from the async web-server context. It
@@ -418,6 +513,13 @@ void checkAndReconnectBLE() {
 
     if (casambiClient->connect(networkConfig.autoConnectAddress)) {
         Serial.println("BLE: Reconnect successful!");
+        // Record the recovery: attempts needed and how long the link was down.
+        // Together with the loss entry this shows outage windows in the log.
+        unsigned long offlineSecs = bleLostAt ? (millis() - bleLostAt) / 1000 : 0;
+        EventLog::log(LOG_INFO, "BLE reconnected (attempt %u, offline %lus, rssi=%d)",
+                      (unsigned)(consecutiveReconnectFailures + 1), offlineSecs,
+                      casambiClient->getLastRssi());
+        bleLostAt = 0;
         consecutiveReconnectFailures = 0;
         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;  // Reset backoff
 
@@ -579,11 +681,13 @@ void printStatus() {
                           uptime / 3600000, (uptime / 60000) % 60, (uptime / 1000) % 60);
             Serial.printf("  Packets received: %u\n", casambiClient->getReceivedPacketCount());
             Serial.printf("  Connected to: %s\n", casambiClient->getConnectedAddress().c_str());
+            Serial.printf("  RSSI: %d dBm\n", casambiClient->getLastRssi());
         }
 
         if (casambiClient->getLastDisconnectReason() != DisconnectReason::None) {
-            Serial.printf("  Last disconnect reason: %d\n",
-                          static_cast<int>(casambiClient->getLastDisconnectReason()));
+            Serial.printf("  Last disconnect: reason=%d/%s\n",
+                          static_cast<int>(casambiClient->getLastDisconnectReason()),
+                          casambiClient->getLastDisconnectSource());
         }
     } else {
         Serial.println("BLE: Setup mode - no client");
@@ -708,7 +812,9 @@ void requestCloudRefresh(const String& password) {
     // Persist the password to use after the reboot (saved one, or one newly
     // typed at the serial prompt).
     if (password != networkConfig.casambiPassword) {
+        configLock();
         networkConfig.casambiPassword = password;
+        configUnlock();
         if (!ConfigStore::saveNetworkConfig(networkConfig)) {
             Serial.println("ERROR: Failed to store password for refresh");
             return;
@@ -992,7 +1098,9 @@ void handleCommand(const String& cmd) {
                 if (server.length() == 0) {
                     Serial.println("Usage: ntp set <hostname|ip>  (e.g. pool.ntp.org or 192.168.1.1)");
                 } else {
+                    configLock();
                     networkConfig.ntpServer = server;
+                    configUnlock();
                     ConfigStore::saveNetworkConfig(networkConfig);
                     Serial.printf("NTP server set to: %s\n", server.c_str());
                     if (WiFi.status() == WL_CONNECTED) {
@@ -1001,7 +1109,14 @@ void handleCommand(const String& cmd) {
                     }
                 }
             } else {
-                Serial.printf("NTP server: %s\n", networkConfig.ntpServer.c_str());
+                bool isDefault = (networkConfig.ntpServer == NTP_SERVER_DEFAULT ||
+                                  networkConfig.ntpServer.length() == 0);
+                Serial.printf("NTP server (configured): %s%s\n",
+                              networkConfig.ntpServer.c_str(),
+                              isDefault ? " (default; local router tried first)" : "");
+                if (g_ntpCandidates.length() > 0) {
+                    Serial.printf("Server order: %s\n", g_ntpCandidates.c_str());
+                }
                 Serial.printf("Time synced: %s\n", g_timeSynced ? "yes" : "no");
                 if (g_timeSynced) {
                     time_t nowSec = time(nullptr);
@@ -1082,7 +1197,9 @@ void handleCommand(const String& cmd) {
             else if (subcmd.startsWith("set ")) {
                 String mac = subcmd.substring(4);
                 mac.trim();
+                configLock();
                 networkConfig.autoConnectAddress = mac;
+                configUnlock();
                 ConfigStore::saveNetworkConfig(networkConfig);
                 Serial.printf("Auto-connect MAC set to: %s\n", mac.c_str());
             }
@@ -1119,11 +1236,18 @@ void handleCommand(const String& cmd) {
                         Serial.printf("WiFi credentials updated (SSID: %s)\n", newSsid.c_str());
                         Serial.println("Reconnecting to WiFi...");
 
-                        // Stop web server if running
+                        // Stop web server if running. Publish the nulled
+                        // pointer FIRST and give in-flight users a grace
+                        // period: the BLE task checks `webServer` before
+                        // calling broadcast*() and the async_tcp task may
+                        // still be inside a request handler — deleting
+                        // immediately would be a use-after-free for both.
                         if (webServer) {
-                            webServer->stop();
-                            delete webServer;
+                            CasambiWebServer* oldServer = webServer;
                             webServer = nullptr;
+                            delay(250);
+                            oldServer->stop();
+                            delete oldServer;
                         }
 
                         // Disconnect old WiFi
@@ -1636,10 +1760,13 @@ void connectToDevice(int index) {
     if (casambiClient->connect(dev.address)) {
         Serial.println("Connected and authenticated successfully!");
         consecutiveReconnectFailures = 0;
+        bleLostAt = 0;  // manual recovery — don't attribute the next loss to the old outage
 
         // Auto-save MAC address for auto-connect
         if (networkConfig.autoConnectAddress != dev.address) {
+            configLock();
             networkConfig.autoConnectAddress = dev.address;
+            configUnlock();
             ConfigStore::saveNetworkConfig(networkConfig);
             Serial.printf("Saved MAC address for auto-connect: %s\n", dev.address.c_str());
         }

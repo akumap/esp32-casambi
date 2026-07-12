@@ -11,6 +11,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <functional>
+#include <atomic>
 #include "../config.h"
 #include "../cloud/network_config.h"
 #include "../crypto/encryption.h"
@@ -112,6 +113,21 @@ public:
     DisconnectReason getLastDisconnectReason() const { return _lastDisconnectReason; }
 
     /**
+     * Which detector triggered the last disconnect ("silent" = health check,
+     * "keepalive" = GATT read got no response, "send" = link dead on write,
+     * "connect" = failure during connection setup, "user" = requested).
+     * Static string, never nullptr.
+     */
+    const char* getLastDisconnectSource() const { return _lastDisconnectSource; }
+
+    /**
+     * Last known RSSI of the gateway link in dBm (0 = not measured yet).
+     * Updated on connect and by every health check (~10 s); cached so it can
+     * be read from any task without a BLE stack call.
+     */
+    int getLastRssi() const { return _lastRssi; }
+
+    /**
      * Get the address we're connected (or were last connected) to
      */
     String getConnectedAddress() const { return _connectedAddress; }
@@ -166,7 +182,10 @@ private:
     NimBLEClient* _bleClient;
     NimBLERemoteCharacteristic* _authChar;
 
-    ConnectionState _state;
+    // Written by the NimBLE host task (notification handlers) and polled by the
+    // loop task (connect wait loops) — atomic so the cross-task hand-off is
+    // well-defined instead of relying on delay() forcing a reload.
+    std::atomic<ConnectionState> _state;
     ECDHKeyExchange* _keyExchange;
     CasambiEncryption* _encryption;
 
@@ -185,6 +204,8 @@ private:
     unsigned long _lastNotificationTime; // millis() when last notification received
     uint32_t _totalReceivedPackets;
     DisconnectReason _lastDisconnectReason;
+    const char* _lastDisconnectSource;   // detector of the last disconnect (static string)
+    int _lastRssi;                       // last known link RSSI in dBm (0 = unknown)
 
     // Thread safety for concurrent command line + web server access
     SemaphoreHandle_t _mutex;
@@ -210,9 +231,24 @@ private:
     bool _authenticate();
 
     /**
-     * Internal disconnect with reason tracking
+     * Connect flow body. Assumes _mutex is held (public connect() takes it so
+     * the reconnect path cannot free _bleClient/_authChar under a control
+     * command that is mid-write).
      */
-    void _disconnectInternal(DisconnectReason reason);
+    bool _connectLocked(const String& address);
+
+    /**
+     * Internal disconnect with reason tracking. Takes _mutex; if the mutex is
+     * busy the disconnect is skipped (the next health check retries) rather
+     * than racing a concurrent sender. `source` names the detector for
+     * diagnostics (static string, e.g. "keepalive"); see getLastDisconnectSource().
+     */
+    void _disconnectInternal(DisconnectReason reason, const char* source = nullptr);
+
+    /**
+     * Disconnect body. Assumes _mutex is held.
+     */
+    void _disconnectLocked(DisconnectReason reason, const char* source = nullptr);
 
     /**
      * Update state and fire callback

@@ -7,6 +7,7 @@
 
 #include "casambi_client.h"
 #include "packet.h"
+#include "../log/event_log.h"
 #include <NimBLEDevice.h>
 #include <mbedtls/sha256.h>
 #include <esp_task_wdt.h>
@@ -20,6 +21,7 @@ CasambiClient::CasambiClient(NetworkConfig* config)
       _mtu(0), _unitId(0), _flags(0), _outPacketCount(2), _inPacketCount(1), _origin(1),
       _connectedAddress(""), _connectTime(0), _lastNotificationTime(0),
       _totalReceivedPackets(0), _lastDisconnectReason(DisconnectReason::None),
+      _lastDisconnectSource("-"), _lastRssi(0),
       _unitStateCallback(nullptr), _connStateCallback(nullptr) {
     memset(_nonce, 0, NONCE_SIZE);
     _mutex    = xSemaphoreCreateMutex();
@@ -37,13 +39,72 @@ CasambiClient::~CasambiClient() {
 }
 
 bool CasambiClient::connect(const String& address) {
+    // Serialize against the control setters (web/serial): they hold _mutex
+    // across _sendOperation (including the GATT write), so once we own the
+    // mutex no sender can still be using _bleClient/_authChar when the
+    // reconnect path below frees them via deleteClient().
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        Serial.println("BLE: connect: mutex timeout, try again");
+        return false;
+    }
+
+    // RSSI quality gate ("gateway re-roll", see config.h): all units of the
+    // network advertise the same virtual address, so each connect lands on a
+    // random physical unit. A weak link (typically a distant luminaire) is
+    // dropped and re-connected — with a strong advertiser nearby (e.g. an
+    // always-powered actor) the re-roll almost always lands there.
+    bool ok = false;
+    for (int reroll = 0; ; reroll++) {
+        ok = _connectLocked(address);
+        if (!ok || BLE_MIN_CONNECT_RSSI == 0) break;
+
+        // Let the controller settle before judging the link — the reading
+        // right after the connect can be far off. Keep feeding the WDT.
+        unsigned long settleStart = millis();
+        while (millis() - settleStart < BLE_RSSI_SETTLE_MS) {
+            delay(50);
+            esp_task_wdt_reset();
+        }
+
+        if (!isBLEConnected()) {
+            // Link died while settling — count it as a failed roll.
+            _disconnectLocked(DisconnectReason::BLELinkLoss, "connect");
+            if (reroll >= BLE_RSSI_REROLL_MAX) { ok = false; break; }
+            continue;
+        }
+
+        int rssi = _bleClient->getRssi();
+        if (rssi != 0) _lastRssi = rssi;
+
+        // Accept a good link, or one we cannot measure (rssi == 0).
+        if (rssi == 0 || rssi >= BLE_MIN_CONNECT_RSSI) break;
+
+        if (reroll >= BLE_RSSI_REROLL_MAX) {
+            // Budget exhausted: connectivity beats quality. Accept the LAST
+            // roll — a previous, better unit cannot be re-targeted anyway.
+            EventLog::log(LOG_WARN, "BLE link weak (rssi=%d < %d), accepted after %d re-rolls",
+                          rssi, BLE_MIN_CONNECT_RSSI, reroll);
+            break;
+        }
+
+        EventLog::log(LOG_INFO, "BLE gateway re-roll %d/%d: rssi=%d < %d",
+                      reroll + 1, BLE_RSSI_REROLL_MAX, rssi, BLE_MIN_CONNECT_RSSI);
+        _disconnectLocked(DisconnectReason::UserRequested, "reroll");
+        delay(300);  // brief gap so the peer sees the disconnect before we re-initiate
+    }
+
+    xSemaphoreGive(_mutex);
+    return ok;
+}
+
+bool CasambiClient::_connectLocked(const String& address) {
     if (bleDebugEnabled) {
         Serial.printf("BLE: Connecting to %s\n", address.c_str());
     }
 
     if (_state != ConnectionState::None) {
         Serial.println("BLE: Already connected/connecting, disconnecting first...");
-        _disconnectInternal(DisconnectReason::UserRequested);
+        _disconnectLocked(DisconnectReason::UserRequested, "connect");
         delay(500);
     }
 
@@ -64,6 +125,11 @@ bool CasambiClient::connect(const String& address) {
     }
     _bleClient = NimBLEDevice::createClient();
 
+    // Bound the blocking connect attempt: NimBLE's default (30 s) matches the
+    // task-WDT timeout exactly, so a hanging connect on the loop task would
+    // race the watchdog. 10 s keeps well clear of it.
+    _bleClient->setConnectTimeout(BLE_CONNECT_TIMEOUT_MS);
+
     // Casambi gateways are reconnected by their stored MAC (no live scan). NimBLE
     // requires the peer address type; mirror the old Bluedroid default (public).
     // If a gateway turns out to advertise a random address, see concept 6.3.
@@ -81,14 +147,14 @@ bool CasambiClient::connect(const String& address) {
     NimBLERemoteService* service = _bleClient->getService(NimBLEUUID(CASAMBI_SERVICE_UUID));
     if (!service) {
         Serial.println("BLE: Service not found");
-        _disconnectInternal(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
     }
 
     _authChar = service->getCharacteristic(NimBLEUUID(CASAMBI_AUTH_CHAR_UUID));
     if (!_authChar) {
         Serial.println("BLE: Auth characteristic not found");
-        _disconnectInternal(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
     }
 
@@ -101,19 +167,19 @@ bool CasambiClient::connect(const String& address) {
 
     if (!_keyExchange->generateKeyPair()) {
         Serial.println("BLE: Failed to generate key pair");
-        _disconnectInternal(DisconnectReason::KeyExchangeFailed);
+        _disconnectLocked(DisconnectReason::KeyExchangeFailed, "connect");
         return false;
     }
 
     if (!_readDeviceInfo()) {
         Serial.println("BLE: Failed to read device info");
-        _disconnectInternal(DisconnectReason::InternalError);
+        _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
     }
 
     if (!_performKeyExchange()) {
         Serial.println("BLE: Key exchange failed");
-        _disconnectInternal(DisconnectReason::KeyExchangeFailed);
+        _disconnectLocked(DisconnectReason::KeyExchangeFailed, "connect");
         return false;
     }
 
@@ -121,7 +187,7 @@ bool CasambiClient::connect(const String& address) {
     if (key) {
         if (!_authenticate()) {
             Serial.println("BLE: Authentication failed");
-            _disconnectInternal(DisconnectReason::AuthFailed);
+            _disconnectLocked(DisconnectReason::AuthFailed, "connect");
             return false;
         }
     } else {
@@ -129,19 +195,36 @@ bool CasambiClient::connect(const String& address) {
         _setState(ConnectionState::Authenticated);
     }
 
-    Serial.println("BLE: Ready!");
+    // Initial link RSSI; refreshed by every health check (~10 s).
+    _lastRssi = _bleClient->getRssi();
+
+    Serial.printf("BLE: Ready! (RSSI %d dBm)\n", _lastRssi);
     return true;
 }
 
 void CasambiClient::disconnect() {
-    _disconnectInternal(DisconnectReason::UserRequested);
+    _disconnectInternal(DisconnectReason::UserRequested, "user");
 }
 
-void CasambiClient::_disconnectInternal(DisconnectReason reason) {
+void CasambiClient::_disconnectInternal(DisconnectReason reason, const char* source) {
+    // Wait for any in-flight sender (they hold _mutex across the GATT write)
+    // before tearing the link state down. If the mutex stays busy — the holders
+    // are bounded by NimBLE's own timeouts — skip this attempt instead of
+    // racing the holder; the periodic health check will retry.
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("BLE: disconnect skipped (mutex busy), will retry");
+        return;
+    }
+    _disconnectLocked(reason, source);
+    xSemaphoreGive(_mutex);
+}
+
+void CasambiClient::_disconnectLocked(DisconnectReason reason, const char* source) {
     if (_bleClient && _bleClient->isConnected()) {
         _bleClient->disconnect();
     }
     _lastDisconnectReason = reason;
+    _lastDisconnectSource = source ? source : "-";
     _authChar = nullptr;
 
     // Acquire _encMutex so that any in-flight BLE-task notification handler
@@ -190,7 +273,7 @@ bool CasambiClient::sendKeepalive() {
 
     if (value.length() == 0) {
         Serial.println("BLE: Keepalive failed - no response");
-        _disconnectInternal(DisconnectReason::BLELinkLoss);
+        _disconnectInternal(DisconnectReason::BLELinkLoss, "keepalive");
         return false;
     }
 
@@ -212,9 +295,15 @@ bool CasambiClient::checkConnectionHealth() {
     if (_state == ConnectionState::Authenticated) {
         if (!isBLEConnected()) {
             Serial.println("BLE: Silent disconnect detected! Link lost.");
-            _disconnectInternal(DisconnectReason::BLELinkLoss);
+            _disconnectInternal(DisconnectReason::BLELinkLoss, "silent");
             return false;
         }
+
+        // Refresh the cached link RSSI (cheap HCI query, loop task). Keep the
+        // previous value on failure (getRssi() returns 0 then) so a disconnect
+        // right after still logs the last real reading.
+        int rssi = _bleClient->getRssi();
+        if (rssi != 0) _lastRssi = rssi;
 
         unsigned long silentDuration = millis() - _lastNotificationTime;
         if (silentDuration > 300000UL) {
@@ -351,7 +440,8 @@ bool CasambiClient::_readDeviceInfo() {
     }
 
     std::string value = _authChar->readValue();
-    if (value.length() < 21) {
+    // 7 header bytes (type, version, mtu, unitId x2, flags x2) + 16-byte nonce
+    if (value.length() < 7 + NONCE_SIZE) {
         Serial.printf("BLE: Invalid device info length: %d\n", value.length());
         return false;
     }
@@ -550,7 +640,9 @@ void CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
 
     if (!isBLEConnected()) {
         Serial.println("BLE: Link lost, cannot send operation");
-        _disconnectInternal(DisconnectReason::BLELinkLoss);
+        // Callers (the control setters) hold _mutex, so use the locked variant
+        // directly — _disconnectInternal would deadlock on the same mutex.
+        _disconnectLocked(DisconnectReason::BLELinkLoss, "send");
         return;
     }
 
@@ -676,7 +768,7 @@ void CasambiClient::_handleNotification(uint8_t* data, size_t len) {
             break;
 
         default:
-            Serial.printf("BLE: Unexpected notification in state %d\n", static_cast<int>(_state));
+            Serial.printf("BLE: Unexpected notification in state %d\n", static_cast<int>(_state.load()));
             break;
     }
 }

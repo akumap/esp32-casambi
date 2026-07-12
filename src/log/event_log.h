@@ -70,9 +70,19 @@ public:
 
     /**
      * Append a formatted entry. Safe to call from any task (mutex-guarded).
-     * Writes to RTC RAM first (crash-safe), then best-effort to LittleFS.
+     * Writes to RTC RAM first (crash-safe). LittleFS persistence happens
+     * inline only when called from the task that ran begin() (loopTask);
+     * entries logged by other tasks (BLE host, async_tcp) stay pending in the
+     * RTC ring until flush() runs, so no task ever blocks the BLE stack or
+     * the TCP task on a flash write.
      */
     static void log(uint8_t level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+
+    /**
+     * Persist any RTC entries not yet written to LittleFS. Call periodically
+     * from loop(). Cheap when nothing is pending.
+     */
+    static void flush();
 
     /**
      * Erase all persisted entries (both LittleFS files and the RTC buffer).
@@ -144,6 +154,10 @@ private:
     static char   _activeFile;     // '0' => A, '1' => B
     static size_t _activeSize;     // bytes currently in active file
     static SemaphoreHandle_t _mutex;
+    static TaskHandle_t _ownerTask;  // task that ran begin(); may write flash inline
+
+    // Persist pending RTC entries to LittleFS. Assumes _mutex held.
+    static void _flushPendingLocked();
 
     // Streaming readers — emit the newest `maxEntries` records newest-first
     // without ever holding more than a few records in RAM. The flash is read in

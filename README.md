@@ -276,12 +276,32 @@ or IP.
   "time_utc_ms": 1781946942000,
   "gateway_mac": "aa:bb:cc:dd:ee:01",
   "connection_uptime_ms": 98765,
-  "packets_received": 42
+  "packets_received": 42,
+  "gateway_rssi": -67
 }
 ```
 
 `boot_count` is a power-loss-surviving counter (stored in NVS). `time_synced`
 is `false` until NTP has set the clock; `time_utc*` fields appear only once synced.
+`gateway_rssi` is the BLE link strength to the gateway in dBm (refreshed every
+~10 s; `0` = not measured yet). After a disconnect the response additionally
+carries `last_disconnect_reason` (numeric `DisconnectReason`) and
+`last_disconnect_source` — which detector saw the loss: `silent` (health check
+found the link dead), `keepalive` (no response to the periodic read), `send`
+(link dead when sending a command), `connect` (failure during setup) or `user`.
+The same reason/source pair and the last known RSSI are written to the event
+log on every loss, and each successful auto-reconnect logs the attempt count
+and offline duration.
+
+All units of a Casambi network advertise the **same virtual BLE address**, so
+each connect lands on a random physical unit ("gateway lottery"). To avoid
+getting stuck on a distant luminaire for a whole session, an **RSSI quality
+gate** re-rolls the connection: if the settled link RSSI after connect is below
+`BLE_MIN_CONNECT_RSSI` (default −85 dBm, `config.h`), the link is dropped and
+re-connected (up to `BLE_RSSI_REROLL_MAX` times, then the last roll is accepted
+regardless — connectivity beats quality). With an always-powered unit near the
+ESP32 the re-roll almost always lands there. Re-rolls appear in the event log
+(`BLE gateway re-roll 1/2: rssi=-91 < -85`).
 
 **GET /api/units** — List all units with current state
 
@@ -439,6 +459,15 @@ curl http://<ip>/api/ntp
 curl -X POST http://<ip>/api/ntp \
   -H "Content-Type: application/json" -d '{"server": "192.168.1.1"}'
 ```
+
+While the NTP server is the untouched default (`pool.ntp.org`), the device
+tries the **local router first**: the DHCP-provided DNS server and the gateway
+(when they are private RFC 1918 addresses) are queried before the public pool.
+Most home routers serve NTP, so time sync then works even without internet
+access; if the router does not answer, SNTP falls through to the pool after a
+few seconds. Setting a server explicitly (`ntp set` or `POST /api/ntp`)
+disables this auto-detection — the configured server is then used exclusively.
+The effective candidate order is shown by the serial `ntp status` command.
 
 Each log entry:
 

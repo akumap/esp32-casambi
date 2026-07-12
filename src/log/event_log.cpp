@@ -33,6 +33,7 @@ uint16_t EventLog::_bootId    = 0;
 char   EventLog::_activeFile  = '0';
 size_t EventLog::_activeSize  = 0;
 SemaphoreHandle_t EventLog::_mutex = nullptr;
+TaskHandle_t EventLog::_ownerTask  = nullptr;
 
 const char* EventLog::levelName(uint8_t level) {
     switch (level) {
@@ -159,6 +160,9 @@ void EventLog::begin() {
     rtcLogCount   = 0;
     rtcLogPending = 0;
 
+    // Only this task (loopTask) persists to LittleFS inline; other tasks leave
+    // their entries pending in the RTC ring for flush().
+    _ownerTask   = xTaskGetCurrentTaskHandle();
     _initialized = true;
 
     // --- Record the reset reason as the opening entry of this boot ---
@@ -202,7 +206,14 @@ void EventLog::log(uint8_t level, const char* fmt, ...) {
     // Always echo to serial for live visibility.
     Serial.printf("[LOG/%s] %.*s\n", levelName(level), n, buf);
 
-    bool locked = _mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) == pdTRUE;
+    // Without the mutex we must not touch the shared ring/file state at all:
+    // a concurrent writer would corrupt the RTC indices and interleave file
+    // appends (torn records). The serial echo above already happened; the
+    // entry is lost from the persistent log in this (rare) case.
+    if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        Serial.println("[LOG] dropped (mutex busy)");
+        return;
+    }
 
     // Layer 1: RTC RAM (crash-safe). Done even if begin() hasn't run yet —
     // begin() resets the ring, so this is harmless before init.
@@ -218,14 +229,39 @@ void EventLog::log(uint8_t level, const char* fmt, ...) {
     // Mark this entry as not-yet-persisted; cleared once LittleFS confirms it.
     if (rtcLogPending < LOG_RTC_CAPACITY) rtcLogPending++;
 
-    // Layer 2: LittleFS (best-effort; only once initialised). On success the
-    // backlog is cleared — log() persists synchronously, so a successful write
-    // means everything up to here is on flash and need not be recovered later.
-    if (_initialized && _appendLittleFS(e)) {
-        rtcLogPending = 0;
+    // Layer 2: LittleFS — but only inline from the owner task (loopTask).
+    // Other tasks (NimBLE host, async_tcp) must not block on a flash write
+    // (LittleFS GC can take >100 ms and stalls the flash cache for both
+    // cores); their entries stay pending until flush() runs in loop(). A
+    // crash before that is covered by the RTC recovery in begin().
+    if (_initialized && xTaskGetCurrentTaskHandle() == _ownerTask) {
+        _flushPendingLocked();
     }
 
-    if (locked) xSemaphoreGive(_mutex);
+    if (_mutex) xSemaphoreGive(_mutex);
+}
+
+// Persist pending RTC entries (oldest first) to LittleFS. Assumes _mutex held.
+void EventLog::_flushPendingLocked() {
+    if (!_initialized || rtcLogPending == 0) return;
+
+    uint16_t count = rtcLogPending;
+    if (count > rtcLogCount) count = rtcLogCount;
+    uint16_t start = (rtcLogHead + LOG_RTC_CAPACITY - count) % LOG_RTC_CAPACITY;
+    for (uint16_t i = 0; i < count; i++) {
+        if (!_appendLittleFS(rtcLog[(start + i) % LOG_RTC_CAPACITY])) break;
+        rtcLogPending--;
+    }
+}
+
+void EventLog::flush() {
+    // Cheap unlocked pre-check: a stale read here only delays the flush by one
+    // loop tick; the authoritative check runs again under the mutex.
+    if (!_initialized || rtcLogPending == 0) return;
+
+    if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    _flushPendingLocked();
+    if (_mutex) xSemaphoreGive(_mutex);
 }
 
 void EventLog::clear() {
