@@ -140,10 +140,23 @@
 // recovers on its own; only a sustained shortfall warrants a reboot.
 #define HEAP_CRITICAL_CONSECUTIVE       3
 
-// Watchdog timeout (seconds) - hardware WDT
-#define WDT_TIMEOUT_SECONDS             30
+// Watchdog timeout (seconds) - hardware WDT. Must stay ABOVE the longest
+// blocking BLE operation on the loop task: a GATT read against a half-dead
+// link (keepalive) can block for NimBLE's full 30 s ATT procedure timeout, so
+// 45 s leaves deterministic margin instead of racing that timeout.
+#define WDT_TIMEOUT_SECONDS             45
 
-// Maximum consecutive BLE reconnect failures before ESP restart
+// Send the keepalive GATT read only after this much notification silence.
+// While 0x06/0x0C traffic is flowing the link is demonstrably alive and the
+// extra ATT round-trip (with its up-to-30 s timeout, see WDT above) is
+// pointless radio traffic and mutex contention.
+#define BLE_KEEPALIVE_IDLE_MS           60000
+
+// Maximum consecutive INTERNAL BLE failures (auth, key exchange, GATT
+// structure) before ESP restart. Plain link-loss/timeout failures — the peer
+// is simply absent, e.g. lights cut by a wall switch — never trigger a
+// restart: rebooting cannot help there, and the reconnect loop keeps retrying
+// at max backoff indefinitely instead.
 #define MAX_RECONNECT_FAILURES          10
 
 // --- RSSI quality gate on connect ("gateway re-roll") -----------------------
@@ -179,9 +192,12 @@
 // Broadcasts from the BLE task are enqueued here and drained by loop(), so
 // _ws->textAll() is always called from the loop task — never from a BLE task
 // callback — which avoids races with the async_tcp task's _clients management.
-// If the queue is full the broadcast is silently dropped (lighting state will
-// catch up on the next BLE notification anyway).
-#define WS_BROADCAST_QUEUE_DEPTH        8
+// Sized above the worst case a single 0x06 packet can produce (~40 unit
+// records at MTU 247, one broadcast each) so group/scene bursts are never
+// dropped; the queue itself is only pointers (64 × 4 B). Should it still
+// overflow, the drop is flagged and loop() pushes a fresh hello snapshot so
+// clients cannot stay stale on a missed unit_state.
+#define WS_BROADCAST_QUEUE_DEPTH        64
 
 // ============================================================================
 // BLE PACKET CONSTANTS

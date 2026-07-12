@@ -108,7 +108,12 @@ bool CasambiClient::_connectLocked(const String& address) {
         delay(500);
     }
 
+    // Reassigning the String can reallocate its buffer; the async_tcp task
+    // copies it via getConnectedAddress(), so the write happens under the same
+    // mutex (writers are loop-task only, mirroring the NetworkConfig strings).
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
     _connectedAddress = address;
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
 
     _outPacketCount = 2;
     _inPacketCount = 1;
@@ -125,9 +130,10 @@ bool CasambiClient::_connectLocked(const String& address) {
     }
     _bleClient = NimBLEDevice::createClient();
 
-    // Bound the blocking connect attempt: NimBLE's default (30 s) matches the
-    // task-WDT timeout exactly, so a hanging connect on the loop task would
-    // race the watchdog. 10 s keeps well clear of it.
+    // Bound the blocking connect attempt: NimBLE's default (30 s) would eat
+    // most of the 45 s task-WDT budget on the loop task. 10 s keeps well clear
+    // of it (the WDT margin is reserved for the keepalive GATT read, whose
+    // 30 s ATT procedure timeout cannot be shortened — see config.h).
     _bleClient->setConnectTimeout(BLE_CONNECT_TIMEOUT_MS);
 
     // Casambi gateways are reconnected by their stored MAC (no live scan). NimBLE
@@ -266,6 +272,12 @@ bool CasambiClient::isBLEConnected() const {
 bool CasambiClient::sendKeepalive() {
     if (!isAuthenticated() || !_authChar || !isBLEConnected()) return false;
 
+    // Skip the ATT round-trip while notifications are flowing — the link is
+    // demonstrably alive then. The GATT read only runs after a real silence
+    // window; against a half-dead link it can block for NimBLE's full 30 s
+    // ATT procedure timeout, which the 45 s task WDT budget accounts for.
+    if (millis() - _lastNotificationTime < BLE_KEEPALIVE_IDLE_MS) return true;
+
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return false;
 
     std::string value = _authChar->readValue();
@@ -289,6 +301,17 @@ unsigned long CasambiClient::getConnectionUptime() const {
         return millis() - _connectTime;
     }
     return 0;
+}
+
+String CasambiClient::getConnectedAddress() const {
+    // Copy under g_configMutex: the loop task reassigns _connectedAddress in
+    // _connectLocked() (which can reallocate the String buffer) while the
+    // async_tcp task reads it for /api/status and the WebSocket hello. The
+    // isAuthenticated() checks callers do first are TOCTOU against a re-roll.
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    String out = _connectedAddress;
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    return out;
 }
 
 bool CasambiClient::checkConnectionHealth() {

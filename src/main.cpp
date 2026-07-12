@@ -93,26 +93,41 @@ void checkCasambiVersions(const NetworkConfig& cfg);
 void syncTime();
 void startMDNS();
 
-// Short, stable per-device suffix (last 16 bits of the eFuse MAC) used for the
-// mDNS hostname and the setup-AP SSID so several gateways stay distinguishable.
+// Short, stable per-device suffix (the LAST two MAC octets) used for the mDNS
+// hostname and the setup-AP SSID so several gateways stay distinguishable.
+// ESP.getEfuseMac() stores MAC octet 0 (the vendor OUI) in the LOWEST byte, so
+// `mac & 0xFFFF` would yield the OUI — identical across boards of a batch. The
+// device-specific tail lives in bits 32..47. (Keep in sync with the copy in
+// setup_portal.cpp.)
 static String deviceSuffix() {
     uint64_t mac = ESP.getEfuseMac();
     char buf[5];
-    sprintf(buf, "%04x", (unsigned)(mac & 0xFFFF));
+    sprintf(buf, "%02x%02x",
+            (unsigned)((mac >> 32) & 0xFF),    // mac[4]
+            (unsigned)((mac >> 40) & 0xFF));   // mac[5], last octet
     return String(buf);
 }
 
+// True once MDNS.begin() succeeded, so the recovery paths below can call
+// startMDNS() unconditionally without re-registering the responder.
+static bool g_mdnsStarted = false;
+
 // Advertise the configured gateway as casambi-XXXX.local so FHEM can find it.
+// Idempotent: called from the boot path and from every WiFi/webserver recovery
+// path, because a device that boots before the router is up would otherwise
+// never become discoverable. ESPmDNS re-announces on later IP changes itself.
 void startMDNS() {
+    if (g_mdnsStarted) return;
     String host = "casambi-" + deviceSuffix();
     if (MDNS.begin(host.c_str())) {
+        g_mdnsStarted = true;
         MDNS.addService("http", "tcp", 80);
         MDNS.addServiceTxt("http", "tcp", "configured", "1");
         MDNS.addServiceTxt("http", "tcp", "build", String(FIRMWARE_BUILD));
         MDNS.addServiceTxt("http", "tcp", "network", networkConfig.networkName);
         Serial.printf("mDNS: http://%s.local/\n", host.c_str());
     } else {
-        Serial.println("mDNS: failed to start");
+        Serial.println("mDNS: failed to start (will retry on next WiFi recovery)");
     }
 }
 
@@ -267,7 +282,7 @@ void setup() {
             }
 
             // Initialize BLE first (before WiFi for proper coexistence)
-            NimBLEDevice::init("ESP32-Casambi");
+            NimBLEDevice::init(DEVICE_NAME);
 
             // Initialize BLE client
             casambiClient = new CasambiClient(&networkConfig);
@@ -530,24 +545,44 @@ void checkAndReconnectBLE() {
                 Serial.printf("Web API restarted at: http://%s/api\n",
                               WiFi.localIP().toString().c_str());
             }
+            startMDNS();
         }
     } else {
-        consecutiveReconnectFailures++;
+        if (consecutiveReconnectFailures < 0xFF) consecutiveReconnectFailures++;
 
         // Exponential backoff (double interval, up to max)
         bleReconnectInterval = min(bleReconnectInterval * 2, (unsigned long)BLE_RECONNECT_MAX_BACKOFF_MS);
 
-        Serial.printf("BLE: Reconnect failed (%d/%d). Next attempt in %lu ms\n",
-                      consecutiveReconnectFailures, MAX_RECONNECT_FAILURES,
+        // Classify the failure: a plain link loss / connect timeout means the
+        // peer is absent (e.g. lights cut by a wall switch) — rebooting cannot
+        // fix that, so we keep retrying at max backoff indefinitely. Only
+        // repeated INTERNAL failures (auth, key exchange, GATT structure),
+        // where a fresh BLE stack can actually help, restart the ESP32.
+        DisconnectReason lastReason = casambiClient->getLastDisconnectReason();
+        bool internalFailure = (lastReason == DisconnectReason::AuthFailed ||
+                                lastReason == DisconnectReason::KeyExchangeFailed ||
+                                lastReason == DisconnectReason::InternalError);
+        static uint8_t internalFailureStreak = 0;
+        internalFailureStreak = internalFailure ? internalFailureStreak + 1 : 0;
+
+        Serial.printf("BLE: Reconnect failed (%d, %s). Next attempt in %lu ms\n",
+                      consecutiveReconnectFailures,
+                      internalFailure ? "internal error" : "peer unreachable",
                       bleReconnectInterval);
 
-        // If too many failures, restart the ESP32
-        if (consecutiveReconnectFailures >= MAX_RECONNECT_FAILURES) {
-            Serial.println("*** Too many BLE reconnect failures! Restarting ESP32 ***");
-            EventLog::log(LOG_CRITICAL, "Restart: %d BLE reconnect failures",
-                          consecutiveReconnectFailures);
+        if (internalFailureStreak >= MAX_RECONNECT_FAILURES) {
+            Serial.println("*** Too many internal BLE failures! Restarting ESP32 ***");
+            EventLog::log(LOG_CRITICAL, "Restart: %d internal BLE failures (reason=%d)",
+                          internalFailureStreak, static_cast<int>(lastReason));
             delay(1000);
             ESP.restart();
+        }
+
+        // Record the onset of a longer outage once, then stay quiet in the log.
+        if (consecutiveReconnectFailures == MAX_RECONNECT_FAILURES && !internalFailure) {
+            EventLog::log(LOG_WARN,
+                          "BLE peer unreachable after %d attempts; retrying at %lus backoff (no restart)",
+                          consecutiveReconnectFailures, bleReconnectInterval / 1000);
         }
     }
 }
@@ -581,6 +616,10 @@ void checkAndReconnectWiFi() {
                                   WiFi.localIP().toString().c_str());
                 }
             }
+
+            // Covers the boot-before-router case: without this, a device whose
+            // WiFi only came up after setup() would never be discoverable.
+            if (casambiClient) startMDNS();
         }
         return;
     }
@@ -1277,6 +1316,7 @@ void handleCommand(const String& cmd) {
                                     Serial.printf("Web API available at: http://%s/api\n",
                                                   WiFi.localIP().toString().c_str());
                                 }
+                                startMDNS();
                             }
                         } else {
                             Serial.println("WiFi connection failed!");
@@ -1562,7 +1602,7 @@ void runSetupWizard() {
     Serial.println("Step 1: Scanning for Casambi networks...");
     Serial.println("(Make sure your Casambi lights are powered on)\n");
 
-    NimBLEDevice::init("ESP32-Casambi");
+    NimBLEDevice::init(DEVICE_NAME);
 
     scannedDevices.clear();
     NimBLEScan* pBLEScan = NimBLEDevice::getScan();

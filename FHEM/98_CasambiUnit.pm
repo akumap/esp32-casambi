@@ -1,5 +1,4 @@
 package main;
-use JSON;
 
 # ============================================================================
 # CasambiUnit — FHEM device module for a single Casambi light
@@ -25,7 +24,8 @@ use JSON;
 # interface for homebridge.
 #
 # Commands accepted by SetFn:
-#   on / off
+#   on / off    ("on" restores the last non-zero brightness, like the
+#                Casambi app — not a hard jump to 100%)
 #   brightness  0-100
 #   colorTemp   Kelvin (>500) or Mired (<500, converted automatically)
 #   vertical    0-255   (only on units with vertical capability)
@@ -98,8 +98,19 @@ sub CasambiUnit_Set {
     return "No casambiId assigned yet — waiting for gateway sync" unless $unitId;
 
     if ($cmd eq "on") {
-        CasambiGW_SendCommand($gwName, $unitId, "on");
-        readingsSingleUpdate($hash, "state", "on", 1);
+        # Restore the last non-zero brightness (tracked in LAST_BRIGHTNESS)
+        # instead of forcing 100% — matches the Casambi app behaviour and
+        # avoids the jump when HomeKit sends "On" after dimming. After a FHEM
+        # restart the internal is empty; the brightness reading (statefile)
+        # covers that window. Falls back to 100% when nothing is known.
+        my $bright = $hash->{LAST_BRIGHTNESS}
+                  // ReadingsVal($name, "brightness", 0);
+        $bright = 100 if $bright <= 0 || $bright > 100;
+        CasambiGW_SendCommand($gwName, $unitId, "brightness", $bright);
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "brightness", $bright);
+        readingsBulkUpdate($hash, "state",      "on");
+        readingsEndUpdate($hash, 1);
 
     } elsif ($cmd eq "off") {
         CasambiGW_SendCommand($gwName, $unitId, "off");
@@ -109,6 +120,7 @@ sub CasambiUnit_Set {
         my $val = int($args[0] // 0);
         $val = 0   if $val < 0;
         $val = 100 if $val > 100;
+        $hash->{LAST_BRIGHTNESS} = $val if $val > 0;
         _CasambiUnit_Debounce($hash, "brightness",
             sub { CasambiGW_SendCommand($gwName, $unitId, "brightness", $val); });
         readingsBeginUpdate($hash);
@@ -164,35 +176,43 @@ sub _CasambiUnit_Debounce {
 sub CasambiUnit_UpdateFromState {
     my ($hash, $unit) = @_;
 
-    $hash->{UPDATING_STATUS} = 1;
-
     my $level  = $unit->{level} // 0;
     my $on     = defined($unit->{on}) ? $unit->{on} : ($level > 0);
     my $bright = int($level / 2.55 + 0.5);
     $bright = 100 if $bright > 100;
 
-    readingsBeginUpdate($hash);
-    readingsBulkUpdate($hash, "state",      $on ? "on" : "off");
-    readingsBulkUpdate($hash, "brightness", $bright);
-    readingsBulkUpdate($hash, "online",     $unit->{online} ? "true" : "false");
-    readingsBulkUpdate($hash, "casambiId",  $unit->{id})   if defined $unit->{id};
-    readingsBulkUpdate($hash, "casambiName",$unit->{name}) if defined $unit->{name};
+    # Remember the last non-zero level for "set on" (restore instead of 100%).
+    $hash->{LAST_BRIGHTNESS} = $bright if $bright > 0;
 
-    if (defined $unit->{vertical}) {
-        readingsBulkUpdate($hash, "vertical", $unit->{vertical});
-    }
+    {
+        # `local` (block-scoped) instead of manual set/reset: the notify chain
+        # triggered by readingsEndUpdate runs arbitrary user code — if that
+        # dies, a manually set flag would stick at 1 and the device would
+        # ignore every set command until the next FHEM restart.
+        local $hash->{UPDATING_STATUS} = 1;
 
-    # colorTemp: raw 0-255 → Kelvin (for human-readable WebUI display)
-    if (defined $unit->{colorTemp} && defined $unit->{cctMin} && defined $unit->{cctMax}) {
-        my ($raw, $min, $max) = ($unit->{colorTemp}, $unit->{cctMin}, $unit->{cctMax});
-        if ($max > $min) {
-            my $kelvin = int($min + ($raw / 255.0) * ($max - $min) + 0.5);
-            readingsBulkUpdate($hash, "colorTemp", $kelvin);
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "state",      $on ? "on" : "off");
+        readingsBulkUpdate($hash, "brightness", $bright);
+        readingsBulkUpdate($hash, "online",     $unit->{online} ? "true" : "false");
+        readingsBulkUpdate($hash, "casambiId",  $unit->{id})   if defined $unit->{id};
+        readingsBulkUpdate($hash, "casambiName",$unit->{name}) if defined $unit->{name};
+
+        if (defined $unit->{vertical}) {
+            readingsBulkUpdate($hash, "vertical", $unit->{vertical});
         }
-    }
 
-    readingsEndUpdate($hash, 1);
-    $hash->{UPDATING_STATUS} = 0;
+        # colorTemp: raw 0-255 → Kelvin (for human-readable WebUI display)
+        if (defined $unit->{colorTemp} && defined $unit->{cctMin} && defined $unit->{cctMax}) {
+            my ($raw, $min, $max) = ($unit->{colorTemp}, $unit->{cctMin}, $unit->{cctMax});
+            if ($max > $min) {
+                my $kelvin = int($min + ($raw / 255.0) * ($max - $min) + 0.5);
+                readingsBulkUpdate($hash, "colorTemp", $kelvin);
+            }
+        }
+
+        readingsEndUpdate($hash, 1);
+    }
 
     # Forward vertical state to companion CasambiVertical device
     if (defined $unit->{vertical}) {
@@ -418,7 +438,9 @@ sub CasambiVertical_Set {
 sub CasambiVertical_UpdateFromParent {
     my ($hash, $vertical, $parentOn) = @_;
 
-    $hash->{UPDATING_STATUS} = 1;
+    # local: restored even when a notify handler in the event chain dies —
+    # a stuck flag would permanently suppress set commands (see CasambiUnit).
+    local $hash->{UPDATING_STATUS} = 1;
 
     my $pct = int($vertical / 2.55 + 0.5);
     $pct = 100 if $pct > 100;
@@ -428,8 +450,6 @@ sub CasambiVertical_UpdateFromParent {
     readingsBulkUpdate($hash, "vertical", $vertical);
     readingsBulkUpdate($hash, "state",    $pct > 0 ? "on" : "off");
     readingsEndUpdate($hash, 1);
-
-    $hash->{UPDATING_STATUS} = 0;
 }
 
 sub _CasambiVertical_Debounce {
@@ -467,7 +487,9 @@ sub _CasambiVertical_SetAttrIfChanged {
   <br><br>
   <b>Set commands</b>
   <ul>
-    <li><b>on / off</b></li>
+    <li><b>on</b> &mdash; restores the last non-zero brightness (like the
+        Casambi app); falls back to 100% when no previous level is known</li>
+    <li><b>off</b></li>
     <li><b>brightness</b> 0-100</li>
     <li><b>colorTemp</b> &lt;Kelvin&gt; or &lt;Mired&gt; &mdash; values &lt;500
         are treated as Mired and converted automatically (CCT units only)</li>
@@ -534,9 +556,10 @@ sub _CasambiVertical_SetAttrIfChanged {
   <br>
   <b>Managed attributes</b>
   <ul>
-    <li><b>genericDeviceType</b> always "dimmer"</li>
+    <li><b>genericDeviceType</b> always "light"</li>
     <li><b>homebridgeMapping</b>
-        <code>On=state,values=on:1;;off:0 Brightness=pct,minValue=0,maxValue=100</code></li>
+        <code>On=state,valueOff=off,cmdOff=off,cmdOn=on
+        Brightness=pct,homekit=Brightness,cmd=pct,minValue=0,maxValue=100</code></li>
   </ul>
 </ul>
 

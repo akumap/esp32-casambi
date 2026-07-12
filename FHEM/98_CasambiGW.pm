@@ -1,7 +1,16 @@
 package main;
-use JSON;
 use MIME::Base64;
 use Digest::SHA qw(sha256_hex);
+
+# JSON is a hard requirement, but a plain `use JSON;` would abort the module
+# load with a bare compile error on systems without the Perl module. Load it
+# when the file body runs (FHEM `do`es the file) and report a readable error
+# from Define instead. (No BEGIN block: a file-scope `my` re-executed at
+# runtime would clear a value assigned during compilation.)
+my $CasambiGW_missingJSON = "";
+eval { require JSON; JSON->import(); 1 }
+    or $CasambiGW_missingJSON = "Perl module JSON not installed "
+                              . "(e.g. 'apt install libjson-perl' or 'cpanm JSON')";
 
 # ============================================================================
 # CasambiGW — FHEM gateway module for the ESP32 Casambi BLE bridge
@@ -38,7 +47,9 @@ use Digest::SHA qw(sha256_hex);
 #                            When 0: device stays but "online" is set to false
 #   casambiPassword          Casambi network password; the X-API-Key token is
 #                            derived from it. Required once the ESP32 has API
-#                            authentication enabled.
+#                            authentication enabled. Stored in plaintext in
+#                            fhem.cfg — prefer `set <gw> password <pw>`, which
+#                            keeps it in FHEM's obfuscated key-value store.
 # ============================================================================
 
 use constant WS_PING_INTERVAL    => 30;   # seconds between WS keepalive pings
@@ -70,14 +81,25 @@ sub CasambiGW_Initialize {
 # stored. The token sent on every request is NOT the raw password but a derived
 # value that the ESP computes the same way:
 #   apiToken = hex( SHA-256( "casambi-api:" . <password> ) )
-# Configure the password via:  attr <gw> casambiPassword <casambi-network-pw>
-# Returns "" when no password is set (then the ESP must also be running without
-# auth, e.g. a config predating this feature).
+# Configure the password via:  set <gw> password <casambi-network-pw>
+# (stored in FHEM's obfuscated key-value store) — or, legacy, via the
+# plaintext attribute casambiPassword. Returns "" when no password is set
+# (then the ESP must also be running without auth, e.g. a config predating
+# this feature).
 # ============================================================================
+
+sub CasambiGW_PasswordKey {
+    my $hash = shift;
+    return "CasambiGW_" . $hash->{NAME} . "_password";
+}
 
 sub CasambiGW_ApiToken {
     my $hash = shift;
-    my $pw   = AttrVal($hash->{NAME}, "casambiPassword", "");
+    # Prefer the key store (set <gw> password ...); fall back to the legacy
+    # plaintext attribute for existing installations.
+    my ($err, $pw) = getKeyValue(CasambiGW_PasswordKey($hash));
+    $pw = AttrVal($hash->{NAME}, "casambiPassword", "")
+        if $err || !defined $pw || $pw eq "";
     return "" if !defined $pw || $pw eq "";
     return sha256_hex("casambi-api:" . $pw);
 }
@@ -99,6 +121,7 @@ sub CasambiGW_AuthHeader {
 
 sub CasambiGW_Define {
     my ($hash, $def) = @_;
+    return "CasambiGW: $CasambiGW_missingJSON" if $CasambiGW_missingJSON;
     my @args = split /\s+/, $def;
     return "Usage: define <name> CasambiGW <ip>[:<port>]" if @args < 3;
 
@@ -138,13 +161,14 @@ sub CasambiGW_Undefine {
 # ============================================================================
 
 sub CasambiGW_StartInfoPoll {
-    my $hash = shift;
+    my ($hash, $delay) = @_;
+    $delay //= 1;
     $hash->{infoPolling} = 1;
     $hash->{wsState}     = "disconnected";
     RemoveInternalTimer($hash, "CasambiGW_Ping");
     RemoveInternalTimer($hash, "CasambiGW_Poll");
     DevIo_CloseDev($hash);                      # also removes us from readyfnlist
-    InternalTimer(gettimeofday() + 1, "CasambiGW_Poll", $hash);
+    InternalTimer(gettimeofday() + $delay, "CasambiGW_Poll", $hash);
     return undef;
 }
 
@@ -171,6 +195,16 @@ sub CasambiGW_InfoCb {
     my ($param, $err, $data) = @_;
     my $hash = $param->{hash};
     my $name = $hash->{NAME};
+
+    # Stale callback: a `set reconnect` or successful WS connect may have ended
+    # the polling episode while this request was in flight. Only the active
+    # polling state machine may act on /api/info results.
+    return undef unless $hash->{infoPolling};
+
+    # De-duplicate poll chains: StartInfoPoll cannot cancel an in-flight HTTP
+    # request, so without this a reconnect during a pending poll would leave
+    # two timer chains polling in parallel forever.
+    RemoveInternalTimer($hash, "CasambiGW_Poll");
 
     if ($err || !defined($data) || $data eq "") {
         Log3 $name, 4, "$name: /api/info unreachable: " . ($err // "no data");
@@ -220,12 +254,30 @@ sub CasambiGW_Set {
     if ($cmd eq "?") {
         return "Unknown argument $cmd, choose one of "
              . "applyChanges:noArg discardChanges:noArg reconnect:noArg "
-             . "refreshCasambi:noArg";
+             . "refreshCasambi:noArg password";
     }
 
     if ($cmd eq "reconnect") {
         Log3 $name, 3, "$name: reconnect requested";
         CasambiGW_StartInfoPoll($hash);   # re-check /api/info, then connect
+        return undef;
+    }
+
+    if ($cmd eq "password") {
+        # Store the Casambi network password in FHEM's obfuscated key-value
+        # store (instead of the plaintext casambiPassword attribute). Without
+        # an argument the stored password is removed.
+        my $key = CasambiGW_PasswordKey($hash);
+        if (@args && defined $args[0] && $args[0] ne "") {
+            my $err = setKeyValue($key, $args[0]);
+            return "Failed to store password: $err" if $err;
+            Log3 $name, 3, "$name: Casambi password stored (key store) — reconnecting";
+        } else {
+            setKeyValue($key, undef);
+            Log3 $name, 3, "$name: stored Casambi password removed — reconnecting";
+        }
+        # Reconnect so the next handshake uses the new token.
+        CasambiGW_StartInfoPoll($hash);
         return undef;
     }
 
@@ -248,7 +300,7 @@ sub CasambiGW_Set {
     }
 
     return "Unknown command '$cmd', choose one of applyChanges:noArg "
-         . "discardChanges:noArg reconnect:noArg refreshCasambi:noArg";
+         . "discardChanges:noArg reconnect:noArg refreshCasambi:noArg password";
 }
 
 # ============================================================================
@@ -337,7 +389,12 @@ sub CasambiGW_Read {
     my $name = $hash->{NAME};
 
     my $data = DevIo_SimpleRead($hash);
-    return undef unless defined $data;
+    unless (defined $data) {
+        # DevIo has already called DevIo_Disconnected; mirror it in our own
+        # state so the ping timer stops treating the link as alive.
+        $hash->{wsState} = "disconnected";
+        return undef;
+    }
 
     $hash->{buf} .= $data;
 
@@ -347,6 +404,7 @@ sub CasambiGW_Read {
         if ($hash->{buf} =~ /HTTP\/1\.[01] 101/) {
             $hash->{buf} =~ s/^.*?\r\n\r\n//s;
             $hash->{wsState} = "connected";
+            $hash->{wsFailCount} = 0;
             $hash->{lastPong} = gettimeofday();
             RemoveInternalTimer($hash, "CasambiGW_Ping");
             InternalTimer(gettimeofday() + WS_PING_INTERVAL, "CasambiGW_Ping", $hash);
@@ -354,12 +412,22 @@ sub CasambiGW_Read {
             Log3 $name, 3, "$name: WebSocket connected";
             CasambiGW_ProcessWsFrames($hash) if length($hash->{buf}) > 0;
         } else {
-            my $status = (split /\r\n/, $hash->{buf})[0];
-            Log3 $name, 2, "$name: WebSocket handshake failed: $status";
-            # A failed upgrade usually means the ESP is back in setup mode (or
-            # not ready). Fall back to polling /api/info instead of hammering
-            # the WebSocket via DevIo's auto-reconnect.
-            CasambiGW_StartInfoPoll($hash);
+            my $status = (split /\r\n/, $hash->{buf})[0] // "";
+            # First failure of an episode logs prominently (with an auth hint
+            # on 401); repeats — one per backoff interval — go to level 4 so a
+            # persistent condition does not flood the log.
+            $hash->{wsFailCount} = ($hash->{wsFailCount} // 0) + 1;
+            Log3 $name, ($hash->{wsFailCount} == 1 ? 2 : 4),
+                "$name: WebSocket handshake failed: $status";
+            if ($status =~ /\s401\s/ && $hash->{wsFailCount} == 1) {
+                Log3 $name, 2, "$name: ESP32 rejected the API token (401) — set the "
+                             . "Casambi network password: 'set $name password <pw>' "
+                             . "(or attr $name casambiPassword)";
+            }
+            # A failed upgrade means auth failure or the ESP is back in setup
+            # mode / not ready. Back off to the offline poll interval instead
+            # of hammering /api/info + WebSocket every second.
+            CasambiGW_StartInfoPoll($hash, INFO_POLL_OFFLINE);
         }
         return undef;
     }
@@ -376,6 +444,10 @@ sub CasambiGW_ProcessWsFrames {
     my $hash = shift;
     my $name = $hash->{NAME};
 
+    # Known limitation: the FIN bit is not evaluated — a fragmented text
+    # message would be handed to the JSON parser in pieces. The ESP32
+    # (AsyncWebSocket textAll) always sends unfragmented frames, so no
+    # reassembly is needed against this server.
     while (length($hash->{buf}) >= 2) {
         my ($byte0, $byte1) = unpack("CC", $hash->{buf});
         my $opcode = $byte0 & 0x0F;
@@ -518,6 +590,12 @@ sub CasambiGW_HandleHello {
     # Check ESP32 firmware build number
     my $build = $msg->{build} // 0;
     readingsSingleUpdate($hash, "esp32Build", $build, 1);
+
+    # Network name travels in the (authenticated) hello — the unauthenticated
+    # /api/info deliberately does not expose it.
+    readingsSingleUpdate($hash, "network", $msg->{network}, 1)
+        if defined $msg->{network} && $msg->{network} ne "";
+
     if ($build < MIN_FIRMWARE_BUILD) {
         Log3 $name, 2, "$name: WARNING: ESP32 build $build < minimum " . MIN_FIRMWARE_BUILD
                      . " — please update the ESP32 firmware";
@@ -632,11 +710,14 @@ sub CasambiGW_ApplyPendingChanges {
         return undef;
     }
 
+    my $structuralChanges = 0;
+
     # --- Create new units ---
     if (AttrVal($name, "autocreate", 1)) {
         for my $unit (@{$pending->{newUnits}}) {
             my $devName = CasambiGW_CreateUnit($hash, $unit);
             next unless $devName && $defs{$devName};
+            $structuralChanges++;
             CasambiUnit_SetCapabilities($defs{$devName}, $unit);
             CasambiUnit_UpdateFromState($defs{$devName},  $unit);
             # Register in id map for live routing
@@ -657,6 +738,7 @@ sub CasambiGW_ApplyPendingChanges {
             my $vName = "${devName}_vertical";
             fhem("delete $vName") if $defs{$vName};
             fhem("delete $devName");
+            $structuralChanges++;
         } else {
             readingsSingleUpdate($defs{$devName}, "online", "false", 1);
             Log3 $name, 3, "$name: '$devName' (MAC $mac) marked offline (removed from network, deleteRemovedUnits=0)";
@@ -670,6 +752,9 @@ sub CasambiGW_ApplyPendingChanges {
     readingsEndUpdate($hash, 1);
 
     Log3 $name, 3, "$name: Pending changes applied";
+    # Created/deleted devices live only in memory until the config is saved.
+    Log3 $name, 2, "$name: device definitions changed — run 'save' to persist them"
+        if $structuralChanges;
     return undef;
 }
 
@@ -684,6 +769,11 @@ sub CasambiGW_RouteUnitState {
 
     my $devName = $hash->{UNIT_BY_ID}{$unitId};
 
+    # Known-unknown id (exists in the map as undef): a pending/discarded unit
+    # that keeps pushing state. Skip silently instead of re-scanning %defs on
+    # every push; the cache is replaced by the next hello.
+    return if exists $hash->{UNIT_BY_ID}{$unitId} && !defined $devName;
+
     unless ($devName && $defs{$devName}) {
         # Not in map — rebuild once (e.g. after FHEM restart before first hello)
         Log3 $name, 4, "$name: unit_state id=$unitId not in map — rebuilding";
@@ -697,6 +787,11 @@ sub CasambiGW_RouteUnitState {
         }
         $hash->{UNIT_BY_ID} = \%newById;
         $devName = $newById{$unitId};
+        unless ($devName && $defs{$devName}) {
+            # Still unknown — negative-cache the miss (cleared by next hello).
+            $hash->{UNIT_BY_ID}{$unitId} = undef;
+            return;
+        }
     }
 
     return unless $devName && $defs{$devName};
@@ -781,7 +876,21 @@ sub CasambiGW_SendCommand {
         data     => $json,
         callback => sub {
             my ($param, $err, $data) = @_;
-            Log 2, "CasambiGW: HTTP error (unit $unitId $cmd): $err" if $err;
+            if ($err) {
+                Log3 $gwName, 2, "$gwName: HTTP error (unit $unitId $cmd): $err";
+                return;
+            }
+            # Application-level rejections (503 BLE down, 401 auth, 404 unknown
+            # unit) are not transport errors — without this check the command
+            # vanished silently while the FHEM reading optimistically showed
+            # the new state.
+            my $code = $param->{code} // 0;
+            if ($code != 200) {
+                my $hint = $code == 401
+                    ? " — check 'set $gwName password' / attr casambiPassword" : "";
+                Log3 $gwName, 3, "$gwName: unit $unitId $cmd rejected: HTTP $code "
+                               . (defined $data ? $data : "") . $hint;
+            }
         }
     });
 }
@@ -834,6 +943,13 @@ sub CasambiGW_Ready {
         (adopt them with <code>applyChanges</code>). Requires that the ESP has a
         stored Casambi password (set once via the serial <code>refresh</code>
         command or initial setup).</li>
+    <li><b>password</b> &lt;casambi-network-password&gt; &mdash; store the
+        Casambi network password in FHEM's obfuscated key-value store and
+        reconnect. Preferred over the plaintext <em>casambiPassword</em>
+        attribute; the module derives the <code>X-API-Key</code> token from it
+        (SHA-256 of "casambi-api:" + password) for REST calls and the
+        WebSocket handshake. Without an argument the stored password is
+        removed.</li>
   </ul>
   <br>
   <b>Attributes</b>
@@ -843,12 +959,10 @@ sub CasambiGW_Ready {
     <li><b>deleteRemovedUnits</b> 0|1 &mdash; whether applyChanges deletes
         the FHEM device (1) or only sets <em>online</em> to false (0)
         for units gone from the Casambi network (default: 1)</li>
-    <li><b>casambiPassword</b> &mdash; Casambi network password. Required once
-        the ESP32 has API authentication enabled: the module derives the
-        <code>X-API-Key</code> token from it
-        (SHA-256 of "casambi-api:" + password) for REST calls and the
-        WebSocket handshake. Leave unset only for a device with no stored
-        password.</li>
+    <li><b>casambiPassword</b> &mdash; legacy plaintext alternative to
+        <code>set &lt;name&gt; password</code> (which takes precedence when
+        both are set). Kept for existing installations; note that attribute
+        values are stored in plaintext in fhem.cfg.</li>
   </ul>
   <br>
   <b>Readings</b>
@@ -860,7 +974,9 @@ sub CasambiGW_Ready {
         automatically after the setup portal has been completed.</li>
     <li><b>configured</b> &mdash; whether the ESP32 has a valid configuration
         (true) or is still in setup mode (false), from <code>/api/info</code></li>
-    <li><b>network</b> &mdash; Casambi network name reported by the ESP32</li>
+    <li><b>network</b> &mdash; Casambi network name, taken from the
+        authenticated WebSocket <em>hello</em> message (the unauthenticated
+        <code>/api/info</code> deliberately does not expose it)</li>
     <li><b>gatewayState</b> &mdash; BLE gateway link: connected / disconnected</li>
     <li><b>gatewayName</b> &mdash; name of the Casambi unit currently acting as
         the BLE gateway (empty while disconnected)</li>

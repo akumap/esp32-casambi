@@ -128,9 +128,11 @@ public:
     int getLastRssi() const { return _lastRssi; }
 
     /**
-     * Get the address we're connected (or were last connected) to
+     * Get the address we're connected (or were last connected) to.
+     * Copies under g_configMutex — safe to call from the async_tcp task while
+     * the loop task is reconnecting (see the definition for the race note).
      */
-    String getConnectedAddress() const { return _connectedAddress; }
+    String getConnectedAddress() const;
 
     /**
      * Get uptime of current connection in milliseconds

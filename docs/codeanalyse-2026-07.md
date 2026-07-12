@@ -5,6 +5,44 @@ Umfang: gesamte Firmware (`src/`, ~9.000 Zeilen) und beide FHEM-Module
 (`FHEM/98_CasambiGW.pm`, `FHEM/98_CasambiUnit.pm`, ~1.400 Zeilen), dazu
 `platformio.ini`, CI-Workflow und Konzept-Dokumente.
 
+## Umsetzungsstand
+
+Alle Befunde sind auf diesem Branch umgesetzt (ein Folge-Commit dieses
+Dokuments), mit zwei bewussten Abweichungen:
+
+| Befund | Status |
+|--------|--------|
+| S1 Keepalive vs. WDT | ✅ WDT 45 s **und** Keepalive nur nach ≥60 s Funkstille (`BLE_KEEPALIVE_IDLE_MS`) — erledigt zusammen mit O1 |
+| S2 `_connectedAddress`-Race | ✅ Schreiben/Lesen unter `g_configMutex` |
+| S3 WS-Queue | ✅ Tiefe **64** (Nutzerentscheidung statt 32) + Resync-Hello bei Drop |
+| S4 Restart-Politik | ✅ Restart nur bei 10 internen Fehlern in Folge; Peer-Abwesenheit → Dauer-Backoff |
+| S5 Log-Snapshot vs. Dateiwechsel | ✅ `EventLog::generation()`-Prüfung im Chunk-Streaming; zusätzlich msgLen-Clamp in `writeEntryJson` |
+| S6 RTC-Magic | ✅ Layout-versioniert (`sizeof(LogEntry)`/Kapazität eingemischt) |
+| F1 deviceSuffix | ✅ letzte zwei MAC-Oktette (main.cpp + setup_portal.cpp). **Achtung:** SSID/mDNS-Suffix bestehender Geräte ändert sich einmalig |
+| F2 mDNS | ✅ idempotent, Aufruf in allen WiFi-/Webserver-Recovery-Pfaden |
+| F3 `network`-Reading | ✅ `networkName` im hello, Reading im FHEM-Modul, README |
+| F4 `set on` = 100 % | ✅ stellt letzte Helligkeit wieder her (`LAST_BRIGHTNESS`), Fallback 100 % |
+| F5 WS-Reject 404 | ✅ `GET /ws` ohne Token → 401 |
+| F6 Portal-/api/info | ✅ nur noch `{configured, build}` |
+| F7 ID-Truncation | ✅ `parseIdSegment` validiert 0–255, sonst 400 |
+| F8 0x07-Echo | — dokumentierter Zustand, bewusst keine Änderung |
+| O1 Keepalive-Funk | ✅ siehe S1 |
+| O2 Body-Parsing-Duplikate | ✅ Helper (`_checkBle`, `_parseBody`, `_requireUint8`, `_*FromPath`); webserver.cpp ~290 Zeilen kleiner |
+| O3 ESP32-C3 | ⏸️ **bleibt in Build+CI** (Nutzerentscheidung: Board nur mangels Hardware ungetestet); als build-only dokumentiert |
+| O4 NimBLE-Init-Name | ✅ `DEVICE_NAME` |
+| O5 Oversize-Bodies | ✅ >4 KiB → Verbindung wird geschlossen, ≤4 KiB weiterhin sauberes 413 |
+| P1 Handshake-Backoff | ✅ 30 s-Backoff, Log-Degradierung nach 1. Fehlschlag, 401-Hinweis auf Passwort |
+| P2 Poll-Ketten | ✅ Dedupe + Stale-Guard in `InfoCb` |
+| P3 SendCommand-Statuscodes | ✅ `$param->{code}` geprüft, Log mit 401-Hinweis |
+| P4 `wsState` nach EOF | ✅ Reset in `Read` |
+| P5 `UPDATING_STATUS` | ✅ `local`-Guard (Unit + Vertical) |
+| P6 Passwort-Klartext | ✅ `set <gw> password` (Key-Store); Attribut als Legacy-Fallback erhalten |
+| P7 Negativ-Cache | ✅ known-unknown-IDs in `UNIT_BY_ID` als `undef` |
+| P8a JSON-Guard | ✅ `require JSON` mit Fehlermeldung in Define; unnötiges `use JSON` aus 98_CasambiUnit.pm entfernt |
+| P8b FIN-Bit | ✅ als Grenze kommentiert |
+| P8c save-Hinweis | ✅ Log nach strukturellen Änderungen + README |
+| P8d =pod-Drift | ✅ CasambiVertical-Doku korrigiert |
+
 ## Gesamteinschätzung
 
 Die Codebasis ist für ein Projekt dieser Art ungewöhnlich reif: Die
