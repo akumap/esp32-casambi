@@ -71,13 +71,42 @@ void test_config_empty_networkid(void) {
     TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
 }
 
-void test_config_protocol_out_of_range(void) {
+void test_config_protocol_out_of_range_is_soft(void) {
+    // A structurally valid config with an out-of-range (but present, positive)
+    // protocol is NOT strictly valid, but IS committable — it must be persisted
+    // and loaded with only a warning, never rejected. This is the exact case of
+    // a v11 network against a firmware built for [10,10].
     JsonDocument doc;
     makeValidDoc(doc);
-    doc["protocolVersion"] = 9;   // below MIN
-    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
-    doc["protocolVersion"] = 11;  // above MAX
-    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
+    doc["protocolVersion"] = 11;  // above MAX (10,10 here)
+    TEST_ASSERT_EQUAL(configval::CFG_UNSUPPORTED_PROTOCOL,
+                      configval::validateConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_TRUE(configval::isCommittable(
+        configval::validateConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES)));
+
+    doc["protocolVersion"] = 9;   // below MIN — still committable (soft)
+    TEST_ASSERT_TRUE(configval::isCommittable(
+        configval::validateConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES)));
+
+    // In range -> fully OK.
+    doc["protocolVersion"] = 10;
+    TEST_ASSERT_TRUE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
+}
+
+void test_config_protocol_missing_or_zero_is_hard(void) {
+    // Missing or zero protocol is corruption, not an unsupported version: hard
+    // reject (not committable).
+    JsonDocument doc;
+    makeValidDoc(doc);
+    doc["protocolVersion"] = 0;
+    TEST_ASSERT_EQUAL(configval::CFG_BAD_PROTOCOL,
+                      configval::validateConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_FALSE(configval::isCommittable(
+        configval::validateConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES)));
+
+    doc.remove("protocolVersion");
+    TEST_ASSERT_FALSE(configval::isCommittable(
+        configval::validateConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES)));
 }
 
 void test_config_no_keys(void) {
@@ -126,7 +155,8 @@ int main(int, char**) {
     RUN_TEST(test_config_valid);
     RUN_TEST(test_config_missing_networkid);
     RUN_TEST(test_config_empty_networkid);
-    RUN_TEST(test_config_protocol_out_of_range);
+    RUN_TEST(test_config_protocol_out_of_range_is_soft);
+    RUN_TEST(test_config_protocol_missing_or_zero_is_hard);
     RUN_TEST(test_config_no_keys);
     RUN_TEST(test_config_truncated_key_rejected);
     RUN_TEST(test_wifi_valid);

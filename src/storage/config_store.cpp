@@ -193,12 +193,12 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
         DeserializationError verr = deserializeJson(vdoc, verify);
         verify.close();
         configval::ConfigValidationReason vreason =
-            verr ? configval::CFG_OK
+            verr ? configval::CFG_BAD_NETWORK_ID
                  : configval::validateConfigDoc(vdoc,
                                                    MIN_PROTOCOL_VERSION,
                                                    MAX_PROTOCOL_VERSION,
                                                    AES_KEY_SIZE);
-        if (verr || vreason != configval::CFG_OK) {
+        if (verr || !configval::isCommittable(vreason)) {
             Serial.printf("Storage: temp config failed validation (parse=%s, reason=%d, "
                           "networkId='%s', protocolVersion=%d, keys=%d); not committing\n",
                           verr ? verr.c_str() : "ok", (int)vreason,
@@ -207,6 +207,12 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
                           (int)vdoc["keys"].as<JsonArrayConst>().size());
             LittleFS.remove(CONFIG_TMP_PATH);
             return false;
+        }
+        if (vreason == configval::CFG_UNSUPPORTED_PROTOCOL) {
+            Serial.printf("Storage: WARNING: protocolVersion %d outside supported range "
+                          "[%d,%d]; saving anyway (on-air handling is version tolerant)\n",
+                          vdoc["protocolVersion"].as<int>(),
+                          MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION);
         }
     }
 
@@ -265,15 +271,16 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     }
 
     // Reject a syntactically valid but semantically incomplete config (missing
-    // networkId, out-of-range protocol, or a truncated/non-hex AES key) instead
-    // of loading a half-valid state. The reason is logged so a rejection is
-    // diagnosable from the serial log alone.
+    // networkId, missing/zero protocol, or a truncated/non-hex AES key) instead
+    // of loading a half-valid state. An out-of-range but present protocol is a
+    // compatibility warning, not a corruption — it is loaded anyway. The reason
+    // is logged so a rejection is diagnosable from the serial log alone.
     configval::ConfigValidationReason reason =
         configval::validateConfigDoc(doc,
                                         MIN_PROTOCOL_VERSION,
                                         MAX_PROTOCOL_VERSION,
                                         AES_KEY_SIZE);
-    if (reason != configval::CFG_OK) {
+    if (!configval::isCommittable(reason)) {
         Serial.printf("Storage: config failed semantic validation (reason=%d, "
                       "networkId='%s', protocolVersion=%d, keys=%d)\n",
                       (int)reason,
@@ -281,6 +288,12 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
                       doc["protocolVersion"].as<int>(),
                       (int)doc["keys"].as<JsonArrayConst>().size());
         return false;
+    }
+    if (reason == configval::CFG_UNSUPPORTED_PROTOCOL) {
+        Serial.printf("Storage: WARNING: protocolVersion %d outside supported range "
+                      "[%d,%d]; loading anyway (on-air handling is version tolerant)\n",
+                      doc["protocolVersion"].as<int>(),
+                      MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION);
     }
 
     // Load basic network info

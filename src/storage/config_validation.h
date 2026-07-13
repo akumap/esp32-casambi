@@ -39,18 +39,32 @@ inline bool isValidHexKey(const char* hex, size_t expectedBytes) {
 // fails. Deliberately not an enum class so it prints cleanly and stays trivial.
 enum ConfigValidationReason {
     CFG_OK = 0,
-    CFG_BAD_NETWORK_ID,     // networkId missing or empty
-    CFG_BAD_PROTOCOL,       // protocolVersion missing or out of range
-    CFG_NO_KEYS,            // keys array missing or empty
-    CFG_BAD_KEY,            // a key is missing / not full-length hex
+    CFG_BAD_NETWORK_ID,        // networkId missing or empty            (hard)
+    CFG_BAD_PROTOCOL,          // protocolVersion missing or <= 0       (hard)
+    CFG_NO_KEYS,               // keys array missing or empty           (hard)
+    CFG_BAD_KEY,               // a key is missing / not full-length hex (hard)
+    CFG_UNSUPPORTED_PROTOCOL,  // structurally valid, but protocolVersion
+                               // outside [minProto, maxProto]          (soft)
 };
 
-// Semantic validation of a parsed network-config document. Returns CFG_OK only
-// for a document the firmware can safely run on:
+// A config is committable/loadable if it is fully valid, or valid apart from an
+// unsupported (but present and positive) protocol version. An unsupported
+// protocol is only a compatibility warning — the on-air handling is version
+// tolerant — so it must not block persistence or boot. Genuine corruption
+// (missing fields, no/short keys) still blocks.
+inline bool isCommittable(ConfigValidationReason r) {
+    return r == CFG_OK || r == CFG_UNSUPPORTED_PROTOCOL;
+}
+
+// Semantic validation of a parsed network-config document:
 //   - networkId present and non-empty,
-//   - protocolVersion an integer within [minProto, maxProto],
+//   - protocolVersion present and positive,
 //   - at least one key, each with a full-length hex AES key.
-// Existence of the file alone is NOT sufficient (the previous behaviour).
+// Returns CFG_OK when all of the above hold AND protocolVersion is within
+// [minProto, maxProto]; CFG_UNSUPPORTED_PROTOCOL when structurally sound but the
+// protocol is out of that range (a soft, non-blocking result — see
+// isCommittable); or the matching hard reason otherwise. Existence of the file
+// alone is NOT sufficient (the previous behaviour).
 //
 // Templated on the document type so the caller can pass the JsonDocument
 // directly and every access goes through the SAME operator[] the working loader
@@ -68,15 +82,23 @@ inline ConfigValidationReason validateConfigDoc(const TDoc& doc, uint8_t minProt
     const char* nid = doc["networkId"].template as<const char*>();
     if (nid == nullptr || nid[0] == '\0') return CFG_BAD_NETWORK_ID;
 
+    // protocolVersion must be present and positive (missing/0 == corruption).
+    // The [minProto, maxProto] range is a compatibility check reported *after*
+    // the structural checks pass, as the soft CFG_UNSUPPORTED_PROTOCOL.
     if (doc["protocolVersion"].isNull()) return CFG_BAD_PROTOCOL;
     const long proto = doc["protocolVersion"].template as<long>();
-    if (proto < (long)minProto || proto > (long)maxProto) return CFG_BAD_PROTOCOL;
+    if (proto <= 0) return CFG_BAD_PROTOCOL;
 
     JsonArrayConst keys = doc["keys"].template as<JsonArrayConst>();
     if (keys.isNull() || keys.size() == 0) return CFG_NO_KEYS;
     for (JsonObjectConst keyObj : keys) {
         const char* hex = keyObj["key"].template as<const char*>();
         if (!isValidHexKey(hex, aesKeySize)) return CFG_BAD_KEY;
+    }
+
+    // Structurally sound. Flag (but do not fail) an out-of-range protocol.
+    if (proto < (long)minProto || proto > (long)maxProto) {
+        return CFG_UNSUPPORTED_PROTOCOL;
     }
     return CFG_OK;
 }

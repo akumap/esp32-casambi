@@ -202,3 +202,12 @@ Alle neun Maßnahmen wurden anschließend umgesetzt.
 > (Flash-I/O im async_tcp-Task) neu einführen. Die echte Parse- und
 > Semantikprüfung sowie die Recovery erfolgen in `loadNetworkConfig()`, das
 > die eigentliche Boot-Entscheidung (Betrieb vs. Setup) trägt.
+
+> Hinweis zur Protokollversion (S-01, Nachtrag): `MAX_PROTOCOL_VERSION` wurde
+> auf **11** angehoben (aktuelle Netzwerke verwenden v11). Zusätzlich ist die
+> Protokoll-Bereichsprüfung jetzt **weich**: Eine strukturell gültige Config mit
+> einer Protokollversion außerhalb `[MIN, MAX]` wird mit einer **Warnung im Log
+> akzeptiert** statt abgelehnt (`CFG_UNSUPPORTED_PROTOCOL` / `isCommittable()`),
+> da die BLE-Behandlung ohnehin versionstolerant ist. Nur echte Korruption
+> (fehlende Pflichtfelder, keine/zu kurze Hex-Schlüssel, fehlende/0-Protokoll­
+> version) blockiert weiterhin Speichern und Laden.

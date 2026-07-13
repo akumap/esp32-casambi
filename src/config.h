@@ -21,8 +21,13 @@
 #define CASAMBI_MFG_ID            0x03C3
 
 // Protocol Version
+// Range of Casambi BLE protocol versions the firmware is known to work with.
+// v11 is in active use by current networks; the on-air handling is
+// version-tolerant (mismatches are logged, not enforced — see
+// checkCasambiVersions() and CasambiClient), so a config whose protocolVersion
+// falls outside this range is accepted with a warning rather than rejected.
 #define MIN_PROTOCOL_VERSION      10
-#define MAX_PROTOCOL_VERSION      10
+#define MAX_PROTOCOL_VERSION      11
 
 // ESP32 firmware build number.
 // Normally injected at compile time by scripts/build_number.py
