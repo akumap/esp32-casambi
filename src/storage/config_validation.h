@@ -35,43 +35,60 @@ inline bool isValidHexKey(const char* hex, size_t expectedBytes) {
     return n == expectedBytes * 2;
 }
 
-// Semantic validation of a parsed network-config object. Returns true only for a
-// document the firmware can safely run on:
+// Result of config validation: `ok` plus a coarse reason for logging when it
+// fails. Deliberately not an enum class so it prints cleanly and stays trivial.
+enum ConfigValidationReason {
+    CFG_OK = 0,
+    CFG_BAD_NETWORK_ID,     // networkId missing or empty
+    CFG_BAD_PROTOCOL,       // protocolVersion missing or out of range
+    CFG_NO_KEYS,            // keys array missing or empty
+    CFG_BAD_KEY,            // a key is missing / not full-length hex
+};
+
+// Semantic validation of a parsed network-config object. Returns CFG_OK only for
+// a document the firmware can safely run on:
 //   - networkId present and non-empty,
 //   - protocolVersion an integer within [minProto, maxProto],
 //   - at least one key, each with a full-length hex AES key.
 // Existence of the file alone is NOT sufficient (the previous behaviour).
+//
+// IMPORTANT: only `.as<T>()` accessors are used, never `.is<T>()`. ArduinoJson
+// 7.0.0 (the pinned firmware version) mis-handles `.is<const char*>()` /
+// `.is<int>()` on parsed values, which would reject a perfectly valid config.
+// `.as<const char*>()` yields nullptr for a non-string, and `.as<long>()` yields
+// 0 for a non-number, so explicit null/range checks are enough and portable.
+inline ConfigValidationReason validateConfigObject(JsonObjectConst doc,
+                                                   uint8_t minProto,
+                                                   uint8_t maxProto,
+                                                   size_t aesKeySize) {
+    const char* nid = doc["networkId"].as<const char*>();
+    if (nid == nullptr || nid[0] == '\0') return CFG_BAD_NETWORK_ID;
+
+    if (doc["protocolVersion"].isNull()) return CFG_BAD_PROTOCOL;
+    const long proto = doc["protocolVersion"].as<long>();
+    if (proto < (long)minProto || proto > (long)maxProto) return CFG_BAD_PROTOCOL;
+
+    JsonArrayConst keys = doc["keys"].as<JsonArrayConst>();
+    if (keys.isNull() || keys.size() == 0) return CFG_NO_KEYS;
+    for (JsonObjectConst keyObj : keys) {
+        const char* hex = keyObj["key"].as<const char*>();
+        if (!isValidHexKey(hex, aesKeySize)) return CFG_BAD_KEY;
+    }
+    return CFG_OK;
+}
+
+// Convenience boolean wrapper.
 inline bool isValidConfigObject(JsonObjectConst doc, uint8_t minProto,
                                 uint8_t maxProto, size_t aesKeySize) {
-    const char* nid = doc["networkId"].is<const char*>()
-                          ? doc["networkId"].as<const char*>()
-                          : nullptr;
-    if (nid == nullptr || nid[0] == '\0') return false;
-
-    if (!doc["protocolVersion"].is<int>()) return false;
-    const int proto = doc["protocolVersion"].as<int>();
-    if (proto < minProto || proto > maxProto) return false;
-
-    JsonArrayConst keys = doc["keys"];
-    if (keys.isNull() || keys.size() == 0) return false;
-    for (JsonObjectConst keyObj : keys) {
-        const char* hex = keyObj["key"].is<const char*>()
-                              ? keyObj["key"].as<const char*>()
-                              : nullptr;
-        if (!isValidHexKey(hex, aesKeySize)) return false;
-    }
-    return true;
+    return validateConfigObject(doc, minProto, maxProto, aesKeySize) == CFG_OK;
 }
 
 // Semantic validation of WiFi credentials: both SSID and password must be
-// present and non-empty (mirrors WiFiCredentials::isValid()).
+// present and non-empty (mirrors WiFiCredentials::isValid()). Uses `.as<>()`
+// for the same ArduinoJson-7.0.0 reason as above.
 inline bool isValidWifiObject(JsonObjectConst doc) {
-    const char* ssid = doc["ssid"].is<const char*>()
-                           ? doc["ssid"].as<const char*>()
-                           : nullptr;
-    const char* pass = doc["password"].is<const char*>()
-                           ? doc["password"].as<const char*>()
-                           : nullptr;
+    const char* ssid = doc["ssid"].as<const char*>();
+    const char* pass = doc["password"].as<const char*>();
     return ssid && ssid[0] != '\0' && pass && pass[0] != '\0';
 }
 

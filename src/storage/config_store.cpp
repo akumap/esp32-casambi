@@ -259,12 +259,20 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
 
     // Reject a syntactically valid but semantically incomplete config (missing
     // networkId, out-of-range protocol, or a truncated/non-hex AES key) instead
-    // of loading a half-valid state. hasValidConfig() relies on this too.
-    if (!configval::isValidConfigObject(doc.as<JsonObjectConst>(),
+    // of loading a half-valid state. The reason is logged so a rejection is
+    // diagnosable from the serial log alone.
+    configval::ConfigValidationReason reason =
+        configval::validateConfigObject(doc.as<JsonObjectConst>(),
                                         MIN_PROTOCOL_VERSION,
                                         MAX_PROTOCOL_VERSION,
-                                        AES_KEY_SIZE)) {
-        Serial.println("Storage: config failed semantic validation");
+                                        AES_KEY_SIZE);
+    if (reason != configval::CFG_OK) {
+        Serial.printf("Storage: config failed semantic validation (reason=%d, "
+                      "networkId='%s', protocolVersion=%d, keys=%d)\n",
+                      (int)reason,
+                      doc["networkId"].as<const char*>() ? doc["networkId"].as<const char*>() : "(none)",
+                      doc["protocolVersion"].as<int>(),
+                      (int)doc["keys"].as<JsonArrayConst>().size());
         return false;
     }
 
