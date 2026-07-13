@@ -144,6 +144,16 @@ public:
     static uint16_t bootCount() { return _bootId; }
 
     /**
+     * Layout generation of the persisted log. Incremented whenever the
+     * ping-pong files switch or the log is cleared — i.e. whenever global
+     * record indices from an earlier snapshotNewest() become invalid. A
+     * chunked reader compares this against its snapshot and stops cleanly
+     * instead of streaming shifted/cleared records. Plain uint32 read
+     * (atomic on ESP32), callable from any task.
+     */
+    static uint32_t generation() { return _generation; }
+
+    /**
      * Human-readable level name (e.g. "ERROR").
      */
     static const char* levelName(uint8_t level);
@@ -153,6 +163,7 @@ private:
     static uint16_t _bootId;
     static char   _activeFile;     // '0' => A, '1' => B
     static size_t _activeSize;     // bytes currently in active file
+    static volatile uint32_t _generation;  // bumped on file switch / clear
     static SemaphoreHandle_t _mutex;
     static TaskHandle_t _ownerTask;  // task that ran begin(); may write flash inline
 

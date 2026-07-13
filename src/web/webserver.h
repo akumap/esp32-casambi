@@ -6,7 +6,8 @@
  * no longer need to poll.
  *
  * WebSocket protocol (server → client, JSON):
- *   {"type":"hello","ble_connected":true,"units":[{"id":1,"name":"...","online":true,
+ *   {"type":"hello","network":"My Home","ble_connected":true,
+ *     "units":[{"id":1,"name":"...","online":true,
  *     "on":true,"level":128,"vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000},...]}
  *   {"type":"unit_state","id":1,"level":128,"online":true,"on":true,
  *     "vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000}  – aux fields omitted if unsupported
@@ -28,6 +29,7 @@
 // reference a bare HTTP_* constant alongside HTTPClient, so no qualification is
 // needed.
 #include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>   // JsonDocument in the _parseBody/_requireUint8 helpers
 #include <freertos/queue.h>
 #include "../ble/casambi_client.h"
 #include "../cloud/network_config.h"
@@ -149,6 +151,11 @@ private:
     // by loop() so _ws->textAll() is always called from the loop task.
     QueueHandle_t _broadcastQueue;
 
+    // Set (BLE task) when a broadcast had to be dropped because the queue was
+    // full; loop() then pushes a fresh hello snapshot to all clients so nobody
+    // stays stale on a missed unit_state.
+    volatile bool _resyncNeeded;
+
     // Setup route handlers
     void _setupRoutes();
 
@@ -201,7 +208,24 @@ private:
     void _handleGroupSlider(AsyncWebServerRequest* request);
     void _handleGroupVertical(AsyncWebServerRequest* request);
 
+    // Request helpers (shared by all control handlers) ------------------------
+    // 503 unless the BLE link is authenticated; true when the request may proceed.
+    bool _checkBle(AsyncWebServerRequest* request);
+    // Resolve the 0-255 id segment of the URL and look up the entity; on any
+    // failure the 400/404 response has already been sent and nullptr returns.
+    CasambiScene* _sceneFromPath(AsyncWebServerRequest* request, const char* suffix, uint8_t& idOut);
+    CasambiUnit*  _unitFromPath(AsyncWebServerRequest* request, const char* suffix, uint8_t& idOut);
+    CasambiGroup* _groupFromPath(AsyncWebServerRequest* request, const char* suffix, uint8_t& idOut);
+    // Take the buffered JSON body out of _tempObject and parse it into doc.
+    // Frees the buffer in all cases; false after sending the 400 response.
+    bool _parseBody(AsyncWebServerRequest* request, JsonDocument& doc);
+    // Require an integer field 0..255; sends the 400 response on failure.
+    bool _requireUint8(AsyncWebServerRequest* request, JsonDocument& doc,
+                       const char* key, uint8_t& out);
+
     // Utility methods
+    // _sendJsonError also frees a still-buffered POST body (_tempObject), so
+    // every rejection path (401/404/413/503/...) cleans up uniformly.
     void _sendJsonError(AsyncWebServerRequest* request, const String& error, int code = 400);
     void _sendJsonSuccess(AsyncWebServerRequest* request);
     String _getClientIP(AsyncWebServerRequest* request);

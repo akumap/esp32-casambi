@@ -23,10 +23,16 @@
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Last two MAC octets. ESP.getEfuseMac() stores octet 0 (the vendor OUI) in
+// the LOWEST byte, so `mac & 0xFFFF` would yield the OUI — identical across
+// boards of a batch; the device-specific tail lives in bits 32..47. (Keep in
+// sync with the copy in main.cpp.)
 static String deviceSuffix() {
     uint64_t mac = ESP.getEfuseMac();
     char buf[5];
-    sprintf(buf, "%04x", (unsigned)(mac & 0xFFFF));
+    sprintf(buf, "%02x%02x",
+            (unsigned)((mac >> 32) & 0xFF),    // mac[4]
+            (unsigned)((mac >> 40) & 0xFF));   // mac[5], last octet
     return String(buf);
 }
 
@@ -186,13 +192,13 @@ void SetupPortal::_setupRoutes() {
     _server->on("/", HTTP_GET, sendPage);
     _server->onNotFound(sendPage);
 
+    // Same reduced shape as the operation-mode /api/info: just the two fields
+    // FHEM needs to tell "still in setup" apart from "ready". The portal AP is
+    // open, so hostname/MAC/IP are deliberately not exposed here either.
     _server->on("/api/info", HTTP_GET, [](AsyncWebServerRequest* req) {
         JsonDocument d;
         d["configured"] = false;
         d["build"]      = FIRMWARE_BUILD;
-        d["hostname"]   = "casambi-" + deviceSuffix();
-        d["mac"]        = WiFi.macAddress();
-        d["ip"]         = WiFi.softAPIP().toString();
         String out; serializeJson(d, out);
         req->send(200, "application/json", out);
     });

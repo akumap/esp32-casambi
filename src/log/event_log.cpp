@@ -20,7 +20,11 @@ RTC_NOINIT_ATTR static uint16_t rtcLogCount;                 // valid entries (<
 RTC_NOINIT_ATTR static uint16_t rtcLogPending;               // newest entries not yet persisted to LittleFS
 RTC_NOINIT_ATTR static LogEntry rtcLog[LOG_RTC_CAPACITY];
 
-static const uint32_t RTC_MAGIC = 0xCAFEBABE;
+// Layout-versioned magic: mixing the entry size and ring capacity in means a
+// firmware update that changes the LogEntry layout invalidates the RTC ring
+// instead of flushing stale bytes from the old layout as garbage entries.
+static const uint32_t RTC_MAGIC =
+    0xCAFE0000u ^ ((uint32_t)sizeof(LogEntry) << 8) ^ LOG_RTC_CAPACITY;
 
 // Unix time that means "NTP has plausibly synced" (2020-01-01 in seconds).
 static const time_t TIME_SYNCED_THRESHOLD = 1577836800;
@@ -32,6 +36,7 @@ bool   EventLog::_initialized = false;
 uint16_t EventLog::_bootId    = 0;
 char   EventLog::_activeFile  = '0';
 size_t EventLog::_activeSize  = 0;
+volatile uint32_t EventLog::_generation = 0;
 SemaphoreHandle_t EventLog::_mutex = nullptr;
 TaskHandle_t EventLog::_ownerTask  = nullptr;
 
@@ -104,6 +109,7 @@ bool EventLog::_appendLittleFS(const LogEntry& e) {
         if (clr) clr.close();
         _activeSize = 0;
         _writeMeta();
+        _generation++;   // global record indices shifted — invalidate snapshots
     }
 
     File f = LittleFS.open(_activePath(), "a");
@@ -272,6 +278,7 @@ void EventLog::clear() {
     if (LittleFS.exists(LOG_META_FILE)) LittleFS.remove(LOG_META_FILE);
     _activeFile = '0';
     _activeSize = 0;
+    _generation++;   // all snapshot indices are void now
 
     rtcLogMagic   = RTC_MAGIC;
     rtcLogHead    = 0;
@@ -327,7 +334,9 @@ void EventLog::writeEntryJson(Print& out, const LogEntry& e) {
     out.print(",\"levelName\":\"");
     out.print(EventLog::levelName(e.level));
     out.print("\",\"msg\":\"");
-    writeEscaped(out, e.msg, e.msgLen);
+    // Clamp: a corrupted/foreign record (mid-switch read, old firmware layout)
+    // may carry msgLen > LOG_MSG_MAX; printing that would read past e.msg.
+    writeEscaped(out, e.msg, e.msgLen > LOG_MSG_MAX ? LOG_MSG_MAX : e.msgLen);
     out.print("\"}");
 }
 

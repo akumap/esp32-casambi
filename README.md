@@ -20,7 +20,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 - ✅ **Scene, Unit & Group Control** — On/off, brightness, color, temperature, vertical, slider
 - ✅ **Auto-Connect & Auto-Reconnect** — Reconnects automatically on BLE link loss with exponential backoff
 - ✅ **WiFi Auto-Reconnect** — Recovers WiFi connection silently in background
-- ✅ **Hardware Watchdog** — Prevents permanent hangs (30s timeout)
+- ✅ **Hardware Watchdog** — Prevents permanent hangs (45s timeout)
 - ✅ **Heap Monitoring** — Automatic restart on critical memory levels
 - ✅ **Connection Health Checks** — Detects silent BLE disconnects
 - 💾 **Persistent Storage** — Configuration and capabilities stored in LittleFS (survives reboots and reflashing)
@@ -210,7 +210,8 @@ Once a Casambi network password is stored on the device (after provisioning),
 **every endpoint except `GET /api/info` requires an API token** in the
 `X-API-Key` request header; the WebSocket upgrade requires it too (as the
 `X-API-Key` header or a `?k=<token>` query parameter). Unauthenticated requests
-get `401 Unauthorized`.
+get `401 Unauthorized` — including a rejected WebSocket upgrade, so clients can
+tell an auth problem from a wrong path.
 
 The token is **not** the raw Casambi password — it is derived from it, so the
 cloud password never travels on the wire:
@@ -226,11 +227,15 @@ TOKEN=$(printf 'casambi-api:%s' "$CASAMBI_PASSWORD" | sha256sum | cut -d' ' -f1)
 curl -H "X-API-Key: $TOKEN" http://<esp32-ip>/api/status
 ```
 
-The **FHEM module derives the token automatically** — just set the password:
+The **FHEM module derives the token automatically** — just set the password
+(stored in FHEM's obfuscated key-value store, not in fhem.cfg):
 
 ```
-attr <gw> casambiPassword <casambi-network-password>
+set <gw> password <casambi-network-password>
 ```
+
+(The legacy plaintext attribute `attr <gw> casambiPassword <pw>` still works;
+the key store takes precedence when both are set.)
 
 Notes:
 - A device with **no** stored Casambi password (e.g. a config predating this
@@ -522,6 +527,7 @@ capability flags used by the FHEM integration for device identification:
 {
   "type": "hello",
   "build": 1,
+  "network": "My Home",
   "ble_connected": true,
   "units": [
     {
@@ -663,7 +669,7 @@ is caught immediately rather than silently failing BLE authentication.
   `python3 scripts/stress_test.py --host <ip> --password <casambi-pw>`
   (both scripts also accept a pre-derived `--token`).
 - **Long-term BLE stability** has not been exhaustively tested. The auto-reconnect mechanism mitigates most connection drops, but edge cases may exist.
-- The **hardware watchdog** (30s) and **heap monitoring** provide safety nets against hangs and memory leaks.
+- The **hardware watchdog** (45s) and **heap monitoring** provide safety nets against hangs and memory leaks.
 
 ### Untested or Partially Tested Features
 
@@ -686,9 +692,9 @@ is caught immediately rather than silently failing BLE authentication.
 
 The controller is designed for 24/7 unattended operation:
 
-- **BLE Auto-Reconnect:** On link loss, reconnects with exponential backoff (5s → 60s). After 10 consecutive failures, restarts the ESP32.
+- **BLE Auto-Reconnect:** On link loss, reconnects with exponential backoff (5s → 60s). A merely absent peer (e.g. lights cut by a wall switch) is retried at max backoff indefinitely — rebooting cannot help there; only 10 consecutive *internal* failures (auth, key exchange, GATT structure) restart the ESP32.
 - **WiFi Auto-Reconnect:** Checks every 30s, reconnects silently. Web server is restarted automatically.
-- **Hardware Watchdog:** 30-second WDT timeout prevents permanent hangs. Fed in every `loop()` iteration.
+- **Hardware Watchdog:** 45-second WDT timeout prevents permanent hangs (sized above NimBLE's 30 s ATT procedure timeout, the longest blocking BLE call on the loop task). Fed in every `loop()` iteration.
 - **Heap Monitoring:** Logged every 60s. If free heap drops below 20KB, the ESP32 restarts to prevent corruption.
 - **Connection Health:** Periodic `isBLEConnected()` check detects silent disconnects where the BLE stack hasn’t noticed a link loss.
 
@@ -843,6 +849,7 @@ The actual cloud download runs early on the **next boot**, before the BLE stack 
 |Environment|Purpose                                          |
 |-----------|-------------------------------------------------|
 |`devkit-v4`|ESP32 Dev Kit V4 (default)                       |
+|`esp32-c3` |ESP32-C3 DevKit M1 — build-only, untested on hardware|
 |`debug`    |Verbose logging, debug symbols, exception decoder|
 |`release`  |Size-optimized production build                  |
 
@@ -946,7 +953,7 @@ automatically on link loss or FHEM startup.
 |---------|--------|-------------|
 | `state` | `connected` / `disconnected` / `setup_required` / `unreachable` / `initializing` | Connection / setup state |
 | `configured` | `true` / `false` | Whether the ESP32 has a valid configuration (from `/api/info`) |
-| `network` | text | Casambi network name reported by the ESP32 |
+| `network` | text | Casambi network name, from the authenticated WebSocket `hello` (not exposed by the unauthenticated `/api/info`) |
 | `ble_state` | `ble_connected` / `ble_disconnected` | BLE link of the ESP32 |
 | `gatewayState` | `connected` / `disconnected` | BLE gateway link state |
 | `gatewayMac` | MAC | BLE address of the current gateway endpoint (empty while disconnected) |
@@ -963,7 +970,7 @@ automatically on link loss or FHEM startup.
 |-----------|---------|-------------|
 | `autocreate` | `1` | Create new `CasambiUnit` devices when `applyChanges` is called |
 | `deleteRemovedUnits` | `1` | Delete the FHEM device (`1`) or only set `online false` (`0`) for units removed from the Casambi network |
-| `casambiPassword` | *(none)* | Casambi network password. Required once the ESP32 has auth enabled: the module derives the `X-API-Key` token from it for REST calls and the WebSocket handshake. Leave unset only for a device without stored password. |
+| `casambiPassword` | *(none)* | Legacy plaintext alternative to `set <gw> password` (see below), which takes precedence and stores the password in FHEM's obfuscated key-value store. Required once the ESP32 has auth enabled: the module derives the `X-API-Key` token from it for REST calls and the WebSocket handshake. |
 
 ### Automatic unit sync
 
@@ -977,7 +984,11 @@ set MyCasambi applyChanges     # create new / remove deleted unit devices
 set MyCasambi discardChanges   # ignore the pending changes
 set MyCasambi reconnect        # close and reopen the WebSocket connection
 set MyCasambi refreshCasambi   # re-read the config from the Casambi cloud
+set MyCasambi password <pw>    # store the Casambi network password (key store)
 ```
+
+New or deleted unit devices exist only in memory until the FHEM config is
+saved — run `save` after `applyChanges` (the module logs a reminder).
 
 This prevents unintended device creation or deletion caused by a transient
 network reconfiguration or gateway restart.
@@ -1013,6 +1024,9 @@ Units with vertical capability automatically get a companion **`CasambiVertical`
 device named `<unitName>_vertical`.  See [CasambiVertical](#casambivertical-companion-device) below.
 
 **Set commands** (capability-dependent, generated automatically):
+
+`on` restores the last non-zero brightness (like the Casambi app) and falls
+back to 100 % when no previous level is known.
 
 ```
 set Casambi_Mito_sospeso on

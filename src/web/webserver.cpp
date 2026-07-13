@@ -27,7 +27,7 @@ static String lockedCopy(const String& s) {
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
       _refreshRequested(false), _rebootRequested(false), _ntpRequested(false),
-      _broadcastQueue(nullptr) {
+      _broadcastQueue(nullptr), _resyncNeeded(false) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
 }
 
@@ -71,8 +71,9 @@ bool CasambiWebServer::begin(uint16_t port) {
         _handleWebSocketEvent(server, client, type, arg, data, len);
     });
     // Gate the WebSocket upgrade on the API token. A rejected handshake is not
-    // handled here and falls through to onNotFound (the client then sees a
-    // non-101 response and retries via /api/info — see the FHEM module).
+    // handled here and falls through to onNotFound, which answers 401 for /ws
+    // so clients (FHEM) can tell an auth problem from a wrong path; the FHEM
+    // module then backs off and retries via /api/info.
     _ws->setFilter([this](AsyncWebServerRequest* request) {
         return _wsAuthOk(request);
     });
@@ -124,6 +125,18 @@ void CasambiWebServer::loop() {
                 delete msg;
             }
         }
+
+        // A broadcast was dropped (queue full): push a fresh full snapshot so
+        // clients cannot keep a stale unit state — a missed unit_state would
+        // otherwise only be corrected by the unit's NEXT change or a reconnect.
+        if (_resyncNeeded) {
+            _resyncNeeded = false;
+            if (_ws->count() > 0) {
+                _ws->textAll(_buildHelloMessage());
+                WEB_LOG("WS: broadcast drop -> resync hello pushed\n");
+            }
+        }
+
         // Enforce client limit: evict oldest clients beyond WS_MAX_CLIENTS.
         _ws->cleanupClients(WS_MAX_CLIENTS);
     }
@@ -195,12 +208,7 @@ bool CasambiWebServer::_authOk(AsyncWebServerRequest* request) {
     }
 
     // An unauthenticated POST may already have a buffered body in _tempObject
-    // (onRequestBody runs before this dispatch). Free it here so the rejected
-    // request does not leak it.
-    if (request->_tempObject) {
-        delete static_cast<String*>(request->_tempObject);
-        request->_tempObject = nullptr;
-    }
+    // (onRequestBody runs before this dispatch); _sendJsonError frees it.
     WEB_LOG("Web: 401 unauthenticated request to %s\n", request->url().c_str());
     _sendJsonError(request, "Unauthorized", 401);
     return false;
@@ -300,6 +308,11 @@ String CasambiWebServer::_buildHelloMessage() const {
     JsonDocument doc;
     doc["type"] = "hello";
     doc["build"] = FIRMWARE_BUILD;  // injected by scripts/build_number.py
+    // Network name for the FHEM "network" reading. Deliberately NOT part of
+    // the unauthenticated /api/info — hello only reaches authenticated
+    // WebSocket clients. Safe unlocked read: written only at boot/refresh,
+    // before the web server exists (same as the unit strings below).
+    doc["network"] = _config->networkName;
     bool bleConn = _client->isAuthenticated();
     doc["ble_connected"] = bleConn;
 
@@ -358,13 +371,15 @@ void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool on
     }
 
     // Post to the inter-task queue; loop() drains it in the loop task.
-    // Non-blocking: if the queue is full the message is silently dropped
-    // (the next BLE notification will carry the latest state anyway).
+    // Non-blocking: if the queue is full the message is dropped, but the
+    // resync flag makes loop() push a fresh hello snapshot — a dropped
+    // unit_state would otherwise stay stale until that unit's NEXT change.
     String* msg = new String();
     serializeJson(doc, *msg);
     if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
         delete msg;
-        WEB_LOG("WS: broadcast queue full, dropped unit_state id=%d\n", unitId);
+        _resyncNeeded = true;
+        WEB_LOG("WS: broadcast queue full, dropped unit_state id=%d (resync scheduled)\n", unitId);
     } else {
         WEB_LOG("WS: queued unit_state id=%d level=%d online=%d\n",
                 unitId, level, online);
@@ -390,7 +405,8 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
     serializeJson(doc, *msg);
     if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
         delete msg;
-        WEB_LOG("WS: broadcast queue full, dropped connection_state\n");
+        _resyncNeeded = true;   // hello also carries ble_connected + gateway
+        WEB_LOG("WS: broadcast queue full, dropped connection_state (resync scheduled)\n");
     } else {
         WEB_LOG("WS: queued connection_state connected=%d reason=%d\n",
                 connected, reason);
@@ -497,12 +513,19 @@ void CasambiWebServer::_setupRoutes() {
     // heap exhaustion under load).
     _server->onNotFound([this](AsyncWebServerRequest *request) {
         if (request->method() != HTTP_POST) {
+            // A WebSocket upgrade rejected by the auth filter falls through to
+            // here. Answer 401 (not 404) so clients — the FHEM module logs the
+            // handshake status line — can tell an auth problem from a bad path.
+            if (request->method() == HTTP_GET && request->url() == "/ws") {
+                _sendJsonError(request, "Unauthorized", 401);
+                return;
+            }
             _sendJsonError(request, "Endpoint not found", 404);
             return;
         }
 
         // Single auth gate for every dynamic POST control route (scenes/units/
-        // groups/ntp). _authOk frees any buffered body before rejecting.
+        // groups/ntp). The 401 path frees any buffered body (_sendJsonError).
         if (!_authOk(request)) return;
 
         String path = request->url();
@@ -519,12 +542,9 @@ void CasambiWebServer::_setupRoutes() {
         // --- Body endpoints (body buffered into _tempObject by onRequestBody) ---
         if (isBodyPostEndpoint(path)) {
             // Oversized payloads are not buffered by onRequestBody; reject here
-            // (this is still the single response point, so no double-send).
+            // (this is still the single response point, so no double-send;
+            // _sendJsonError frees a partially buffered body).
             if (request->contentLength() > 512) {
-                if (request->_tempObject) {
-                    delete static_cast<String*>(request->_tempObject);
-                    request->_tempObject = nullptr;
-                }
                 _sendJsonError(request, "Request body too large", 413);
                 return;
             }
@@ -566,7 +586,10 @@ void CasambiWebServer::_setupRoutes() {
 
         // Don't buffer oversized bodies; onNotFound rejects them via
         // request->contentLength(). Our JSON payloads are tiny (< 64 bytes).
+        // Moderately oversized requests still get a clean 413; clearly abusive
+        // sizes are cut off mid-stream instead of streaming megabytes through.
         if (total > 512) {
+            if (total > 4096) request->client()->close();
             return;
         }
 
@@ -786,6 +809,7 @@ struct LogJsonSource {
 
     size_t cOlder = 0, cNewer = 0, total = 0, start = 0;
     size_t nextGlobal = 0;          // next global index to emit (descending)
+    uint32_t generation = 0;        // EventLog::generation() at snapshot time
     int    phase = 0;               // 0='[', 1=entries, 2=']', 3=done
     bool   first = true;
     char   stage[LOG_ENTRY_STAGE];
@@ -816,6 +840,14 @@ struct LogJsonSource {
             if (phase == 1) {
                 // Refill the batch (one flash open per READ_BATCH records).
                 if (batchPos >= batchCount) {
+                    // The snapshot indices are void if the ping-pong files
+                    // switched (or the log was cleared) since the response
+                    // started — close the array cleanly instead of streaming
+                    // shifted/cleared records.
+                    if (EventLog::generation() != generation) {
+                        phase = 2;
+                        continue;
+                    }
                     if (nextGlobal > start) {
                         size_t from = nextGlobal - 1;
                         batchCount = EventLog::readDescRun(from, start, READ_BATCH,
@@ -871,6 +903,7 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     auto src = std::make_shared<LogJsonSource>();
     EventLog::snapshotNewest(n, src->cOlder, src->cNewer, src->total, src->start);
     src->nextGlobal = src->total;   // descend to src->start
+    src->generation = EventLog::generation();
 
     AsyncWebServerResponse* response = request->beginChunkedResponse(
         "application/json",
@@ -913,23 +946,8 @@ void CasambiWebServer::_handleGetNtp(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleSetNtp(AsyncWebServerRequest* request) {
-    // Parse JSON body (stored as String* in _tempObject by body handler)
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
-
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
+    if (!_parseBody(request, doc)) return;
 
     if (!doc["server"].is<const char*>()) {
         _sendJsonError(request, "Missing 'server' parameter", 400);
@@ -963,29 +981,102 @@ void CasambiWebServer::_handleSetNtp(AsyncWebServerRequest* request) {
 }
 
 // ============================================================================
+// Request helpers (shared by the control endpoints)
+// ============================================================================
+
+// Parse the decimal id segment between `prefix` and `suffix` of the URL.
+// Returns -1 unless the segment is a plain 0-255 integer — so a path like
+// /api/units/300/level cannot alias unit 44 via uint8 truncation.
+static int parseIdSegment(const String& path, const char* prefix, const char* suffix) {
+    int start = path.indexOf(prefix);
+    if (start < 0) return -1;
+    start += strlen(prefix);
+    int end = path.indexOf(suffix, start);
+    if (end < 0 || end == start) return -1;
+    long v = 0;
+    for (int i = start; i < end; i++) {
+        char c = path[i];
+        if (c < '0' || c > '9') return -1;
+        v = v * 10 + (c - '0');
+        if (v > 255) return -1;
+    }
+    return (int)v;
+}
+
+bool CasambiWebServer::_checkBle(AsyncWebServerRequest* request) {
+    if (!_client->isAuthenticated()) {
+        _sendJsonError(request, "Not connected to BLE gateway", 503);
+        return false;
+    }
+    return true;
+}
+
+CasambiScene* CasambiWebServer::_sceneFromPath(AsyncWebServerRequest* request,
+                                               const char* suffix, uint8_t& idOut) {
+    int id = parseIdSegment(request->url(), "/scenes/", suffix);
+    if (id < 0) { _sendJsonError(request, "Invalid scene id", 400); return nullptr; }
+    CasambiScene* scene = _config->getSceneById((uint8_t)id);
+    if (!scene) { _sendJsonError(request, "Scene not found", 404); return nullptr; }
+    idOut = (uint8_t)id;
+    return scene;
+}
+
+CasambiUnit* CasambiWebServer::_unitFromPath(AsyncWebServerRequest* request,
+                                             const char* suffix, uint8_t& idOut) {
+    int id = parseIdSegment(request->url(), "/units/", suffix);
+    if (id < 0) { _sendJsonError(request, "Invalid unit id", 400); return nullptr; }
+    CasambiUnit* unit = _config->getUnitById((uint8_t)id);
+    if (!unit) { _sendJsonError(request, "Unit not found", 404); return nullptr; }
+    idOut = (uint8_t)id;
+    return unit;
+}
+
+CasambiGroup* CasambiWebServer::_groupFromPath(AsyncWebServerRequest* request,
+                                               const char* suffix, uint8_t& idOut) {
+    int id = parseIdSegment(request->url(), "/groups/", suffix);
+    if (id < 0) { _sendJsonError(request, "Invalid group id", 400); return nullptr; }
+    CasambiGroup* group = _config->getGroupById((uint8_t)id);
+    if (!group) { _sendJsonError(request, "Group not found", 404); return nullptr; }
+    idOut = (uint8_t)id;
+    return group;
+}
+
+bool CasambiWebServer::_parseBody(AsyncWebServerRequest* request, JsonDocument& doc) {
+    if (!request->_tempObject) {
+        _sendJsonError(request, "Missing request body", 400);
+        return false;
+    }
+    String* bodyStr = static_cast<String*>(request->_tempObject);
+    DeserializationError error = deserializeJson(doc, *bodyStr);
+    delete bodyStr;
+    request->_tempObject = nullptr;
+    if (error) {
+        _sendJsonError(request, "Invalid JSON", 400);
+        return false;
+    }
+    return true;
+}
+
+bool CasambiWebServer::_requireUint8(AsyncWebServerRequest* request, JsonDocument& doc,
+                                     const char* key, uint8_t& out) {
+    if (!doc[key].is<uint8_t>()) {
+        _sendJsonError(request, String("Missing '") + key + "' parameter (0-255)", 400);
+        return false;
+    }
+    out = doc[key];
+    return true;
+}
+
+// ============================================================================
 // Scene Control Endpoints
 // ============================================================================
 
 void CasambiWebServer::_handleSceneOn(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t sceneId;
+    if (!_checkBle(request)) return;
+    CasambiScene* scene = _sceneFromPath(request, "/on", sceneId);
+    if (!scene) return;
 
-    // Extract scene ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/scenes/") + 8;
-    int endIdx = path.indexOf("/on");
-    uint8_t sceneId = path.substring(startIdx, endIdx).toInt();
-
-    // Find scene
-    CasambiScene* scene = _config->getSceneById(sceneId);
-    if (!scene) {
-        _sendJsonError(request, "Scene not found", 404);
-        return;
-    }
-
-    // Execute command
     _client->setSceneLevel(sceneId, 0xFF);
 
     WEB_LOG("Web: Scene %d (%s) ON from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
@@ -993,25 +1084,11 @@ void CasambiWebServer::_handleSceneOn(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleSceneOff(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t sceneId;
+    if (!_checkBle(request)) return;
+    CasambiScene* scene = _sceneFromPath(request, "/off", sceneId);
+    if (!scene) return;
 
-    // Extract scene ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/scenes/") + 8;
-    int endIdx = path.indexOf("/off");
-    uint8_t sceneId = path.substring(startIdx, endIdx).toInt();
-
-    // Find scene
-    CasambiScene* scene = _config->getSceneById(sceneId);
-    if (!scene) {
-        _sendJsonError(request, "Scene not found", 404);
-        return;
-    }
-
-    // Execute command
     _client->setSceneLevel(sceneId, 0);
 
     WEB_LOG("Web: Scene %d (%s) OFF from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
@@ -1019,51 +1096,15 @@ void CasambiWebServer::_handleSceneOff(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleSceneLevel(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t sceneId;
+    if (!_checkBle(request)) return;
+    CasambiScene* scene = _sceneFromPath(request, "/level", sceneId);
+    if (!scene) return;
 
-    // Extract scene ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/scenes/") + 8;
-    int endIdx = path.indexOf("/level");
-    uint8_t sceneId = path.substring(startIdx, endIdx).toInt();
-
-    // Find scene
-    CasambiScene* scene = _config->getSceneById(sceneId);
-    if (!scene) {
-        _sendJsonError(request, "Scene not found", 404);
-        return;
-    }
-
-    // Parse JSON body (stored as String* in _tempObject by body handler)
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
+    uint8_t level;
+    if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["level"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'level' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t level = doc["level"];
-
-    // Execute command
     _client->setSceneLevel(sceneId, level);
 
     WEB_LOG("Web: Scene %d (%s) level=%d from %s\n", sceneId, scene->name.c_str(), level, _getClientIP(request).c_str());
@@ -1075,25 +1116,11 @@ void CasambiWebServer::_handleSceneLevel(AsyncWebServerRequest* request) {
 // ============================================================================
 
 void CasambiWebServer::_handleUnitOn(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/on", unitId);
+    if (!unit) return;
 
-    // Extract unit ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/units/") + 7;
-    int endIdx = path.indexOf("/on");
-    uint8_t unitId = path.substring(startIdx, endIdx).toInt();
-
-    // Find unit
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (!unit) {
-        _sendJsonError(request, "Unit not found", 404);
-        return;
-    }
-
-    // Execute command
     _client->setUnitLevel(unitId, 255);
 
     WEB_LOG("Web: Unit %d (%s) ON from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
@@ -1101,25 +1128,11 @@ void CasambiWebServer::_handleUnitOn(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleUnitOff(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/off", unitId);
+    if (!unit) return;
 
-    // Extract unit ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/units/") + 7;
-    int endIdx = path.indexOf("/off");
-    uint8_t unitId = path.substring(startIdx, endIdx).toInt();
-
-    // Find unit
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (!unit) {
-        _sendJsonError(request, "Unit not found", 404);
-        return;
-    }
-
-    // Execute command
     _client->setUnitLevel(unitId, 0);
 
     WEB_LOG("Web: Unit %d (%s) OFF from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
@@ -1127,51 +1140,15 @@ void CasambiWebServer::_handleUnitOff(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleUnitLevel(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/level", unitId);
+    if (!unit) return;
 
-    // Extract unit ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/units/") + 7;
-    int endIdx = path.indexOf("/level");
-    uint8_t unitId = path.substring(startIdx, endIdx).toInt();
-
-    // Find unit
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (!unit) {
-        _sendJsonError(request, "Unit not found", 404);
-        return;
-    }
-
-    // Parse JSON body (stored as String* in _tempObject by body handler)
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
+    uint8_t level;
+    if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["level"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'level' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t level = doc["level"];
-
-    // Execute command
     _client->setUnitLevel(unitId, level);
 
     WEB_LOG("Web: Unit %d (%s) level=%d from %s\n", unitId, unit->name.c_str(), level, _getClientIP(request).c_str());
@@ -1179,53 +1156,18 @@ void CasambiWebServer::_handleUnitLevel(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleUnitColor(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/color", unitId);
+    if (!unit) return;
 
-    // Extract unit ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/units/") + 7;
-    int endIdx = path.indexOf("/color");
-    uint8_t unitId = path.substring(startIdx, endIdx).toInt();
-
-    // Find unit
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (!unit) {
-        _sendJsonError(request, "Unit not found", 404);
-        return;
-    }
-
-    // Parse JSON body (stored as String* in _tempObject by body handler)
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
+    uint8_t r, g, b;
+    if (!_parseBody(request, doc)) return;
+    if (!_requireUint8(request, doc, "r", r) ||
+        !_requireUint8(request, doc, "g", g) ||
+        !_requireUint8(request, doc, "b", b)) return;
 
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["r"].is<uint8_t>() || !doc["g"].is<uint8_t>() || !doc["b"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing or out-of-range 'r', 'g', or 'b' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t r = doc["r"];
-    uint8_t g = doc["g"];
-    uint8_t b = doc["b"];
-
-    // Execute command
     _client->setUnitColor(unitId, r, g, b);
 
     WEB_LOG("Web: Unit %d (%s) color=(%d,%d,%d) from %s\n", unitId, unit->name.c_str(), r, g, b, _getClientIP(request).c_str());
@@ -1233,58 +1175,59 @@ void CasambiWebServer::_handleUnitColor(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleUnitTemperature(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/temperature", unitId);
+    if (!unit) return;
 
-    // Extract unit ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/units/") + 7;
-    int endIdx = path.indexOf("/temperature");
-    uint8_t unitId = path.substring(startIdx, endIdx).toInt();
-
-    // Find unit
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (!unit) {
-        _sendJsonError(request, "Unit not found", 404);
-        return;
-    }
-
-    // Parse JSON body (stored as String* in _tempObject by body handler)
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
-
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
+    if (!_parseBody(request, doc)) return;
 
     if (!doc["kelvin"].is<uint16_t>()) {
         _sendJsonError(request, "Missing 'kelvin' parameter", 400);
         return;
     }
-
     uint16_t kelvin = doc["kelvin"];
     if (kelvin < 1000 || kelvin > 10000) {
         _sendJsonError(request, "Kelvin must be 1000-10000", 400);
         return;
     }
 
-    // Execute command
     _client->setUnitTemperature(unitId, kelvin);
 
     WEB_LOG("Web: Unit %d (%s) temperature=%dK from %s\n", unitId, unit->name.c_str(), kelvin, _getClientIP(request).c_str());
+    _sendJsonSuccess(request);
+}
+
+void CasambiWebServer::_handleUnitSlider(AsyncWebServerRequest* request) {
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/slider", unitId);
+    if (!unit) return;
+
+    JsonDocument doc;
+    uint8_t value;
+    if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
+
+    _client->setUnitSlider(unitId, value);
+
+    WEB_LOG("Web: Unit %d (%s) slider=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
+    _sendJsonSuccess(request);
+}
+
+void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/vertical", unitId);
+    if (!unit) return;
+
+    JsonDocument doc;
+    uint8_t value;
+    if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
+
+    _client->setUnitVertical(unitId, value);
+
+    WEB_LOG("Web: Unit %d (%s) vertical=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
@@ -1293,207 +1236,31 @@ void CasambiWebServer::_handleUnitTemperature(AsyncWebServerRequest* request) {
 // ============================================================================
 
 void CasambiWebServer::_handleGroupLevel(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t groupId;
+    if (!_checkBle(request)) return;
+    CasambiGroup* group = _groupFromPath(request, "/level", groupId);
+    if (!group) return;
 
-    // Extract group ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/groups/") + 8;
-    int endIdx = path.indexOf("/level");
-    uint8_t groupId = path.substring(startIdx, endIdx).toInt();
-
-    // Find group
-    CasambiGroup* group = _config->getGroupById(groupId);
-    if (!group) {
-        _sendJsonError(request, "Group not found", 404);
-        return;
-    }
-
-    // Parse JSON body (stored as String* in _tempObject by body handler)
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
+    uint8_t level;
+    if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["level"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'level' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t level = doc["level"];
-
-    // Execute command
     _client->setGroupLevel(groupId, level);
 
     WEB_LOG("Web: Group %d (%s) level=%d from %s\n", groupId, group->name.c_str(), level, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
 }
 
-void CasambiWebServer::_handleUnitSlider(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
-
-    // Extract unit ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/units/") + 7;
-    int endIdx = path.indexOf("/slider");
-    uint8_t unitId = path.substring(startIdx, endIdx).toInt();
-
-    // Find unit
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (!unit) {
-        _sendJsonError(request, "Unit not found", 404);
-        return;
-    }
-
-    // Parse JSON body
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
-
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t value = doc["value"];
-
-    // Execute command
-    _client->setUnitSlider(unitId, value);
-
-    WEB_LOG("Web: Unit %d (%s) slider=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
-}
-
-void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
-
-    // Extract unit ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/units/") + 7;
-    int endIdx = path.indexOf("/vertical");
-    uint8_t unitId = path.substring(startIdx, endIdx).toInt();
-
-    // Find unit
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (!unit) {
-        _sendJsonError(request, "Unit not found", 404);
-        return;
-    }
-
-    // Parse JSON body
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
-
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t value = doc["value"];
-
-    // Execute command
-    _client->setUnitVertical(unitId, value);
-
-    WEB_LOG("Web: Unit %d (%s) vertical=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
-}
-
 void CasambiWebServer::_handleGroupSlider(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t groupId;
+    if (!_checkBle(request)) return;
+    CasambiGroup* group = _groupFromPath(request, "/slider", groupId);
+    if (!group) return;
 
-    // Extract group ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/groups/") + 8;
-    int endIdx = path.indexOf("/slider");
-    uint8_t groupId = path.substring(startIdx, endIdx).toInt();
-
-    // Find group
-    CasambiGroup* group = _config->getGroupById(groupId);
-    if (!group) {
-        _sendJsonError(request, "Group not found", 404);
-        return;
-    }
-
-    // Parse JSON body
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
+    uint8_t value;
+    if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t value = doc["value"];
-
-    // Execute command
     _client->setGroupSlider(groupId, value);
 
     WEB_LOG("Web: Group %d (%s) slider=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
@@ -1501,51 +1268,15 @@ void CasambiWebServer::_handleGroupSlider(AsyncWebServerRequest* request) {
 }
 
 void CasambiWebServer::_handleGroupVertical(AsyncWebServerRequest* request) {
-    if (!_client->isAuthenticated()) {
-        _sendJsonError(request, "Not connected to BLE gateway", 503);
-        return;
-    }
+    uint8_t groupId;
+    if (!_checkBle(request)) return;
+    CasambiGroup* group = _groupFromPath(request, "/vertical", groupId);
+    if (!group) return;
 
-    // Extract group ID from path
-    String path = request->url();
-    int startIdx = path.indexOf("/groups/") + 8;
-    int endIdx = path.indexOf("/vertical");
-    uint8_t groupId = path.substring(startIdx, endIdx).toInt();
-
-    // Find group
-    CasambiGroup* group = _config->getGroupById(groupId);
-    if (!group) {
-        _sendJsonError(request, "Group not found", 404);
-        return;
-    }
-
-    // Parse JSON body
-    if (!request->_tempObject) {
-        _sendJsonError(request, "Missing request body", 400);
-        return;
-    }
-
-    String* bodyStr = (String*)request->_tempObject;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, *bodyStr);
+    uint8_t value;
+    if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    // Cleanup body immediately after parsing
-    delete bodyStr;
-    request->_tempObject = nullptr;
-
-    if (error) {
-        _sendJsonError(request, "Invalid JSON", 400);
-        return;
-    }
-
-    if (!doc["value"].is<uint8_t>()) {
-        _sendJsonError(request, "Missing 'value' parameter (0-255)", 400);
-        return;
-    }
-
-    uint8_t value = doc["value"];
-
-    // Execute command
     _client->setGroupVertical(groupId, value);
 
     WEB_LOG("Web: Group %d (%s) vertical=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
@@ -1557,6 +1288,14 @@ void CasambiWebServer::_handleGroupVertical(AsyncWebServerRequest* request) {
 // ============================================================================
 
 void CasambiWebServer::_sendJsonError(AsyncWebServerRequest* request, const String& error, int code) {
+    // Uniform cleanup: rejection paths (401/404/413/503/...) may run before a
+    // handler consumed the buffered POST body — free it here so it never
+    // lingers until connection close. Handlers that already consumed it have
+    // nulled _tempObject, so this is a no-op then.
+    if (request->_tempObject) {
+        delete static_cast<String*>(request->_tempObject);
+        request->_tempObject = nullptr;
+    }
     JsonDocument doc;
     doc["success"] = false;
     doc["error"] = error;
