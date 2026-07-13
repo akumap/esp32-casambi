@@ -157,6 +157,11 @@ static volatile int8_t g_lastWifiRssi = 0;
 // (plus one per reason change).
 static volatile uint8_t g_lastWifiDiscReason = 0;
 
+// millis() at the first disconnect event of the current episode. The 30 s poll
+// in checkAndReconnectWiFi() quantizes its log entries to the check grid; the
+// event pair DISCONNECTED→GOT_IP measures the true outage duration.
+static volatile uint32_t g_wifiLostAtMs = 0;
+
 static const char* wifiDisconnectReasonName(uint8_t reason) {
     switch (reason) {
         case WIFI_REASON_UNSPECIFIED:            return "UNSPECIFIED";
@@ -185,6 +190,7 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
             uint8_t reason = info.wifi_sta_disconnected.reason;
+            if (g_lastWifiDiscReason == 0) g_wifiLostAtMs = millis();
             if (reason != g_lastWifiDiscReason) {
                 g_lastWifiDiscReason = reason;
                 if (g_lastWifiRssi != 0) {
@@ -199,6 +205,14 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
             break;
         }
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            // Only after a disconnect episode — GOT_IP also fires on the boot
+            // connect and on DHCP lease renewals.
+            if (g_lastWifiDiscReason != 0) {
+                uint32_t outageMs = millis() - g_wifiLostAtMs;
+                EventLog::log(LOG_INFO, "WiFi got IP after %lu.%lus offline",
+                              (unsigned long)(outageMs / 1000),
+                              (unsigned long)((outageMs % 1000) / 100));
+            }
             g_lastWifiDiscReason = 0;
             g_lastWifiRssi = WiFi.RSSI();
             break;
