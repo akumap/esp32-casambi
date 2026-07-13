@@ -277,10 +277,10 @@ void SetupPortal::_setupRoutes() {
                     return;
                 }
                 String* buf = new String();
-                buf->reserve(total);
-                // reserve() failed to obtain the requested capacity → treat as
-                // out of memory rather than growing (and refragmenting) later.
-                if (total > 0 && buf->capacity() < total) {
+                // reserve() returns false when it cannot obtain the requested
+                // capacity → treat as out of memory rather than growing (and
+                // refragmenting) the heap chunk by chunk later.
+                if (total > 0 && !buf->reserve(total)) {
                     delete buf;
                     req->send(503, "application/json",
                               "{\"error\":\"out of memory\"}");
