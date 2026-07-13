@@ -45,50 +45,56 @@ enum ConfigValidationReason {
     CFG_BAD_KEY,            // a key is missing / not full-length hex
 };
 
-// Semantic validation of a parsed network-config object. Returns CFG_OK only for
-// a document the firmware can safely run on:
+// Semantic validation of a parsed network-config document. Returns CFG_OK only
+// for a document the firmware can safely run on:
 //   - networkId present and non-empty,
 //   - protocolVersion an integer within [minProto, maxProto],
 //   - at least one key, each with a full-length hex AES key.
 // Existence of the file alone is NOT sufficient (the previous behaviour).
 //
-// IMPORTANT: only `.as<T>()` accessors are used, never `.is<T>()`. ArduinoJson
-// 7.0.0 (the pinned firmware version) mis-handles `.is<const char*>()` /
-// `.is<int>()` on parsed values, which would reject a perfectly valid config.
-// `.as<const char*>()` yields nullptr for a non-string, and `.as<long>()` yields
-// 0 for a non-number, so explicit null/range checks are enough and portable.
-inline ConfigValidationReason validateConfigObject(JsonObjectConst doc,
-                                                   uint8_t minProto,
-                                                   uint8_t maxProto,
-                                                   size_t aesKeySize) {
-    const char* nid = doc["networkId"].as<const char*>();
+// Templated on the document type so the caller can pass the JsonDocument
+// directly and every access goes through the SAME operator[] the working loader
+// uses. Two hard-won compatibility rules for ArduinoJson 7.0.0 (the pinned
+// firmware version):
+//   1. Access fields straight off the JsonDocument — do NOT convert the root to
+//      JsonObjectConst first (`doc.as<JsonObjectConst>()`), which is broken there.
+//   2. Use only `.as<T>()`, never `.is<T>()`: `.is<const char*>()` / `.is<int>()`
+//      mis-handle parsed values. `.as<const char*>()` is nullptr for a
+//      non-string and `.as<long>()` is 0 for a non-number, so explicit
+//      null/range checks are enough and portable.
+template <typename TDoc>
+inline ConfigValidationReason validateConfigDoc(const TDoc& doc, uint8_t minProto,
+                                                uint8_t maxProto, size_t aesKeySize) {
+    const char* nid = doc["networkId"].template as<const char*>();
     if (nid == nullptr || nid[0] == '\0') return CFG_BAD_NETWORK_ID;
 
     if (doc["protocolVersion"].isNull()) return CFG_BAD_PROTOCOL;
-    const long proto = doc["protocolVersion"].as<long>();
+    const long proto = doc["protocolVersion"].template as<long>();
     if (proto < (long)minProto || proto > (long)maxProto) return CFG_BAD_PROTOCOL;
 
-    JsonArrayConst keys = doc["keys"].as<JsonArrayConst>();
+    JsonArrayConst keys = doc["keys"].template as<JsonArrayConst>();
     if (keys.isNull() || keys.size() == 0) return CFG_NO_KEYS;
     for (JsonObjectConst keyObj : keys) {
-        const char* hex = keyObj["key"].as<const char*>();
+        const char* hex = keyObj["key"].template as<const char*>();
         if (!isValidHexKey(hex, aesKeySize)) return CFG_BAD_KEY;
     }
     return CFG_OK;
 }
 
 // Convenience boolean wrapper.
-inline bool isValidConfigObject(JsonObjectConst doc, uint8_t minProto,
-                                uint8_t maxProto, size_t aesKeySize) {
-    return validateConfigObject(doc, minProto, maxProto, aesKeySize) == CFG_OK;
+template <typename TDoc>
+inline bool isValidConfigDoc(const TDoc& doc, uint8_t minProto,
+                             uint8_t maxProto, size_t aesKeySize) {
+    return validateConfigDoc(doc, minProto, maxProto, aesKeySize) == CFG_OK;
 }
 
 // Semantic validation of WiFi credentials: both SSID and password must be
-// present and non-empty (mirrors WiFiCredentials::isValid()). Uses `.as<>()`
-// for the same ArduinoJson-7.0.0 reason as above.
-inline bool isValidWifiObject(JsonObjectConst doc) {
-    const char* ssid = doc["ssid"].as<const char*>();
-    const char* pass = doc["password"].as<const char*>();
+// present and non-empty (mirrors WiFiCredentials::isValid()). Same access rules
+// as validateConfigDoc above.
+template <typename TDoc>
+inline bool isValidWifiDoc(const TDoc& doc) {
+    const char* ssid = doc["ssid"].template as<const char*>();
+    const char* pass = doc["password"].template as<const char*>();
     return ssid && ssid[0] != '\0' && pass && pass[0] != '\0';
 }
 

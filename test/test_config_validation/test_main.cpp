@@ -54,51 +54,44 @@ void test_hexkey_null_rejected(void) {
 void test_config_valid(void) {
     JsonDocument doc;
     makeValidDoc(doc);
-    TEST_ASSERT_TRUE(configval::isValidConfigObject(doc.as<JsonObjectConst>(),
-                                                    MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_TRUE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
 }
 
 void test_config_missing_networkid(void) {
     JsonDocument doc;
     makeValidDoc(doc);
     doc.remove("networkId");
-    TEST_ASSERT_FALSE(configval::isValidConfigObject(doc.as<JsonObjectConst>(),
-                                                     MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
 }
 
 void test_config_empty_networkid(void) {
     JsonDocument doc;
     makeValidDoc(doc);
     doc["networkId"] = "";
-    TEST_ASSERT_FALSE(configval::isValidConfigObject(doc.as<JsonObjectConst>(),
-                                                     MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
 }
 
 void test_config_protocol_out_of_range(void) {
     JsonDocument doc;
     makeValidDoc(doc);
     doc["protocolVersion"] = 9;   // below MIN
-    TEST_ASSERT_FALSE(configval::isValidConfigObject(doc.as<JsonObjectConst>(),
-                                                     MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
     doc["protocolVersion"] = 11;  // above MAX
-    TEST_ASSERT_FALSE(configval::isValidConfigObject(doc.as<JsonObjectConst>(),
-                                                     MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
 }
 
 void test_config_no_keys(void) {
     JsonDocument doc;
     makeValidDoc(doc);
     doc["keys"].to<JsonArray>();   // empty array
-    TEST_ASSERT_FALSE(configval::isValidConfigObject(doc.as<JsonObjectConst>(),
-                                                     MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
 }
 
 void test_config_truncated_key_rejected(void) {
     JsonDocument doc;
     makeValidDoc(doc);
     doc["keys"][0]["key"] = "00112233";  // truncated hex key
-    TEST_ASSERT_FALSE(configval::isValidConfigObject(doc.as<JsonObjectConst>(),
-                                                     MIN_PROTO, MAX_PROTO, AES_BYTES));
+    TEST_ASSERT_FALSE(configval::isValidConfigDoc(doc, MIN_PROTO, MAX_PROTO, AES_BYTES));
 }
 
 // ---- isValidWifiObject -----------------------------------------------------
@@ -107,20 +100,20 @@ void test_wifi_valid(void) {
     JsonDocument doc;
     doc["ssid"] = "MyNet";
     doc["password"] = "secret123";
-    TEST_ASSERT_TRUE(configval::isValidWifiObject(doc.as<JsonObjectConst>()));
+    TEST_ASSERT_TRUE(configval::isValidWifiDoc(doc));
 }
 
 void test_wifi_missing_password(void) {
     JsonDocument doc;
     doc["ssid"] = "MyNet";
-    TEST_ASSERT_FALSE(configval::isValidWifiObject(doc.as<JsonObjectConst>()));
+    TEST_ASSERT_FALSE(configval::isValidWifiDoc(doc));
 }
 
 void test_wifi_empty_ssid(void) {
     JsonDocument doc;
     doc["ssid"] = "";
     doc["password"] = "secret123";
-    TEST_ASSERT_FALSE(configval::isValidWifiObject(doc.as<JsonObjectConst>()));
+    TEST_ASSERT_FALSE(configval::isValidWifiDoc(doc));
 }
 
 int main(int, char**) {

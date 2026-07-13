@@ -192,12 +192,19 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
         JsonDocument vdoc;
         DeserializationError verr = deserializeJson(vdoc, verify);
         verify.close();
-        if (verr || !configval::isValidConfigObject(vdoc.as<JsonObjectConst>(),
-                                                     MIN_PROTOCOL_VERSION,
-                                                     MAX_PROTOCOL_VERSION,
-                                                     AES_KEY_SIZE)) {
-            Serial.printf("Storage: temp config failed validation (%s); not committing\n",
-                          verr ? verr.c_str() : "semantic");
+        configval::ConfigValidationReason vreason =
+            verr ? configval::CFG_OK
+                 : configval::validateConfigDoc(vdoc,
+                                                   MIN_PROTOCOL_VERSION,
+                                                   MAX_PROTOCOL_VERSION,
+                                                   AES_KEY_SIZE);
+        if (verr || vreason != configval::CFG_OK) {
+            Serial.printf("Storage: temp config failed validation (parse=%s, reason=%d, "
+                          "networkId='%s', protocolVersion=%d, keys=%d); not committing\n",
+                          verr ? verr.c_str() : "ok", (int)vreason,
+                          vdoc["networkId"].as<const char*>() ? vdoc["networkId"].as<const char*>() : "(none)",
+                          vdoc["protocolVersion"].as<int>(),
+                          (int)vdoc["keys"].as<JsonArrayConst>().size());
             LittleFS.remove(CONFIG_TMP_PATH);
             return false;
         }
@@ -262,7 +269,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     // of loading a half-valid state. The reason is logged so a rejection is
     // diagnosable from the serial log alone.
     configval::ConfigValidationReason reason =
-        configval::validateConfigObject(doc.as<JsonObjectConst>(),
+        configval::validateConfigDoc(doc,
                                         MIN_PROTOCOL_VERSION,
                                         MAX_PROTOCOL_VERSION,
                                         AES_KEY_SIZE);
@@ -423,7 +430,7 @@ bool ConfigStore::saveWiFiCredentials(const WiFiCredentials& creds) {
         JsonDocument vdoc;
         DeserializationError verr = deserializeJson(vdoc, verify);
         verify.close();
-        if (verr || !configval::isValidWifiObject(vdoc.as<JsonObjectConst>())) {
+        if (verr || !configval::isValidWifiDoc(vdoc)) {
             Serial.println("Storage: temp WiFi creds failed validation; not committing");
             LittleFS.remove(WIFI_TMP_PATH);
             return false;
@@ -475,7 +482,7 @@ bool ConfigStore::_loadWiFiCredentialsFrom(const char* path, WiFiCredentials& cr
         return false;
     }
 
-    if (!configval::isValidWifiObject(doc.as<JsonObjectConst>())) {
+    if (!configval::isValidWifiDoc(doc)) {
         Serial.println("Storage: WiFi credentials failed validation");
         return false;
     }
