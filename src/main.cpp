@@ -137,6 +137,77 @@ static bool g_timeSynced = false;
 static bool g_wifiWasConnected = false;
 
 // ============================================================================
+// WIFI DISCONNECT DIAGNOSTICS
+// ============================================================================
+
+// WiFi.status() only says THAT the link is down; WHY is delivered exclusively
+// in the STA_DISCONNECTED event (IDF wifi_err_reason_t) and would otherwise be
+// lost. The reason separates the three broad causes that need different fixes:
+// AP kicked us (ASSOC_LEAVE/AUTH_EXPIRE — steering, reboot, WLAN schedule),
+// radio problems (BEACON_TIMEOUT/NO_AP_FOUND — signal, interference, channel
+// change) and credential trouble (AUTH_FAIL/HANDSHAKE_TIMEOUT).
+
+// Last RSSI sampled while the link was up (0 = never sampled). Written on
+// loopTask / event task, read on the WiFi event task at disconnect time.
+static volatile int8_t g_lastWifiRssi = 0;
+
+// Reason of the current disconnect episode, 0 = link is up. The IDF retries
+// every few seconds during an outage and fires STA_DISCONNECTED on every
+// failed attempt; this deduplicates the flash log to one entry per episode
+// (plus one per reason change).
+static volatile uint8_t g_lastWifiDiscReason = 0;
+
+static const char* wifiDisconnectReasonName(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_UNSPECIFIED:            return "UNSPECIFIED";
+        case WIFI_REASON_AUTH_EXPIRE:            return "AUTH_EXPIRE";
+        case WIFI_REASON_AUTH_LEAVE:             return "AUTH_LEAVE";
+        case WIFI_REASON_ASSOC_EXPIRE:           return "ASSOC_EXPIRE";
+        case WIFI_REASON_ASSOC_TOOMANY:          return "ASSOC_TOOMANY";
+        case WIFI_REASON_NOT_AUTHED:             return "NOT_AUTHED";
+        case WIFI_REASON_NOT_ASSOCED:            return "NOT_ASSOCED";
+        case WIFI_REASON_ASSOC_LEAVE:            return "ASSOC_LEAVE";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4WAY_HANDSHAKE_TIMEOUT";
+        case WIFI_REASON_BEACON_TIMEOUT:         return "BEACON_TIMEOUT";
+        case WIFI_REASON_NO_AP_FOUND:            return "NO_AP_FOUND";
+        case WIFI_REASON_AUTH_FAIL:              return "AUTH_FAIL";
+        case WIFI_REASON_ASSOC_FAIL:             return "ASSOC_FAIL";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:      return "HANDSHAKE_TIMEOUT";
+        case WIFI_REASON_CONNECTION_FAIL:        return "CONNECTION_FAIL";
+        default:                                 return "unknown";
+    }
+}
+
+// Runs on the WiFi event task, not loopTask. EventLog::log() is task-safe and
+// writes only RTC RAM from foreign tasks (flash persistence happens later via
+// flush() on loopTask), so no flash I/O blocks the event task here.
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+    switch (event) {
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
+            uint8_t reason = info.wifi_sta_disconnected.reason;
+            if (reason != g_lastWifiDiscReason) {
+                g_lastWifiDiscReason = reason;
+                if (g_lastWifiRssi != 0) {
+                    EventLog::log(LOG_WARN, "WiFi disconnect: reason=%u (%s), last rssi=%d dBm",
+                                  (unsigned)reason, wifiDisconnectReasonName(reason),
+                                  (int)g_lastWifiRssi);
+                } else {
+                    EventLog::log(LOG_WARN, "WiFi disconnect: reason=%u (%s)",
+                                  (unsigned)reason, wifiDisconnectReasonName(reason));
+                }
+            }
+            break;
+        }
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            g_lastWifiDiscReason = 0;
+            g_lastWifiRssi = WiFi.RSSI();
+            break;
+        default:
+            break;
+    }
+}
+
+// ============================================================================
 // TIME SYNCHRONISATION (NTP, UTC)
 // ============================================================================
 
@@ -240,6 +311,10 @@ void setup() {
     // Initialize the non-volatile event log. This flushes any RTC "last words"
     // from a previous crash into LittleFS and records this boot's reset reason.
     EventLog::begin();
+
+    // Register before any connect path (boot AND the later 'wifi set' path) so
+    // every STA disconnect is captured with its IDF reason code.
+    WiFi.onEvent(onWiFiEvent);
 
     // Validate the AES-CMAC implementation against the RFC 4493 test vectors
     // once at boot. A failure here means the BLE crypto cannot be trusted.
@@ -597,6 +672,11 @@ void checkAndReconnectWiFi() {
     lastWiFiCheck = now;
 
     if (WiFi.status() == WL_CONNECTED) {
+        // Keep a fresh signal reading around so the disconnect event handler
+        // can report the last strength BEFORE the drop (afterwards RSSI is
+        // unreadable). Granularity is one reading per check interval.
+        g_lastWifiRssi = WiFi.RSSI();
+
         // Handle the disconnected → connected transition exactly once, so NTP
         // re-arm and the (defensive) web-server restart run only on a real
         // recovery, not on every check while connected.
@@ -1332,6 +1412,10 @@ void handleCommand(const String& cmd) {
                     Serial.printf("SSID: %s\n", WiFi.SSID().c_str());
                     Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
                     Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
+                } else if (g_lastWifiDiscReason != 0) {
+                    Serial.printf("Last disconnect: reason=%u (%s)\n",
+                                  (unsigned)g_lastWifiDiscReason,
+                                  wifiDisconnectReasonName(g_lastWifiDiscReason));
                 }
 
                 // Show stored credentials
