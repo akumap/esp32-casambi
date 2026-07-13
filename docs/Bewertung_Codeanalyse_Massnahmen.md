@@ -169,5 +169,36 @@ Die „Quick Wins" mit sehr niedrigem Aufwand und klarer Korrektheit — **S-06*
 FHEM-Korrektur) — können auch vorgezogen werden, da sie kein Hardwarerisiko
 tragen.
 
-> Hinweis: Diese Datei dokumentiert ausschließlich die Bewertung des Prüfberichts.
-> Es wurden keine der Maßnahmen S-01 … S-09 im Quellcode umgesetzt.
+---
+
+## Umsetzung
+
+Alle neun Maßnahmen wurden anschließend umgesetzt.
+
+| ID | Umsetzung | Zentrale Dateien |
+|----|-----------|------------------|
+| S-01 | Atomares Speichern (Temp → Validierung → Backup-Swap), Recovery aus Backup beim Laden, Semantik-/Hex-Schlüssel-Validierung, Setup-Portal-Fallback bei Ladefehler | `storage/config_store.cpp`, `storage/config_validation.h`, `config.h`, `main.cpp` |
+| S-02 | Body-Obergrenze (4 KB) + Allokationsprüfung vor `reserve`, 413/503 | `web/setup_portal.cpp` |
+| S-03 | Sende-Ergebnis als `bool` durch BLE- und Web-Schicht; Zähler-Rollback bei Fehler; 503 statt 200 | `ble/casambi_client.{h,cpp}`, `web/webserver.{h,cpp}` |
+| S-04 | `preserveLocalSettings()` inkl. `gatewayName`/`ntpServer` | `cloud/network_config.h`, `main.cpp` |
+| S-05 | `CasambiGW_ClassifyRefreshResponse()` wertet `$param->{code}` aus | `FHEM/98_CasambiGW.pm` |
+| S-06 | `CasambiGW_PercentToByte()` mit gerundeter Ganzzahlarithmetik + Clamping | `FHEM/98_CasambiGW.pm` |
+| S-07 | `DELETE /api/log` setzt nur ein Flag (202); `EventLog::clear()` läuft im Loop-Task | `web/webserver.{h,cpp}`, `main.cpp` |
+| S-08 | Session-Token wird nicht mehr protokolliert (nur Länge) | `cloud/api_client.cpp` |
+| S-09 | Native Unit-Tests (`test/`), Perl-Tests (`FHEM/t/`), CI um `pio test -e native`, `perl -c`, `py_compile` erweitert | `platformio.ini`, `.github/workflows/ci.yml`, `test/`, `FHEM/t/` |
+
+**Verifikation (host-seitig, ohne Zielhardware):**
+- `config_validation.h` gegen echtes ArduinoJson kompiliert und geprüft — 15/15 Checks bestanden.
+- `FHEM/t/CasambiGW_helpers.t` — 17/17 Tests bestanden (u. a. 100 % → 255, HTTP-Klassifizierung).
+- `perl -c` beider FHEM-Module und `py_compile` der Skripte fehlerfrei.
+- Firmware-Build (ESP32) und `pio test -e native` laufen in der CI; lokal war die
+  PlatformIO-Registry durch die Netzwerk-Policy gesperrt, daher wurde die
+  Validierungslogik standalone gegen ArduinoJson verifiziert.
+
+> Hinweis zu S-01: `hasValidConfig()` bleibt bewusst ein günstiger
+> Existenz-Check (Live- oder Backup-Datei), weil es auch im asynchronen
+> Web-Handler (`POST /api/refreshCasambi`) läuft — eine vollständige
+> Flash-Parse dort würde genau das durch S-07 adressierte Problem
+> (Flash-I/O im async_tcp-Task) neu einführen. Die echte Parse- und
+> Semantikprüfung sowie die Recovery erfolgen in `loadNetworkConfig()`, das
+> die eigentliche Boot-Entscheidung (Betrieb vs. Setup) trägt.

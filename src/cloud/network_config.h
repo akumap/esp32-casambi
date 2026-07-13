@@ -178,6 +178,30 @@ struct NetworkConfig {
 };
 
 // ============================================================================
+// LOCAL SETTINGS PRESERVATION
+// ============================================================================
+
+// Copy the fields that are *local* to this device — i.e. not part of the
+// Casambi cloud configuration — from `local` into `fresh`. Called after a cloud
+// refresh rebuilds `fresh` from downloaded data, so a refresh never silently
+// resets user-chosen local settings. Keeping the full list in one place means a
+// newly added local field only has to be added here once.
+//
+// networkId / networkUuid / casambiPassword are restored separately at the call
+// site because they are derived from the refresh flow itself.
+inline void preserveLocalSettings(const NetworkConfig& local, NetworkConfig& fresh) {
+    fresh.autoConnectEnabled  = local.autoConnectEnabled;
+    fresh.autoConnectAddress  = local.autoConnectAddress;
+    fresh.gatewayName         = local.gatewayName;   // locally scanned, not in cloud
+    fresh.ntpServer           = local.ntpServer;     // runtime-configurable, local
+    fresh.bleDebugEnabled     = local.bleDebugEnabled;
+    fresh.casambiDebugEnabled = local.casambiDebugEnabled;
+    fresh.webDebugEnabled     = local.webDebugEnabled;
+    fresh.parseDebugEnabled   = local.parseDebugEnabled;
+    fresh.heapDebugEnabled    = local.heapDebugEnabled;
+}
+
+// ============================================================================
 // WIFI CREDENTIALS
 // ============================================================================
 

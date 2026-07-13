@@ -27,6 +27,7 @@ static String lockedCopy(const String& s) {
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
       _refreshRequested(false), _rebootRequested(false), _ntpRequested(false),
+      _clearLogRequested(false),
       _broadcastQueue(nullptr), _resyncNeeded(false) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
 }
@@ -151,6 +152,12 @@ bool CasambiWebServer::consumeRefreshRequest() {
 bool CasambiWebServer::consumeRebootRequest() {
     if (!_rebootRequested) return false;
     _rebootRequested = false;
+    return true;
+}
+
+bool CasambiWebServer::consumeClearLogRequest() {
+    if (!_clearLogRequested) return false;
+    _clearLogRequested = false;
     return true;
 }
 
@@ -916,8 +923,18 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
 void CasambiWebServer::_handleDeleteLog(AsyncWebServerRequest* request) {
     if (!_authOk(request)) return;
     WEB_LOG("Web: DELETE /api/log from %s\n", _getClientIP(request).c_str());
-    EventLog::clear();
-    _sendJsonSuccess(request);
+    // Do NOT clear here: EventLog::clear() waits on a mutex with an unbounded
+    // timeout and performs several LittleFS deletions (plus GC that can exceed
+    // 100 ms), which would stall the async_tcp task and every other HTTP/WS
+    // connection. Only raise a flag; the loop task performs the actual clear.
+    // Rapid repeated DELETEs coalesce into a single clear.
+    _clearLogRequested = true;
+    JsonDocument doc;
+    doc["success"] = true;
+    doc["status"] = "clear scheduled";
+    String response;
+    serializeJson(doc, response);
+    request->send(202, "application/json", response);
 }
 
 // ============================================================================
@@ -1077,7 +1094,7 @@ void CasambiWebServer::_handleSceneOn(AsyncWebServerRequest* request) {
     CasambiScene* scene = _sceneFromPath(request, "/on", sceneId);
     if (!scene) return;
 
-    _client->setSceneLevel(sceneId, 0xFF);
+    if (!_client->setSceneLevel(sceneId, 0xFF)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Scene %d (%s) ON from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1089,7 +1106,7 @@ void CasambiWebServer::_handleSceneOff(AsyncWebServerRequest* request) {
     CasambiScene* scene = _sceneFromPath(request, "/off", sceneId);
     if (!scene) return;
 
-    _client->setSceneLevel(sceneId, 0);
+    if (!_client->setSceneLevel(sceneId, 0)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Scene %d (%s) OFF from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1105,7 +1122,7 @@ void CasambiWebServer::_handleSceneLevel(AsyncWebServerRequest* request) {
     uint8_t level;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    _client->setSceneLevel(sceneId, level);
+    if (!_client->setSceneLevel(sceneId, level)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Scene %d (%s) level=%d from %s\n", sceneId, scene->name.c_str(), level, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1121,7 +1138,7 @@ void CasambiWebServer::_handleUnitOn(AsyncWebServerRequest* request) {
     CasambiUnit* unit = _unitFromPath(request, "/on", unitId);
     if (!unit) return;
 
-    _client->setUnitLevel(unitId, 255);
+    if (!_client->setUnitLevel(unitId, 255)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Unit %d (%s) ON from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1133,7 +1150,7 @@ void CasambiWebServer::_handleUnitOff(AsyncWebServerRequest* request) {
     CasambiUnit* unit = _unitFromPath(request, "/off", unitId);
     if (!unit) return;
 
-    _client->setUnitLevel(unitId, 0);
+    if (!_client->setUnitLevel(unitId, 0)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Unit %d (%s) OFF from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1149,7 +1166,7 @@ void CasambiWebServer::_handleUnitLevel(AsyncWebServerRequest* request) {
     uint8_t level;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    _client->setUnitLevel(unitId, level);
+    if (!_client->setUnitLevel(unitId, level)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Unit %d (%s) level=%d from %s\n", unitId, unit->name.c_str(), level, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1168,7 +1185,7 @@ void CasambiWebServer::_handleUnitColor(AsyncWebServerRequest* request) {
         !_requireUint8(request, doc, "g", g) ||
         !_requireUint8(request, doc, "b", b)) return;
 
-    _client->setUnitColor(unitId, r, g, b);
+    if (!_client->setUnitColor(unitId, r, g, b)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Unit %d (%s) color=(%d,%d,%d) from %s\n", unitId, unit->name.c_str(), r, g, b, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1193,7 +1210,7 @@ void CasambiWebServer::_handleUnitTemperature(AsyncWebServerRequest* request) {
         return;
     }
 
-    _client->setUnitTemperature(unitId, kelvin);
+    if (!_client->setUnitTemperature(unitId, kelvin)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Unit %d (%s) temperature=%dK from %s\n", unitId, unit->name.c_str(), kelvin, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1209,7 +1226,7 @@ void CasambiWebServer::_handleUnitSlider(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    _client->setUnitSlider(unitId, value);
+    if (!_client->setUnitSlider(unitId, value)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Unit %d (%s) slider=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1225,7 +1242,7 @@ void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    _client->setUnitVertical(unitId, value);
+    if (!_client->setUnitVertical(unitId, value)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Unit %d (%s) vertical=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1245,7 +1262,7 @@ void CasambiWebServer::_handleGroupLevel(AsyncWebServerRequest* request) {
     uint8_t level;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    _client->setGroupLevel(groupId, level);
+    if (!_client->setGroupLevel(groupId, level)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Group %d (%s) level=%d from %s\n", groupId, group->name.c_str(), level, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1261,7 +1278,7 @@ void CasambiWebServer::_handleGroupSlider(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    _client->setGroupSlider(groupId, value);
+    if (!_client->setGroupSlider(groupId, value)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Group %d (%s) slider=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1277,7 +1294,7 @@ void CasambiWebServer::_handleGroupVertical(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    _client->setGroupVertical(groupId, value);
+    if (!_client->setGroupVertical(groupId, value)) { _sendBleSendError(request); return; }
 
     WEB_LOG("Web: Group %d (%s) vertical=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
     _sendJsonSuccess(request);
@@ -1310,6 +1327,10 @@ void CasambiWebServer::_sendJsonSuccess(AsyncWebServerRequest* request) {
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
+}
+
+void CasambiWebServer::_sendBleSendError(AsyncWebServerRequest* request) {
+    _sendJsonError(request, "BLE send failed; command not transmitted", 503);
 }
 
 String CasambiWebServer::_getClientIP(AsyncWebServerRequest* request) {

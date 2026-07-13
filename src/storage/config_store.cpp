@@ -3,6 +3,7 @@
  */
 
 #include "config_store.h"
+#include "config_validation.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
@@ -21,10 +22,53 @@ bool ConfigStore::init() {
     return true;
 }
 
+// ----------------------------------------------------------------------------
+// Atomic write / recovery helpers
+// ----------------------------------------------------------------------------
+
+// Swap a validated temp file into place, keeping the previous live file as a
+// backup until the new one is confirmed. On a power loss at any point either the
+// old or the new file remains fully intact and recoverable:
+//   - crash while writing tmp        → live untouched, tmp discarded on load
+//   - crash after live→bak rename    → live missing, bak holds old good copy
+//   - crash after tmp→live rename    → live holds new good copy, bak lingers
+//                                       (cleaned up on the next successful save)
+static bool commitAtomic(const char* livePath, const char* tmpPath,
+                         const char* bakPath) {
+    if (LittleFS.exists(bakPath)) LittleFS.remove(bakPath);
+
+    if (LittleFS.exists(livePath)) {
+        if (!LittleFS.rename(livePath, bakPath)) {
+            Serial.println("Storage: failed to back up live file; aborting save");
+            LittleFS.remove(tmpPath);
+            return false;
+        }
+    }
+
+    if (!LittleFS.rename(tmpPath, livePath)) {
+        Serial.println("Storage: failed to move temp into place; restoring backup");
+        if (LittleFS.exists(bakPath)) LittleFS.rename(bakPath, livePath);
+        LittleFS.remove(tmpPath);
+        return false;
+    }
+
+    // New file is confirmed in place — the backup is no longer needed.
+    if (LittleFS.exists(bakPath)) LittleFS.remove(bakPath);
+    return true;
+}
+
 bool ConfigStore::hasValidConfig() {
     if (!_initialized && !init()) return false;
 
-    return LittleFS.exists(CONFIG_FILE_PATH);
+    // Lightweight presence check: is there a config to try — live OR a backup
+    // left by an interrupted save? This is deliberately cheap because it also
+    // runs inside the async web handler (POST /api/refreshCasambi); the real
+    // parse + semantic validation (and recovery) happens in loadNetworkConfig(),
+    // which is the actual gate the boot path uses to decide operation vs. setup
+    // mode. Existence alone never causes the firmware to trust a file: a corrupt
+    // config makes loadNetworkConfig() fail, and setup() then falls back to the
+    // setup portal instead of booting half-initialised.
+    return LittleFS.exists(CONFIG_FILE_PATH) || LittleFS.exists(CONFIG_BAK_PATH);
 }
 
 bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
@@ -120,21 +164,49 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
         sceneObj["name"] = scene.name;
     }
 
-    // Open file for writing
-    File file = LittleFS.open(CONFIG_FILE_PATH, "w");
+    // Write to a temp file first, never straight onto the live file: opening the
+    // live file with "w" would truncate the only good copy before the new data
+    // is safely on flash.
+    File file = LittleFS.open(CONFIG_TMP_PATH, "w");
     if (!file) {
-        Serial.println("Storage: Failed to open config file for writing");
+        Serial.println("Storage: Failed to open temp config file for writing");
         return false;
     }
-
-    // Serialize to file
     if (serializeJson(doc, file) == 0) {
         Serial.println("Storage: Failed to write JSON");
         file.close();
+        LittleFS.remove(CONFIG_TMP_PATH);
+        return false;
+    }
+    file.close();
+
+    // Re-read and semantically validate the temp file before committing it, so a
+    // serialize/flash glitch cannot promote a corrupt file over the good one.
+    {
+        File verify = LittleFS.open(CONFIG_TMP_PATH, "r");
+        if (!verify) {
+            Serial.println("Storage: Failed to reopen temp config for validation");
+            LittleFS.remove(CONFIG_TMP_PATH);
+            return false;
+        }
+        JsonDocument vdoc;
+        DeserializationError verr = deserializeJson(vdoc, verify);
+        verify.close();
+        if (verr || !configval::isValidConfigObject(vdoc.as<JsonObjectConst>(),
+                                                     MIN_PROTOCOL_VERSION,
+                                                     MAX_PROTOCOL_VERSION,
+                                                     AES_KEY_SIZE)) {
+            Serial.printf("Storage: temp config failed validation (%s); not committing\n",
+                          verr ? verr.c_str() : "semantic");
+            LittleFS.remove(CONFIG_TMP_PATH);
+            return false;
+        }
+    }
+
+    if (!commitAtomic(CONFIG_FILE_PATH, CONFIG_TMP_PATH, CONFIG_BAK_PATH)) {
         return false;
     }
 
-    file.close();
     Serial.printf("Storage: Saved config (%d keys, %d units, %d groups, %d scenes)\n",
                   config.keys.size(), config.units.size(),
                   config.groups.size(), config.scenes.size());
@@ -145,14 +217,31 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
 bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
     if (!_initialized && !init()) return false;
 
-    if (!LittleFS.exists(CONFIG_FILE_PATH)) {
-        Serial.println("Storage: Config file does not exist");
+    // Prefer the live file; fall back to the backup left behind by an
+    // interrupted save. A recovered backup is promoted to the live name so
+    // subsequent boots use it directly.
+    if (_loadNetworkConfigFrom(CONFIG_FILE_PATH, config)) return true;
+
+    if (LittleFS.exists(CONFIG_BAK_PATH) &&
+        _loadNetworkConfigFrom(CONFIG_BAK_PATH, config)) {
+        Serial.println("Storage: recovered network config from backup");
+        if (LittleFS.exists(CONFIG_FILE_PATH)) LittleFS.remove(CONFIG_FILE_PATH);
+        LittleFS.rename(CONFIG_BAK_PATH, CONFIG_FILE_PATH);  // best-effort promote
+        return true;
+    }
+
+    Serial.println("Storage: no valid network config (live or backup)");
+    return false;
+}
+
+bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config) {
+    if (!LittleFS.exists(path)) {
         return false;
     }
 
-    Serial.println("Storage: Loading network config...");
+    Serial.printf("Storage: Loading network config from %s...\n", path);
 
-    File file = LittleFS.open(CONFIG_FILE_PATH, "r");
+    File file = LittleFS.open(path, "r");
     if (!file) {
         Serial.println("Storage: Failed to open config file");
         return false;
@@ -165,6 +254,17 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
 
     if (error) {
         Serial.printf("Storage: JSON parse error: %s\n", error.c_str());
+        return false;
+    }
+
+    // Reject a syntactically valid but semantically incomplete config (missing
+    // networkId, out-of-range protocol, or a truncated/non-hex AES key) instead
+    // of loading a half-valid state. hasValidConfig() relies on this too.
+    if (!configval::isValidConfigObject(doc.as<JsonObjectConst>(),
+                                        MIN_PROTOCOL_VERSION,
+                                        MAX_PROTOCOL_VERSION,
+                                        AES_KEY_SIZE)) {
+        Serial.println("Storage: config failed semantic validation");
         return false;
     }
 
@@ -291,35 +391,68 @@ bool ConfigStore::saveWiFiCredentials(const WiFiCredentials& creds) {
     doc["ssid"] = creds.ssid;
     doc["password"] = creds.password;
 
-    File file = LittleFS.open(WIFI_FILE_PATH, "w");
+    // Same atomic temp→validate→commit dance as the network config: never
+    // truncate the live credentials before the new ones are safely on flash.
+    File file = LittleFS.open(WIFI_TMP_PATH, "w");
     if (!file) {
-        Serial.println("Storage: Failed to open WiFi file for writing");
+        Serial.println("Storage: Failed to open temp WiFi file for writing");
         return false;
     }
-
     if (serializeJson(doc, file) == 0) {
         Serial.println("Storage: Failed to write WiFi JSON");
         file.close();
+        LittleFS.remove(WIFI_TMP_PATH);
+        return false;
+    }
+    file.close();
+
+    {
+        File verify = LittleFS.open(WIFI_TMP_PATH, "r");
+        if (!verify) {
+            LittleFS.remove(WIFI_TMP_PATH);
+            return false;
+        }
+        JsonDocument vdoc;
+        DeserializationError verr = deserializeJson(vdoc, verify);
+        verify.close();
+        if (verr || !configval::isValidWifiObject(vdoc.as<JsonObjectConst>())) {
+            Serial.println("Storage: temp WiFi creds failed validation; not committing");
+            LittleFS.remove(WIFI_TMP_PATH);
+            return false;
+        }
+    }
+
+    if (!commitAtomic(WIFI_FILE_PATH, WIFI_TMP_PATH, WIFI_BAK_PATH)) {
         return false;
     }
 
-    file.close();
     Serial.printf("Storage: Saved WiFi credentials (SSID: %s)\n", creds.ssid.c_str());
-
     return true;
 }
 
 bool ConfigStore::loadWiFiCredentials(WiFiCredentials& creds) {
     if (!_initialized && !init()) return false;
 
-    if (!LittleFS.exists(WIFI_FILE_PATH)) {
-        Serial.println("Storage: WiFi file does not exist");
+    if (_loadWiFiCredentialsFrom(WIFI_FILE_PATH, creds)) return true;
+
+    if (LittleFS.exists(WIFI_BAK_PATH) &&
+        _loadWiFiCredentialsFrom(WIFI_BAK_PATH, creds)) {
+        Serial.println("Storage: recovered WiFi credentials from backup");
+        if (LittleFS.exists(WIFI_FILE_PATH)) LittleFS.remove(WIFI_FILE_PATH);
+        LittleFS.rename(WIFI_BAK_PATH, WIFI_FILE_PATH);  // best-effort promote
+        return true;
+    }
+
+    Serial.println("Storage: no valid WiFi credentials (live or backup)");
+    return false;
+}
+
+bool ConfigStore::_loadWiFiCredentialsFrom(const char* path, WiFiCredentials& creds) {
+    if (!LittleFS.exists(path)) {
         return false;
     }
 
-    Serial.println("Storage: Loading WiFi credentials...");
-
-    File file = LittleFS.open(WIFI_FILE_PATH, "r");
+    File file = LittleFS.open(path, "r");
     if (!file) {
         Serial.println("Storage: Failed to open WiFi file");
         return false;
@@ -334,22 +467,29 @@ bool ConfigStore::loadWiFiCredentials(WiFiCredentials& creds) {
         return false;
     }
 
+    if (!configval::isValidWifiObject(doc.as<JsonObjectConst>())) {
+        Serial.println("Storage: WiFi credentials failed validation");
+        return false;
+    }
+
     creds.ssid = doc["ssid"].as<String>();
     creds.password = doc["password"].as<String>();
 
     Serial.printf("Storage: Loaded WiFi credentials (SSID: %s)\n", creds.ssid.c_str());
-
     return true;
 }
 
 void ConfigStore::clearAll() {
     if (!_initialized && !init()) return;
 
-    if (LittleFS.exists(CONFIG_FILE_PATH)) {
-        LittleFS.remove(CONFIG_FILE_PATH);
-    }
-    if (LittleFS.exists(WIFI_FILE_PATH)) {
-        LittleFS.remove(WIFI_FILE_PATH);
+    // Remove live files plus any temp/backup companions so a factory reset
+    // cannot leave a stale recoverable copy behind.
+    const char* paths[] = {
+        CONFIG_FILE_PATH, CONFIG_TMP_PATH, CONFIG_BAK_PATH,
+        WIFI_FILE_PATH,   WIFI_TMP_PATH,   WIFI_BAK_PATH,
+    };
+    for (const char* p : paths) {
+        if (LittleFS.exists(p)) LittleFS.remove(p);
     }
 
     Serial.println("Configuration cleared");

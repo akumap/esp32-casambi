@@ -77,6 +77,11 @@ public:
 
 private:
     static bool _initialized;
+
+    // Parse, validate and populate from a specific file (live or backup). Return
+    // false if the file is missing, unparseable or semantically invalid.
+    static bool _loadNetworkConfigFrom(const char* path, NetworkConfig& config);
+    static bool _loadWiFiCredentialsFrom(const char* path, WiFiCredentials& creds);
 };
 
 #endif // CONFIG_STORE_H

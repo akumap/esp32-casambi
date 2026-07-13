@@ -44,6 +44,14 @@
 
 #define CONFIG_FILE_PATH          "/casambi_config.json"
 #define WIFI_FILE_PATH            "/wifi_config.json"
+// Temp/backup companions for atomic, crash-safe writes. New data is written to
+// *.tmp, validated, then the live file is renamed to *.bak and the temp moved
+// into place; the backup is kept until the new file is confirmed, and is used
+// for recovery at load time if the live file is missing or corrupt.
+#define CONFIG_TMP_PATH           "/casambi_config.json.tmp"
+#define CONFIG_BAK_PATH           "/casambi_config.json.bak"
+#define WIFI_TMP_PATH             "/wifi_config.json.tmp"
+#define WIFI_BAK_PATH             "/wifi_config.json.bak"
 // Marker file: when present at boot, the firmware re-reads the Casambi cloud
 // configuration before BLE/web are started, then reboots into normal operation.
 #define REFRESH_FLAG_PATH         "/refresh_pending"

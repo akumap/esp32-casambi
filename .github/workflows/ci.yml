@@ -32,3 +32,45 @@ jobs:
 
       - name: Build ${{ matrix.env }}
         run: pio run -e ${{ matrix.env }}
+
+  # Fast host-side checks (no hardware). Catch runtime regressions that a pure
+  # firmware build cannot: config validation, percent<->byte rounding, HTTP
+  # status classification, plus FHEM/Python syntax.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-native-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Native unit tests (config validation)
+        run: pio test -e native
+
+      - name: Python syntax check (scripts)
+        run: python -m py_compile scripts/*.py
+
+      - name: Perl setup (JSON + FHEM deps)
+        run: sudo apt-get update && sudo apt-get install -y libjson-perl
+
+      - name: Perl syntax check (FHEM modules)
+        run: |
+          for f in FHEM/*.pm; do
+            echo "perl -c $f"
+            perl -c "$f"
+          done
+
+      - name: FHEM helper unit tests
+        run: perl FHEM/t/CasambiGW_helpers.t
