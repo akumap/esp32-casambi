@@ -55,6 +55,18 @@ static String macFromUuid(const String& uuid) {
 
 // ---------------------------------------------------------------------------
 // Portal HTML (single page, served from PROGMEM)
+//
+// Password fields use autocomplete="current-password" so browsers offer to
+// autofill stored passwords instead of prompting to generate new ones, and
+// each username+password pair sits in its own <form> so Chrome/Edge keep the
+// Wi-Fi and Casambi credentials as separate scopes (issue #31).
+//
+// Known limitation: Safari/WebKit is designed around one credential per page.
+// It ignores hidden username fields and reliably saves only a single password
+// per origin, so it may store just one of the two passwords. This is accepted;
+// the core goal (no new-password generation, autofill of stored passwords) is
+// met. A robust fix would require splitting the two entries onto separate
+// pages/steps.
 // ---------------------------------------------------------------------------
 
 static const char PORTAL_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
@@ -74,13 +86,21 @@ small{color:#666}
 <fieldset><legend>1. Wi-Fi</legend>
 <button class="sec" onclick="scanWifi()">Scan Wi-Fi</button>
 <label>Network</label><select id="ssid"><option value="">– scan first –</option></select>
-<label>Wi-Fi password</label><input id="wpw" type="password">
+<label>Wi-Fi password</label>
+<form onsubmit="return false" autocomplete="on">
+<input type="text" name="wifi-user" value="wifi" autocomplete="username" hidden readonly>
+<input id="wpw" name="wifi-password" type="password" autocomplete="current-password">
+</form>
 </fieldset>
 <fieldset><legend>2. Casambi network</legend>
 <button class="sec" onclick="scanBle()">Scan Casambi gateways</button>
 <label>Gateway / network</label><select id="net"><option value="">– scan first –</option></select>
 <small>If several appear, just enter the password – only the matching network authenticates.</small>
-<label>Casambi network password</label><input id="cpw" type="password">
+<label>Casambi network password</label>
+<form onsubmit="return false" autocomplete="on">
+<input type="text" name="casambi-user" value="casambi" autocomplete="username" hidden readonly>
+<input id="cpw" name="casambi-password" type="password" autocomplete="current-password">
+</form>
 </fieldset>
 <button onclick="provision()">Set up</button>
 <div id="status"></div>
