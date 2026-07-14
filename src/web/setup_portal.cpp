@@ -55,6 +55,18 @@ static String macFromUuid(const String& uuid) {
 
 // ---------------------------------------------------------------------------
 // Portal HTML (single page, served from PROGMEM)
+//
+// Password fields use autocomplete="current-password" so browsers offer to
+// autofill stored passwords instead of prompting to generate new ones, and
+// each username+password pair sits in its own <form> so Chrome/Edge keep the
+// Wi-Fi and Casambi credentials as separate scopes (issue #31).
+//
+// Known limitation: Safari/WebKit is designed around one credential per page.
+// It ignores hidden username fields and reliably saves only a single password
+// per origin, so it may store just one of the two passwords. This is accepted;
+// the core goal (no new-password generation, autofill of stored passwords) is
+// met. A robust fix would require splitting the two entries onto separate
+// pages/steps.
 // ---------------------------------------------------------------------------
 
 static const char PORTAL_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
