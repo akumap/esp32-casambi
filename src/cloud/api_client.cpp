@@ -172,7 +172,12 @@ bool CasambiAPIClient::createSession(const String& networkId, const String& pass
     }
 
     sessionToken = responseDoc["session"].as<String>();
-    Serial.printf("API: Session created: %s\n", sessionToken.c_str());
+    // Never log the session token itself: serial logs are frequently persisted,
+    // pasted into support tickets or forwarded to network loggers, and the token
+    // is a reusable credential for the duration of its validity. Log only that a
+    // session was created, plus its length for coarse correlation.
+    Serial.printf("API: Session created (token length %u)\n",
+                  (unsigned)sessionToken.length());
 
     return true;
 }

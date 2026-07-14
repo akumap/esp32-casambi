@@ -18,6 +18,12 @@
 #define PORTAL_BLE_SCAN_SECONDS   8
 // How long to wait for the home WLAN to connect during provisioning.
 #define PORTAL_WIFI_TIMEOUT_MS    15000
+// Upper bound for the POST /api/provision body. The portal runs on an open (or
+// not-yet-secured) SoftAP, so the client-reported Content-Length must never be
+// used to size a heap allocation unchecked. A real provisioning body (SSID,
+// passwords, UUID, gateway name, ...) is well under 1 KB; 4 KB leaves generous
+// headroom while still capping a hostile allocation.
+#define PORTAL_PROVISION_MAX_BODY 4096
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -258,9 +264,28 @@ void SetupPortal::_setupRoutes() {
             if (index == 0) {
                 if (req->_tempObject) {
                     delete static_cast<String*>(req->_tempObject);
+                    req->_tempObject = nullptr;
+                }
+                // Reject oversized bodies BEFORE any allocation. `total` is the
+                // client-reported Content-Length; without this cap a single
+                // large request could exhaust or fragment the heap and reset the
+                // device. Leaving _tempObject null makes every later chunk fall
+                // through the `if (!body) return;` guard below.
+                if (total > PORTAL_PROVISION_MAX_BODY) {
+                    req->send(413, "application/json",
+                              "{\"error\":\"provisioning body too large\"}");
+                    return;
                 }
                 String* buf = new String();
-                buf->reserve(total);
+                // reserve() returns false when it cannot obtain the requested
+                // capacity → treat as out of memory rather than growing (and
+                // refragmenting) the heap chunk by chunk later.
+                if (total > 0 && !buf->reserve(total)) {
+                    delete buf;
+                    req->send(503, "application/json",
+                              "{\"error\":\"out of memory\"}");
+                    return;
+                }
                 req->_tempObject = buf;
                 req->onDisconnect([req]() {
                     if (req->_tempObject) {

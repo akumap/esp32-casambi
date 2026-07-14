@@ -169,15 +169,20 @@ public:
     // CONTROL FUNCTIONS
     // ========================================================================
 
-    void setSceneLevel(uint8_t sceneId, uint8_t level);
-    void setUnitLevel(uint8_t unitId, uint8_t level);
-    void setGroupLevel(uint8_t groupId, uint8_t level);
-    void setUnitVertical(uint8_t unitId, uint8_t vertical);
-    void setGroupVertical(uint8_t groupId, uint8_t vertical);
-    void setUnitTemperature(uint8_t unitId, uint16_t kelvin);
-    void setUnitColor(uint8_t unitId, uint8_t r, uint8_t g, uint8_t b);
-    void setUnitSlider(uint8_t unitId, uint8_t value);
-    void setGroupSlider(uint8_t groupId, uint8_t value);
+    // Control setters. Return true only when the command was successfully
+    // handed to the BLE GATT stack. A false return means the command was NOT
+    // transmitted (not authenticated, link lost, mutex timeout, encryption
+    // failure or a failed GATT write); callers must surface this rather than
+    // reporting success. Packet/origin counters are only advanced on success.
+    bool setSceneLevel(uint8_t sceneId, uint8_t level);
+    bool setUnitLevel(uint8_t unitId, uint8_t level);
+    bool setGroupLevel(uint8_t groupId, uint8_t level);
+    bool setUnitVertical(uint8_t unitId, uint8_t vertical);
+    bool setGroupVertical(uint8_t groupId, uint8_t vertical);
+    bool setUnitTemperature(uint8_t unitId, uint16_t kelvin);
+    bool setUnitColor(uint8_t unitId, uint8_t r, uint8_t g, uint8_t b);
+    bool setUnitSlider(uint8_t unitId, uint8_t value);
+    bool setGroupSlider(uint8_t groupId, uint8_t value);
 
 private:
     NetworkConfig* _config;
@@ -267,7 +272,10 @@ private:
      * @param target Target encoding (deviceId << 8 | type)
      * @param payload Operation payload
      */
-    void _sendOperation(uint8_t opcode, uint16_t target, const std::vector<uint8_t>& payload);
+    // Returns true only if the packet was accepted by the GATT stack. On any
+    // failure the packet and origin counters are left unchanged (rolled back)
+    // so the nonce sequence does not drift on a dropped send.
+    bool _sendOperation(uint8_t opcode, uint16_t target, const std::vector<uint8_t>& payload);
 
     /**
      * Build operation packet
@@ -278,7 +286,10 @@ private:
     /**
      * Send encrypted packet
      */
-    void _sendEncryptedPacket(const std::vector<uint8_t>& packet, uint32_t counter);
+    // Returns true only if writeValue() handed the packet to the GATT stack.
+    // Returns false on mutex timeout, missing encryption/characteristic, empty
+    // ciphertext or a failed GATT write.
+    bool _sendEncryptedPacket(const std::vector<uint8_t>& packet, uint32_t counter);
 
     /**
      * Get nonce for packet encryption

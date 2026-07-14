@@ -347,16 +347,16 @@ bool CasambiClient::checkConnectionHealth() {
 // CONTROL FUNCTIONS
 // ============================================================================
 
-void CasambiClient::setSceneLevel(uint8_t sceneId, uint8_t level) {
+bool CasambiClient::setSceneLevel(uint8_t sceneId, uint8_t level) {
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         Serial.println("Failed to acquire mutex (timeout)");
-        return;
+        return false;
     }
 
     if (!isAuthenticated()) {
         Serial.println("Not authenticated");
         xSemaphoreGive(_mutex);
-        return;
+        return false;
     }
 
     uint16_t target = encodeTarget(sceneId, TARGET_TYPE_SCENE);
@@ -369,59 +369,65 @@ void CasambiClient::setSceneLevel(uint8_t sceneId, uint8_t level) {
         payload.push_back(level);
     }
 
-    _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setUnitLevel(uint8_t unitId, uint8_t level) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setUnitLevel(uint8_t unitId, uint8_t level) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
     std::vector<uint8_t> payload = { level };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setGroupLevel(uint8_t groupId, uint8_t level) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setGroupLevel(uint8_t groupId, uint8_t level) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t target = encodeTarget(groupId, TARGET_TYPE_GROUP);
     std::vector<uint8_t> payload = { level };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setUnitVertical(uint8_t unitId, uint8_t vertical) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setUnitVertical(uint8_t unitId, uint8_t vertical) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
     std::vector<uint8_t> payload = { vertical };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetVertical), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetVertical), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setGroupVertical(uint8_t groupId, uint8_t vertical) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setGroupVertical(uint8_t groupId, uint8_t vertical) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t target = encodeTarget(groupId, TARGET_TYPE_GROUP);
     std::vector<uint8_t> payload = { vertical };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetVertical), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetVertical), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setUnitTemperature(uint8_t unitId, uint16_t kelvin) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setUnitTemperature(uint8_t unitId, uint16_t kelvin) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
     uint8_t temp = kelvin / 50;
     std::vector<uint8_t> payload = { temp };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetTemperature), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetTemperature), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setUnitColor(uint8_t unitId, uint8_t r, uint8_t g, uint8_t b) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setUnitColor(uint8_t unitId, uint8_t r, uint8_t g, uint8_t b) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t hue;
     uint8_t sat;
     rgbToHS(r, g, b, hue, sat);
@@ -431,26 +437,29 @@ void CasambiClient::setUnitColor(uint8_t unitId, uint8_t r, uint8_t g, uint8_t b
         static_cast<uint8_t>((hue >> 8) & 0xFF),
         sat
     };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetColor), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetColor), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setUnitSlider(uint8_t unitId, uint8_t value) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setUnitSlider(uint8_t unitId, uint8_t value) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
     std::vector<uint8_t> payload = { value };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetSlider), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetSlider), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
-void CasambiClient::setGroupSlider(uint8_t groupId, uint8_t value) {
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return; }
+bool CasambiClient::setGroupSlider(uint8_t groupId, uint8_t value) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
     uint16_t target = encodeTarget(groupId, TARGET_TYPE_GROUP);
     std::vector<uint8_t> payload = { value };
-    _sendOperation(static_cast<uint8_t>(OpCode::SetSlider), target, payload);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetSlider), target, payload);
     xSemaphoreGive(_mutex);
+    return ok;
 }
 
 // ============================================================================
@@ -655,10 +664,10 @@ bool CasambiClient::_authenticate() {
 // PACKET HANDLING
 // ============================================================================
 
-void CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::vector<uint8_t>& payload) {
+bool CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::vector<uint8_t>& payload) {
     if (!isAuthenticated() || !_encryption) {
         Serial.println("BLE: Not authenticated");
-        return;
+        return false;
     }
 
     if (!isBLEConnected()) {
@@ -666,13 +675,19 @@ void CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
         // Callers (the control setters) hold _mutex, so use the locked variant
         // directly — _disconnectInternal would deadlock on the same mutex.
         _disconnectLocked(DisconnectReason::BLELinkLoss, "send");
-        return;
+        return false;
     }
 
     if (bleDebugEnabled) {
         Serial.printf("BLE: Sending operation - opcode=0x%02x, target=0x%04x, payload_len=%d\n",
                       opcode, target, payload.size());
     }
+
+    // Snapshot the counters so a failed send can be rolled back: _buildOperation
+    // advances _origin, and _outPacketCount seeds the nonce. If the packet is
+    // never handed to the GATT stack, both must stay put so the next send reuses
+    // the same nonce/origin instead of silently skipping a value.
+    uint16_t originBefore = _origin;
 
     std::vector<uint8_t> opPacket = _buildOperation(opcode, target, payload);
 
@@ -684,8 +699,12 @@ void CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
     fullPacket.push_back(0x07);
     fullPacket.insert(fullPacket.end(), opPacket.begin(), opPacket.end());
 
-    _sendEncryptedPacket(fullPacket, _outPacketCount);
+    if (!_sendEncryptedPacket(fullPacket, _outPacketCount)) {
+        _origin = originBefore;   // roll back; nothing was transmitted
+        return false;
+    }
     _outPacketCount++;
+    return true;
 }
 
 std::vector<uint8_t> CasambiClient::_buildOperation(uint8_t opcode, uint16_t target,
@@ -708,16 +727,16 @@ std::vector<uint8_t> CasambiClient::_buildOperation(uint8_t opcode, uint16_t tar
     return packet;
 }
 
-void CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uint32_t counter) {
+bool CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uint32_t counter) {
     if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
         Serial.println("BLE: _sendEncryptedPacket: encMutex timeout");
-        return;
+        return false;
     }
 
     if (!_encryption || !_authChar) {
         Serial.println("BLE: Encryption not initialized");
         xSemaphoreGive(_encMutex);
-        return;
+        return false;
     }
 
     std::vector<uint8_t> nonce = _getNonce(counter);
@@ -730,14 +749,25 @@ void CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uin
     // timeout and silently drop the notification.
     xSemaphoreGive(_encMutex);
 
-    if (encrypted.empty()) return;
+    if (encrypted.empty()) {
+        Serial.println("BLE: Encryption produced empty ciphertext");
+        return false;
+    }
 
     if (bleDebugEnabled) {
         Serial.printf("BLE: Sending encrypted packet - counter=%u, plaintext_len=%d, encrypted_len=%d\n",
                       counter, packet.size(), encrypted.size());
     }
 
-    _authChar->writeValue(encrypted.data(), encrypted.size());
+    // Write without response (Casambi control writes are unacknowledged), so a
+    // true return only means the stack accepted the buffer, not that the peer
+    // received it. It still distinguishes a queued write from an outright
+    // failure (disconnected characteristic, full tx buffer).
+    if (!_authChar->writeValue(encrypted.data(), encrypted.size(), false)) {
+        Serial.println("BLE: GATT writeValue failed");
+        return false;
+    }
+    return true;
 }
 
 std::vector<uint8_t> CasambiClient::_getNonce(uint32_t counter) {

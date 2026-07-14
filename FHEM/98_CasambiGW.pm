@@ -104,6 +104,36 @@ sub CasambiGW_ApiToken {
     return sha256_hex("casambi-api:" . $pw);
 }
 
+# Convert a brightness percentage (0..100) to a Casambi level byte (0..255).
+# Uses rounded integer arithmetic so the endpoints are exact: 0 % → 0 and
+# 100 % → 255. The naive int($pct * 2.55) truncates 100 * 2.55 (≈ 254.9999 in
+# floating point) down to 254, which would never reach full brightness and would
+# disagree with the explicit `on` command (255). The input is clamped to 0..100
+# first so out-of-range values cannot produce a byte outside 0..255.
+sub CasambiGW_PercentToByte {
+    my ($pct) = @_;
+    $pct = 0   if !defined $pct || $pct < 0;
+    $pct = 100 if $pct > 100;
+    return int($pct * 255 / 100 + 0.5);
+}
+
+# Classify the outcome of the refreshCasambi POST from HttpUtils' ($err, $code).
+# Returns one of: 'reboot' (expected connection drop, no HTTP status),
+# 'accepted' (2xx), 'auth' (401/403), 'conflict' (409), 'gatewayerror' (5xx),
+# 'unexpected' (any other status). Kept as a pure helper so the mapping can be
+# unit-tested without a live HttpUtils call. A non-2xx response must never be
+# reported as accepted.
+sub CasambiGW_ClassifyRefreshResponse {
+    my ($err, $code) = @_;
+    $code //= 0;
+    return 'reboot'       if $err && !$code;    # dropped before any HTTP status
+    return 'accepted'     if $code >= 200 && $code < 300;
+    return 'auth'         if $code == 401 || $code == 403;
+    return 'conflict'     if $code == 409;
+    return 'gatewayerror' if $code >= 500;
+    return 'unexpected';
+}
+
 # Build an HTTP header string for HttpUtils, appending the X-API-Key line when a
 # token is configured. $base may be undef/empty.
 sub CasambiGW_AuthHeader {
@@ -335,14 +365,31 @@ sub CasambiGW_RefreshCasambi {
             my ($param, $err, $data) = @_;
             my $h = $param->{hash};
             my $n = $h->{NAME};
-            # The ESP reboots immediately after accepting the request, so a
-            # connection reset / timeout after the POST is the normal case.
-            if ($err) {
+            my $code = $param->{code} // 0;
+            my $class = CasambiGW_ClassifyRefreshResponse($err, $code);
+            # A transport error with no HTTP status is the expected case: the ESP
+            # reboots immediately after *accepting* the request, so the TCP
+            # connection is reset before it can answer. Every other class means an
+            # HTTP status was received; a non-2xx status is never "accepted".
+            if ($class eq 'reboot') {
                 Log3 $n, 4,
                     "$n: refreshCasambi — connection dropped after request "
                   . "(expected, ESP is rebooting): $err";
+            } elsif ($class eq 'accepted') {
+                Log3 $n, 3, "$n: refreshCasambi accepted by ESP (HTTP $code)";
+            } elsif ($class eq 'auth') {
+                Log3 $n, 2,
+                    "$n: refreshCasambi rejected — authentication failed "
+                  . "(HTTP $code); check the casambiPassword / API token";
+            } elsif ($class eq 'conflict') {
+                Log3 $n, 3,
+                    "$n: refreshCasambi not started — a refresh is already "
+                  . "in progress (HTTP 409)";
+            } elsif ($class eq 'gatewayerror') {
+                Log3 $n, 2, "$n: refreshCasambi failed — gateway error (HTTP $code)";
             } else {
-                Log3 $n, 3, "$n: refreshCasambi accepted by ESP: $data";
+                Log3 $n, 2,
+                    "$n: refreshCasambi unexpected response (HTTP $code): $data";
             }
         }
     });
@@ -854,8 +901,7 @@ sub CasambiGW_SendCommand {
         $url  = "http://$ip:$port/api/units/$unitId/level";
         $json = '{"level":0}';
     } elsif ($cmd eq "brightness") {
-        my $level = int(($value // 0) * 2.55);
-        $level = 255 if $level > 255;
+        my $level = CasambiGW_PercentToByte($value);
         $url  = "http://$ip:$port/api/units/$unitId/level";
         $json = "{\"level\":$level}";
     } elsif ($cmd eq "colorTemp") {

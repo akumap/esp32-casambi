@@ -470,7 +470,16 @@ void setup() {
 
             Serial.println("\nReady. Type 'help' for commands.\n");
         } else {
-            Serial.println("ERROR: Failed to load configuration");
+            // hasValidConfig() said a config existed, but loading it failed
+            // (corrupt beyond both live and backup copies). Do NOT dead-end in a
+            // half-initialised operation mode — fall through to the setup portal
+            // so the device stays recoverable, and record why.
+            Serial.println("ERROR: Failed to load configuration - entering setup mode");
+            EventLog::log(LOG_ERROR, "Config load failed; falling back to setup portal");
+            setupPortal = new SetupPortal();
+            setupPortal->begin();
+            apiClient = new CasambiAPIClient();
+            Serial.println("(Serial fallback: type 'setup' to use the wizard instead.)\n");
         }
     } else {
         Serial.println("No configuration found - entering setup mode");
@@ -579,6 +588,14 @@ void loop() {
         if (webServer->consumeRefreshRequest()) {
             Serial.println("\n*** Cloud refresh requested via API ***");
             requestCloudRefresh(networkConfig.casambiPassword);  // never returns
+        }
+
+        // Event-log wipe requested via DELETE /api/log. Run the blocking
+        // EventLog::clear() (mutex wait + multiple LittleFS deletions + GC) here
+        // on the loop task, never in the async_tcp callback.
+        if (webServer->consumeClearLogRequest()) {
+            EventLog::clear();
+            EventLog::log(LOG_INFO, "Event log cleared via API");
         }
 
         // Reboot requested via POST /api/reboot. Carried out here (not in the
@@ -1043,14 +1060,9 @@ void runScheduledCloudRefresh() {
     // Persist the password used for this refresh
     freshConfig.casambiPassword = password;
 
-    // Preserve local settings that are not part of the cloud config
-    freshConfig.autoConnectEnabled    = networkConfig.autoConnectEnabled;
-    freshConfig.autoConnectAddress    = networkConfig.autoConnectAddress;
-    freshConfig.bleDebugEnabled       = networkConfig.bleDebugEnabled;
-    freshConfig.casambiDebugEnabled   = networkConfig.casambiDebugEnabled;
-    freshConfig.webDebugEnabled       = networkConfig.webDebugEnabled;
-    freshConfig.parseDebugEnabled     = networkConfig.parseDebugEnabled;
-    freshConfig.heapDebugEnabled      = networkConfig.heapDebugEnabled;
+    // Preserve local settings that are not part of the cloud config. Kept in one
+    // helper so a newly added local field cannot be forgotten here again.
+    preserveLocalSettings(networkConfig, freshConfig);
 
     // Save updated configuration
     Serial.println("--- Saving to flash ---");

@@ -99,6 +99,16 @@ public:
     bool consumeNtpRequest(String& serverOut);
 
     /**
+     * Check (and clear) whether DELETE /api/log requested an event-log wipe.
+     * The async handler only sets a flag; the actual EventLog::clear() (which
+     * takes a mutex with an unbounded wait and performs several LittleFS
+     * deletions plus garbage collection) runs in the loop task so this flash
+     * I/O never blocks the async_tcp task. Returns true exactly once per
+     * request; coalesced rapid DELETEs collapse into a single clear.
+     */
+    bool consumeClearLogRequest();
+
+    /**
      * Broadcast a unit state change to all connected WebSocket clients.
      * Enriches the message with vertical/colorTemp/cctMin/cctMax from NetworkConfig
      * (already updated before this callback fires).
@@ -141,6 +151,11 @@ private:
     // task, so both sides access it under g_configMutex.
     volatile bool _ntpRequested;
     String _pendingNtpServer;
+
+    // Set by DELETE /api/log, drained by the loop task via
+    // consumeClearLogRequest(). The blocking EventLog::clear() must not run on
+    // the async_tcp task, so the handler only raises this flag.
+    volatile bool _clearLogRequested;
 
     // Derived API token (hex of SHA-256(prefix||casambiPassword)). Empty string
     // means authentication is disabled (no Casambi password stored). Computed
@@ -228,6 +243,11 @@ private:
     // every rejection path (401/404/413/503/...) cleans up uniformly.
     void _sendJsonError(AsyncWebServerRequest* request, const String& error, int code = 400);
     void _sendJsonSuccess(AsyncWebServerRequest* request);
+    // 503 for a control command that could not be handed to the BLE GATT stack
+    // (link lost, mutex timeout, encryption/write failure). Never report HTTP
+    // success in this case: the light did not change, so callers (e.g. FHEM)
+    // must not update their state.
+    void _sendBleSendError(AsyncWebServerRequest* request);
     String _getClientIP(AsyncWebServerRequest* request);
 
     // Resolve a gateway BLE MAC to the matching unit name (empty if unknown).
