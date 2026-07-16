@@ -221,6 +221,21 @@
 #define BLE_CMD_QUEUE_DEPTH             8
 
 // ============================================================================
+// CLOUD CONFIG LIMITS
+// ============================================================================
+
+// Upper bounds for the collections parsed from the cloud network config. A
+// response exceeding them is rejected as a whole (transactional parse): the
+// caps are far above anything a real Casambi network produces (max ~250
+// units per network) and bound the heap a hostile or corrupted response can
+// claim on this small device.
+#define CLOUD_MAX_KEYS            32
+#define CLOUD_MAX_UNITS           250
+#define CLOUD_MAX_GROUPS          128
+#define CLOUD_MAX_SCENES          128
+#define CLOUD_MAX_GROUP_MEMBERS   250
+
+// ============================================================================
 // BLE PACKET CONSTANTS
 // ============================================================================
 
