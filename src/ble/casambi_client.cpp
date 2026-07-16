@@ -204,7 +204,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     // Initial link RSSI; refreshed by every health check (~10 s).
     _lastRssi = _bleClient->getRssi();
 
-    Serial.printf("BLE: Ready! (RSSI %d dBm)\n", _lastRssi);
+    Serial.printf("BLE: Ready! (RSSI %d dBm)\n", _lastRssi.load());
     return true;
 }
 
@@ -815,7 +815,7 @@ void CasambiClient::_handleNotification(uint8_t* data, size_t len) {
     _totalReceivedPackets++;
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Notification received (%d bytes, total #%u)\n", len, _totalReceivedPackets);
+        Serial.printf("BLE: Notification received (%d bytes, total #%u)\n", len, _totalReceivedPackets.load());
     }
 
     switch (_state) {
@@ -1201,6 +1201,15 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
             continue;
         }
 
+        // Update the state fields as ONE snapshot under g_configMutex: the
+        // async_tcp task serializes them for /api/units and the WebSocket
+        // hello under the same mutex, so it can never observe level/on/
+        // vertical/colorTemp mixed from two different updates. Held only for
+        // the plain field writes — never across the log or the callback below
+        // (the broadcast path takes g_configMutex itself via
+        // getConnectedAddress()/lockedCopy(); re-taking would deadlock).
+        if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+
         // Update basic state
         if (state.hasLevel) {
             unit->on = state.on;
@@ -1232,6 +1241,8 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
                 unit->vertical = state.vertical;
             }
         }
+
+        if (g_configMutex) xSemaphoreGive(g_configMutex);
 
         // Log state change
         if (casambiDebugEnabled) {

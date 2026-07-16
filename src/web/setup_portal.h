@@ -26,6 +26,7 @@
 #include <Arduino.h>
 #include <DNSServer.h>
 #include <vector>
+#include <atomic>
 #include "../ble/casambi_scan.h"
 
 class AsyncWebServer;
@@ -56,14 +57,16 @@ private:
     // the cloud requests themselves.
     SemaphoreHandle_t _mutex;
 
-    // BLE scan
-    volatile bool _scanRequested;
-    volatile ScanState _scan;
+    // BLE scan. Request flag and state are written on the async_tcp task and
+    // read/cleared on the loop task (and vice versa) — atomics make the
+    // hand-off well-defined; volatile only prevented compiler caching.
+    std::atomic<bool> _scanRequested;
+    std::atomic<ScanState> _scan;
     std::vector<CasambiScanResult> _scanResults;   // guarded by _mutex
 
-    // Provisioning
-    volatile bool _provisionRequested;
-    volatile ProvState _prov;
+    // Provisioning (same cross-task pattern as the scan flags)
+    std::atomic<bool> _provisionRequested;
+    std::atomic<ProvState> _prov;
     String        _provMsg;           // guarded by _mutex
     String        _provNetworkName;   // guarded by _mutex
     String        _ssid, _wifiPw, _casambiPw, _chosenUuid;  // guarded by _mutex

@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 #include <time.h>
+#include <atomic>
 #include "config.h"
 #include "cloud/network_config.h"
 #include "cloud/api_client.h"
@@ -149,18 +150,18 @@ static bool g_wifiWasConnected = false;
 
 // Last RSSI sampled while the link was up (0 = never sampled). Written on
 // loopTask / event task, read on the WiFi event task at disconnect time.
-static volatile int8_t g_lastWifiRssi = 0;
+static std::atomic<int8_t> g_lastWifiRssi{0};
 
 // Reason of the current disconnect episode, 0 = link is up. The IDF retries
 // every few seconds during an outage and fires STA_DISCONNECTED on every
 // failed attempt; this deduplicates the flash log to one entry per episode
 // (plus one per reason change).
-static volatile uint8_t g_lastWifiDiscReason = 0;
+static std::atomic<uint8_t> g_lastWifiDiscReason{0};
 
 // millis() at the first disconnect event of the current episode. The 30 s poll
 // in checkAndReconnectWiFi() quantizes its log entries to the check grid; the
 // event pair DISCONNECTED→GOT_IP measures the true outage duration.
-static volatile uint32_t g_wifiLostAtMs = 0;
+static std::atomic<uint32_t> g_wifiLostAtMs{0};
 
 static const char* wifiDisconnectReasonName(uint8_t reason) {
     switch (reason) {

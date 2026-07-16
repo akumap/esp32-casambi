@@ -370,13 +370,13 @@ void SetupPortal::_setupRoutes() {
 void SetupPortal::loop() {
     _dns.processNextRequest();
 
-    if (_scanRequested && _scan != ScanState::Running) {
-        _scanRequested = false;
+    // exchange() so a request set between the check and the clear is never
+    // lost. While a scan runs the flag stays set and is retried next loop.
+    if (_scan != ScanState::Running && _scanRequested.exchange(false)) {
         _runScan();
     }
 
-    if (_provisionRequested) {
-        _provisionRequested = false;
+    if (_provisionRequested.exchange(false)) {
         _runProvision();
     }
 
