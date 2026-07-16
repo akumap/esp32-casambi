@@ -1096,6 +1096,113 @@ void runScheduledCloudRefresh() {
 }
 
 // ============================================================================
+// STRICT SERIAL ARGUMENT PARSING
+// ============================================================================
+// The control commands share the same validation the REST API performs:
+// strict decimal parsing (String::toInt() silently maps "300"→44, "-1"→255
+// and "foo"→0 after the uint8 cast — commands then hit the WRONG target),
+// explicit value ranges, and an entity lookup before anything is sent.
+
+// Entity kinds the control commands address.
+enum class SerialEntity : uint8_t { Unit, Group, Scene };
+
+// Parse a decimal integer strictly: the whole trimmed string must be digits
+// (one optional leading '-') and the value must lie within [minV, maxV].
+static bool parseSerialInt(const String& raw, long minV, long maxV, long& out) {
+    String s = raw;
+    s.trim();
+    if (s.length() == 0) return false;
+    unsigned i = 0;
+    bool neg = false;
+    if (s[0] == '-') {
+        neg = true;
+        i = 1;
+        if (s.length() == 1) return false;
+    }
+    long v = 0;
+    for (; i < s.length(); i++) {
+        char c = s[i];
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+        if (v > 100000L) return false;   // bound before overflow could occur
+    }
+    if (neg) v = -v;
+    if (v < minV || v > maxV) return false;
+    out = v;
+    return true;
+}
+
+// Split a command's argument tail into whitespace-separated tokens.
+// Returns the token count, or -1 when there are more than maxTok tokens.
+static int splitSerialArgs(const String& tail, String* tok, int maxTok) {
+    int n = 0;
+    unsigned i = 0;
+    const unsigned len = tail.length();
+    while (i < len) {
+        while (i < len && tail[i] == ' ') i++;
+        if (i >= len) break;
+        if (n == maxTok) return -1;
+        unsigned start = i;
+        while (i < len && tail[i] != ' ') i++;
+        tok[n++] = tail.substring(start, i);
+    }
+    return n;
+}
+
+// Verify the addressed entity exists in the loaded config (same rule as the
+// REST API's 404) and complain on the console when it does not.
+static bool serialEntityExists(SerialEntity kind, uint8_t id) {
+    switch (kind) {
+        case SerialEntity::Unit:
+            if (networkConfig.getUnitById(id)) return true;
+            Serial.printf("Unit %u not found (see 'list units')\n", id);
+            return false;
+        case SerialEntity::Group:
+            if (networkConfig.getGroupById(id)) return true;
+            Serial.printf("Group %u not found (see 'list groups')\n", id);
+            return false;
+        case SerialEntity::Scene:
+            if (networkConfig.getSceneById(id)) return true;
+            Serial.printf("Scene %u not found (see 'list scenes')\n", id);
+            return false;
+    }
+    return false;
+}
+
+// Parse "<id>" (wantValue=false) or "<id> <value>" (wantValue=true) strictly
+// and verify the entity exists. On any failure a usage/error line has been
+// printed and false returns; the command must then send nothing.
+static bool parseControlArgs(SerialEntity kind, const String& tail,
+                             uint8_t& id, bool wantValue,
+                             long valMin, long valMax, long& value,
+                             const char* usage) {
+    String tok[2];
+    const int want = wantValue ? 2 : 1;
+    if (splitSerialArgs(tail, tok, 2) != want) {
+        Serial.printf("Usage: %s\n", usage);
+        return false;
+    }
+    long idL;
+    if (!parseSerialInt(tok[0], 0, 255, idL)) {
+        Serial.println("Invalid id (must be 0-255)");
+        return false;
+    }
+    if (wantValue && !parseSerialInt(tok[1], valMin, valMax, value)) {
+        Serial.printf("Invalid value (must be %ld-%ld)\n", valMin, valMax);
+        return false;
+    }
+    id = (uint8_t)idL;
+    return serialEntityExists(kind, id);
+}
+
+// Report the real outcome of a BLE setter — the setters return false when
+// the command was NOT transmitted (link lost, mutex timeout, GATT failure),
+// and the console must not claim success then.
+static void reportSerialSend(bool ok) {
+    if (!ok) Serial.println("FAILED: command not transmitted (BLE send failed)");
+}
+
+// ============================================================================
 // COMMAND HANDLER
 // ============================================================================
 
@@ -1298,8 +1405,14 @@ void handleCommand(const String& cmd) {
         }
         else if (cmd.startsWith("connect ")) {
             if (casambiClient) {
-                int index = cmd.substring(8).toInt();
-                connectToDevice(index);
+                // Strict parse: toInt() turned "connect foo" into index 0 and
+                // silently connected to the first scanned device.
+                long index;
+                if (!parseSerialInt(cmd.substring(8), 0, 255, index)) {
+                    Serial.println("Usage: connect <index>  (from 'scan' results)");
+                } else {
+                    connectToDevice((int)index);
+                }
             } else {
                 Serial.println("Not in operation mode");
             }
@@ -1509,138 +1622,154 @@ void handleCommand(const String& cmd) {
         // Scene commands
         else if (cmd.startsWith("son ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                uint8_t id = cmd.substring(4).toInt();
-                casambiClient->setSceneLevel(id, 0xFF);
-                Serial.printf("Scene %d ON\n", id);
+                uint8_t id; long v;
+                if (parseControlArgs(SerialEntity::Scene, cmd.substring(4), id,
+                                     false, 0, 0, v, "son <sceneId>")) {
+                    bool ok = casambiClient->setSceneLevel(id, 0xFF);
+                    if (ok) Serial.printf("Scene %u ON\n", id);
+                    reportSerialSend(ok);
+                }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("soff ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                uint8_t id = cmd.substring(5).toInt();
-                casambiClient->setSceneLevel(id, 0);
-                Serial.printf("Scene %d OFF\n", id);
+                uint8_t id; long v;
+                if (parseControlArgs(SerialEntity::Scene, cmd.substring(5), id,
+                                     false, 0, 0, v, "soff <sceneId>")) {
+                    bool ok = casambiClient->setSceneLevel(id, 0);
+                    if (ok) Serial.printf("Scene %u OFF\n", id);
+                    reportSerialSend(ok);
+                }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("slevel ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 7);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(7, spacePos).toInt();
-                    uint8_t level = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setSceneLevel(id, level);
-                    Serial.printf("Scene %d level %d\n", id, level);
+                uint8_t id; long level;
+                if (parseControlArgs(SerialEntity::Scene, cmd.substring(7), id,
+                                     true, 0, 255, level, "slevel <sceneId> <0-255>")) {
+                    bool ok = casambiClient->setSceneLevel(id, (uint8_t)level);
+                    if (ok) Serial.printf("Scene %u level %ld\n", id, level);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         // Unit commands
         else if (cmd.startsWith("uon ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                uint8_t id = cmd.substring(4).toInt();
-                casambiClient->setUnitLevel(id, 255);
-                Serial.printf("Unit %d ON\n", id);
+                uint8_t id; long v;
+                if (parseControlArgs(SerialEntity::Unit, cmd.substring(4), id,
+                                     false, 0, 0, v, "uon <unitId>")) {
+                    bool ok = casambiClient->setUnitLevel(id, 255);
+                    if (ok) Serial.printf("Unit %u ON\n", id);
+                    reportSerialSend(ok);
+                }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("uoff ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                uint8_t id = cmd.substring(5).toInt();
-                casambiClient->setUnitLevel(id, 0);
-                Serial.printf("Unit %d OFF\n", id);
+                uint8_t id; long v;
+                if (parseControlArgs(SerialEntity::Unit, cmd.substring(5), id,
+                                     false, 0, 0, v, "uoff <unitId>")) {
+                    bool ok = casambiClient->setUnitLevel(id, 0);
+                    if (ok) Serial.printf("Unit %u OFF\n", id);
+                    reportSerialSend(ok);
+                }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("ulevel ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 7);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(7, spacePos).toInt();
-                    uint8_t level = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setUnitLevel(id, level);
-                    Serial.printf("Unit %d level %d\n", id, level);
+                uint8_t id; long level;
+                if (parseControlArgs(SerialEntity::Unit, cmd.substring(7), id,
+                                     true, 0, 255, level, "ulevel <unitId> <0-255>")) {
+                    bool ok = casambiClient->setUnitLevel(id, (uint8_t)level);
+                    if (ok) Serial.printf("Unit %u level %ld\n", id, level);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("uvertical ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 10);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(10, spacePos).toInt();
-                    uint8_t vertical = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setUnitVertical(id, vertical);
-                    Serial.printf("Unit %d light balance %d (0=top only, 127=both, 255=bottom only)\n", id, vertical);
+                uint8_t id; long vertical;
+                if (parseControlArgs(SerialEntity::Unit, cmd.substring(10), id,
+                                     true, 0, 255, vertical, "uvertical <unitId> <0-255>")) {
+                    bool ok = casambiClient->setUnitVertical(id, (uint8_t)vertical);
+                    if (ok) Serial.printf("Unit %u light balance %ld (0=top only, 127=both, 255=bottom only)\n", id, vertical);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("ucolor ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int space1 = cmd.indexOf(' ', 7);
-                if (space1 > 0) {
-                    int space2 = cmd.indexOf(' ', space1 + 1);
-                    if (space2 > 0) {
-                        int space3 = cmd.indexOf(' ', space2 + 1);
-                        if (space3 > 0) {
-                            uint8_t id = cmd.substring(7, space1).toInt();
-                            uint8_t r = cmd.substring(space1 + 1, space2).toInt();
-                            uint8_t g = cmd.substring(space2 + 1, space3).toInt();
-                            uint8_t b = cmd.substring(space3 + 1).toInt();
-                            casambiClient->setUnitColor(id, r, g, b);
-                            Serial.printf("Unit %d color RGB(%d,%d,%d)\n", id, r, g, b);
-                        }
-                    }
+                String tok[4];
+                long id, r, g, b;
+                if (splitSerialArgs(cmd.substring(7), tok, 4) != 4 ||
+                    !parseSerialInt(tok[0], 0, 255, id) ||
+                    !parseSerialInt(tok[1], 0, 255, r)  ||
+                    !parseSerialInt(tok[2], 0, 255, g)  ||
+                    !parseSerialInt(tok[3], 0, 255, b)) {
+                    Serial.println("Usage: ucolor <unitId> <r> <g> <b>  (each 0-255)");
+                } else if (serialEntityExists(SerialEntity::Unit, (uint8_t)id)) {
+                    bool ok = casambiClient->setUnitColor((uint8_t)id, (uint8_t)r,
+                                                          (uint8_t)g, (uint8_t)b);
+                    if (ok) Serial.printf("Unit %ld color RGB(%ld,%ld,%ld)\n", id, r, g, b);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("utemp ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 6);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(6, spacePos).toInt();
-                    uint16_t kelvin = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setUnitTemperature(id, kelvin);
-                    Serial.printf("Unit %d temperature %dK\n", id, kelvin);
+                uint8_t id; long kelvin;
+                // Same range the REST API enforces for POST /api/units/:id/temperature.
+                if (parseControlArgs(SerialEntity::Unit, cmd.substring(6), id,
+                                     true, 1000, 10000, kelvin, "utemp <unitId> <1000-10000>")) {
+                    bool ok = casambiClient->setUnitTemperature(id, (uint16_t)kelvin);
+                    if (ok) Serial.printf("Unit %u temperature %ldK\n", id, kelvin);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("uslider ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 8);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(8, spacePos).toInt();
-                    uint8_t slider = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setUnitSlider(id, slider);
-                    Serial.printf("Unit %d motor position %d (0=up, 255=down)\n", id, slider);
+                uint8_t id; long slider;
+                if (parseControlArgs(SerialEntity::Unit, cmd.substring(8), id,
+                                     true, 0, 255, slider, "uslider <unitId> <0-255>")) {
+                    bool ok = casambiClient->setUnitSlider(id, (uint8_t)slider);
+                    if (ok) Serial.printf("Unit %u motor position %ld (0=up, 255=down)\n", id, slider);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         // Group commands
         else if (cmd.startsWith("glevel ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 7);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(7, spacePos).toInt();
-                    uint8_t level = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setGroupLevel(id, level);
-                    Serial.printf("Group %d level %d\n", id, level);
+                uint8_t id; long level;
+                if (parseControlArgs(SerialEntity::Group, cmd.substring(7), id,
+                                     true, 0, 255, level, "glevel <groupId> <0-255>")) {
+                    bool ok = casambiClient->setGroupLevel(id, (uint8_t)level);
+                    if (ok) Serial.printf("Group %u level %ld\n", id, level);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("gvertical ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 10);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(10, spacePos).toInt();
-                    uint8_t vertical = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setGroupVertical(id, vertical);
-                    Serial.printf("Group %d light balance %d (0=top only, 127=both, 255=bottom only)\n", id, vertical);
+                uint8_t id; long vertical;
+                if (parseControlArgs(SerialEntity::Group, cmd.substring(10), id,
+                                     true, 0, 255, vertical, "gvertical <groupId> <0-255>")) {
+                    bool ok = casambiClient->setGroupVertical(id, (uint8_t)vertical);
+                    if (ok) Serial.printf("Group %u light balance %ld (0=top only, 127=both, 255=bottom only)\n", id, vertical);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
         else if (cmd.startsWith("gslider ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
-                int spacePos = cmd.indexOf(' ', 8);
-                if (spacePos > 0) {
-                    uint8_t id = cmd.substring(8, spacePos).toInt();
-                    uint8_t slider = cmd.substring(spacePos + 1).toInt();
-                    casambiClient->setGroupSlider(id, slider);
-                    Serial.printf("Group %d motor position %d (0=up, 255=down)\n", id, slider);
+                uint8_t id; long slider;
+                if (parseControlArgs(SerialEntity::Group, cmd.substring(8), id,
+                                     true, 0, 255, slider, "gslider <groupId> <0-255>")) {
+                    bool ok = casambiClient->setGroupSlider(id, (uint8_t)slider);
+                    if (ok) Serial.printf("Group %u motor position %ld (0=up, 255=down)\n", id, slider);
+                    reportSerialSend(ok);
                 }
             } else { Serial.println("Not authenticated"); }
         }
