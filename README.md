@@ -412,7 +412,15 @@ Casambi password is present yet (run `setup`/`refresh` once via serial first).
 
 ### Response Format
 
-**Success:** `{"success": true}`
+**Control commands** (scene/unit/group on/off/level/color/temperature/
+vertical/slider) answer `202 Accepted` with `{"success": true, "queued": true}`:
+the command is validated, queued and then executed on the ESP32's loop task so
+BLE operations never stall the HTTP/WebSocket server. The resulting state
+change arrives as a WebSocket `unit_state` event; a command that later fails
+on the BLE link is recorded in the event log (`GET /api/log`) and produces no
+`unit_state` event. `503` means the command queue is full — retry shortly.
+
+**Other endpoints:** `{"success": true}` with HTTP 200.
 
 **Error:** `{"success": false, "error": "Unit not found"}`
 

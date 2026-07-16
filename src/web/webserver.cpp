@@ -26,10 +26,11 @@ static String lockedCopy(const String& s) {
 
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
-      _refreshRequested(false), _rebootRequested(false), _ntpRequested(false),
-      _clearLogRequested(false),
-      _broadcastQueue(nullptr), _resyncNeeded(false) {
+      _refreshRequested(false), _rebootRequested(false), _clearLogRequested(false),
+      _ntpRequested(false),
+      _broadcastQueue(nullptr), _bleCmdQueue(nullptr), _resyncNeeded(false) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
+    _bleCmdQueue    = xQueueCreate(BLE_CMD_QUEUE_DEPTH, sizeof(BleCommand));
 }
 
 CasambiWebServer::~CasambiWebServer() {
@@ -45,6 +46,11 @@ CasambiWebServer::~CasambiWebServer() {
         }
         vQueueDelete(_broadcastQueue);
         _broadcastQueue = nullptr;
+    }
+    // Value queue — nothing to free per entry, pending commands are dropped.
+    if (_bleCmdQueue) {
+        vQueueDelete(_bleCmdQueue);
+        _bleCmdQueue = nullptr;
     }
 }
 
@@ -114,6 +120,18 @@ void CasambiWebServer::stop() {
 }
 
 void CasambiWebServer::loop() {
+    // Execute at most ONE queued control command per call. The REST handlers
+    // (async_tcp task) only validate and enqueue; the BLE mutex wait (up to
+    // 1 s) and the GATT write happen here on the loop task, so HTTP/WebSocket
+    // traffic is never stalled behind a BLE operation. One per call bounds
+    // each loop iteration to a single blocking operation.
+    if (_bleCmdQueue) {
+        BleCommand cmd;
+        if (xQueueReceive(_bleCmdQueue, &cmd, 0) == pdTRUE) {
+            _executeBleCommand(cmd);
+        }
+    }
+
     // Drain the inter-task broadcast queue.  Messages are posted here from the
     // BLE task (broadcastUnitState / broadcastConnectionState) and sent out
     // here in the loop task so _ws->textAll() is never called from a BLE
@@ -130,8 +148,8 @@ void CasambiWebServer::loop() {
         // A broadcast was dropped (queue full): push a fresh full snapshot so
         // clients cannot keep a stale unit state — a missed unit_state would
         // otherwise only be corrected by the unit's NEXT change or a reconnect.
-        if (_resyncNeeded) {
-            _resyncNeeded = false;
+        // exchange() so a set racing this clear is never lost.
+        if (_resyncNeeded.exchange(false)) {
             if (_ws->count() > 0) {
                 _ws->textAll(_buildHelloMessage());
                 WEB_LOG("WS: broadcast drop -> resync hello pushed\n");
@@ -144,31 +162,32 @@ void CasambiWebServer::loop() {
 }
 
 bool CasambiWebServer::consumeRefreshRequest() {
-    if (!_refreshRequested) return false;
-    _refreshRequested = false;
-    return true;
+    return _refreshRequested.exchange(false);
 }
 
 bool CasambiWebServer::consumeRebootRequest() {
-    if (!_rebootRequested) return false;
-    _rebootRequested = false;
-    return true;
+    return _rebootRequested.exchange(false);
 }
 
 bool CasambiWebServer::consumeClearLogRequest() {
-    if (!_clearLogRequested) return false;
-    _clearLogRequested = false;
-    return true;
+    return _clearLogRequested.exchange(false);
 }
 
 bool CasambiWebServer::consumeNtpRequest(String& serverOut) {
-    if (!_ntpRequested) return false;
+    // Cheap unlocked pre-check for the loop hot path; a flag set right after
+    // it is picked up on the next iteration.
+    if (!_ntpRequested.load()) return false;
+    // Transactional consume: flag and string are read/cleared under the same
+    // mutex hold the writer (_handleSetNtp) uses to set them, so the pair can
+    // never be observed half-updated.
     if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    serverOut = _pendingNtpServer;
-    _pendingNtpServer = "";
-    _ntpRequested = false;
+    const bool had = _ntpRequested.exchange(false);
+    if (had) {
+        serverOut = _pendingNtpServer;
+        _pendingNtpServer = "";
+    }
     if (g_configMutex) xSemaphoreGive(g_configMutex);
-    return true;
+    return had;
 }
 
 // ============================================================================
@@ -330,7 +349,12 @@ String CasambiWebServer::_buildHelloMessage() const {
     gw["mac"]       = gwMac;
     gw["name"]      = _gatewayName(gwMac);
 
+    // Copy the unit state under g_configMutex: the BLE task applies incoming
+    // state updates under the same mutex (_applyUnitStates), so each unit's
+    // on/level/vertical/colorTemp here is one consistent snapshot. The unit
+    // list itself and the identity strings are only written at boot/refresh.
     JsonArray units = doc["units"].to<JsonArray>();
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
     for (const auto& unit : _config->units) {
         JsonObject u = units.add<JsonObject>();
         u["id"]          = unit.deviceId;
@@ -350,6 +374,7 @@ String CasambiWebServer::_buildHelloMessage() const {
             u["cctMax"]    = unit.cctMaxKelvin;
         }
     }
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
 
     String msg;
     serializeJson(doc, msg);
@@ -716,6 +741,9 @@ void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
     WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
     JsonDocument doc;
     JsonArray units = doc["units"].to<JsonArray>();
+    // Same consistent-snapshot rule as _buildHelloMessage: state fields are
+    // written by the BLE task under g_configMutex, so read them under it too.
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
     for (const auto& unit : _config->units) {
         JsonObject u = units.add<JsonObject>();
         u["id"] = unit.deviceId;
@@ -733,6 +761,7 @@ void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
             u["cctMax"] = unit.cctMaxKelvin;
         }
     }
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
@@ -981,10 +1010,12 @@ void CasambiWebServer::_handleSetNtp(AsyncWebServerRequest* request) {
     // Only hand the value to the loop task (consumeNtpRequest). Mutating
     // _config and writing LittleFS here would (a) race the loop task on the
     // ntpServer String and (b) block the async_tcp task on a flash write.
+    // String AND flag are set under the same mutex hold so the consumer can
+    // never see the flag without its matching value (transactional handoff).
     if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
     _pendingNtpServer = server;
+    _ntpRequested.store(true);
     if (g_configMutex) xSemaphoreGive(g_configMutex);
-    _ntpRequested = true;
 
     WEB_LOG("Web: NTP server change to %s requested from %s\n",
             server.c_str(), _getClientIP(request).c_str());
@@ -1094,10 +1125,13 @@ void CasambiWebServer::_handleSceneOn(AsyncWebServerRequest* request) {
     CasambiScene* scene = _sceneFromPath(request, "/on", sceneId);
     if (!scene) return;
 
-    if (!_client->setSceneLevel(sceneId, 0xFF)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::SceneLevel;
+    cmd.id   = sceneId;
+    cmd.a    = 0xFF;
 
-    WEB_LOG("Web: Scene %d (%s) ON from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Scene %d (%s) ON queued from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleSceneOff(AsyncWebServerRequest* request) {
@@ -1106,10 +1140,13 @@ void CasambiWebServer::_handleSceneOff(AsyncWebServerRequest* request) {
     CasambiScene* scene = _sceneFromPath(request, "/off", sceneId);
     if (!scene) return;
 
-    if (!_client->setSceneLevel(sceneId, 0)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::SceneLevel;
+    cmd.id   = sceneId;
+    cmd.a    = 0;
 
-    WEB_LOG("Web: Scene %d (%s) OFF from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Scene %d (%s) OFF queued from %s\n", sceneId, scene->name.c_str(), _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleSceneLevel(AsyncWebServerRequest* request) {
@@ -1122,10 +1159,13 @@ void CasambiWebServer::_handleSceneLevel(AsyncWebServerRequest* request) {
     uint8_t level;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    if (!_client->setSceneLevel(sceneId, level)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::SceneLevel;
+    cmd.id   = sceneId;
+    cmd.a    = level;
 
-    WEB_LOG("Web: Scene %d (%s) level=%d from %s\n", sceneId, scene->name.c_str(), level, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Scene %d (%s) level=%d queued from %s\n", sceneId, scene->name.c_str(), level, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 // ============================================================================
@@ -1138,10 +1178,13 @@ void CasambiWebServer::_handleUnitOn(AsyncWebServerRequest* request) {
     CasambiUnit* unit = _unitFromPath(request, "/on", unitId);
     if (!unit) return;
 
-    if (!_client->setUnitLevel(unitId, 255)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::UnitLevel;
+    cmd.id   = unitId;
+    cmd.a    = 255;
 
-    WEB_LOG("Web: Unit %d (%s) ON from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Unit %d (%s) ON queued from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleUnitOff(AsyncWebServerRequest* request) {
@@ -1150,10 +1193,13 @@ void CasambiWebServer::_handleUnitOff(AsyncWebServerRequest* request) {
     CasambiUnit* unit = _unitFromPath(request, "/off", unitId);
     if (!unit) return;
 
-    if (!_client->setUnitLevel(unitId, 0)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::UnitLevel;
+    cmd.id   = unitId;
+    cmd.a    = 0;
 
-    WEB_LOG("Web: Unit %d (%s) OFF from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Unit %d (%s) OFF queued from %s\n", unitId, unit->name.c_str(), _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleUnitLevel(AsyncWebServerRequest* request) {
@@ -1166,10 +1212,13 @@ void CasambiWebServer::_handleUnitLevel(AsyncWebServerRequest* request) {
     uint8_t level;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    if (!_client->setUnitLevel(unitId, level)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::UnitLevel;
+    cmd.id   = unitId;
+    cmd.a    = level;
 
-    WEB_LOG("Web: Unit %d (%s) level=%d from %s\n", unitId, unit->name.c_str(), level, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Unit %d (%s) level=%d queued from %s\n", unitId, unit->name.c_str(), level, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleUnitColor(AsyncWebServerRequest* request) {
@@ -1185,10 +1234,15 @@ void CasambiWebServer::_handleUnitColor(AsyncWebServerRequest* request) {
         !_requireUint8(request, doc, "g", g) ||
         !_requireUint8(request, doc, "b", b)) return;
 
-    if (!_client->setUnitColor(unitId, r, g, b)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::UnitColor;
+    cmd.id   = unitId;
+    cmd.a    = r;
+    cmd.b    = g;
+    cmd.c    = b;
 
-    WEB_LOG("Web: Unit %d (%s) color=(%d,%d,%d) from %s\n", unitId, unit->name.c_str(), r, g, b, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Unit %d (%s) color=(%d,%d,%d) queued from %s\n", unitId, unit->name.c_str(), r, g, b, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleUnitTemperature(AsyncWebServerRequest* request) {
@@ -1210,10 +1264,13 @@ void CasambiWebServer::_handleUnitTemperature(AsyncWebServerRequest* request) {
         return;
     }
 
-    if (!_client->setUnitTemperature(unitId, kelvin)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type   = BleCommand::Type::UnitTemperature;
+    cmd.id     = unitId;
+    cmd.kelvin = kelvin;
 
-    WEB_LOG("Web: Unit %d (%s) temperature=%dK from %s\n", unitId, unit->name.c_str(), kelvin, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Unit %d (%s) temperature=%dK queued from %s\n", unitId, unit->name.c_str(), kelvin, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleUnitSlider(AsyncWebServerRequest* request) {
@@ -1226,10 +1283,13 @@ void CasambiWebServer::_handleUnitSlider(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    if (!_client->setUnitSlider(unitId, value)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::UnitSlider;
+    cmd.id   = unitId;
+    cmd.a    = value;
 
-    WEB_LOG("Web: Unit %d (%s) slider=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Unit %d (%s) slider=%d queued from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
@@ -1242,10 +1302,13 @@ void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    if (!_client->setUnitVertical(unitId, value)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::UnitVertical;
+    cmd.id   = unitId;
+    cmd.a    = value;
 
-    WEB_LOG("Web: Unit %d (%s) vertical=%d from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Unit %d (%s) vertical=%d queued from %s\n", unitId, unit->name.c_str(), value, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 // ============================================================================
@@ -1262,10 +1325,13 @@ void CasambiWebServer::_handleGroupLevel(AsyncWebServerRequest* request) {
     uint8_t level;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "level", level)) return;
 
-    if (!_client->setGroupLevel(groupId, level)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::GroupLevel;
+    cmd.id   = groupId;
+    cmd.a    = level;
 
-    WEB_LOG("Web: Group %d (%s) level=%d from %s\n", groupId, group->name.c_str(), level, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Group %d (%s) level=%d queued from %s\n", groupId, group->name.c_str(), level, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleGroupSlider(AsyncWebServerRequest* request) {
@@ -1278,10 +1344,13 @@ void CasambiWebServer::_handleGroupSlider(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    if (!_client->setGroupSlider(groupId, value)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::GroupSlider;
+    cmd.id   = groupId;
+    cmd.a    = value;
 
-    WEB_LOG("Web: Group %d (%s) slider=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Group %d (%s) slider=%d queued from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 void CasambiWebServer::_handleGroupVertical(AsyncWebServerRequest* request) {
@@ -1294,10 +1363,13 @@ void CasambiWebServer::_handleGroupVertical(AsyncWebServerRequest* request) {
     uint8_t value;
     if (!_parseBody(request, doc) || !_requireUint8(request, doc, "value", value)) return;
 
-    if (!_client->setGroupVertical(groupId, value)) { _sendBleSendError(request); return; }
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::GroupVertical;
+    cmd.id   = groupId;
+    cmd.a    = value;
 
-    WEB_LOG("Web: Group %d (%s) vertical=%d from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
-    _sendJsonSuccess(request);
+    WEB_LOG("Web: Group %d (%s) vertical=%d queued from %s\n", groupId, group->name.c_str(), value, _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
 }
 
 // ============================================================================
@@ -1321,16 +1393,40 @@ void CasambiWebServer::_sendJsonError(AsyncWebServerRequest* request, const Stri
     request->send(code, "application/json", response);
 }
 
-void CasambiWebServer::_sendJsonSuccess(AsyncWebServerRequest* request) {
+void CasambiWebServer::_enqueueBleCommand(AsyncWebServerRequest* request, const BleCommand& cmd) {
+    // Non-blocking send: a full queue means the loop task is backed up behind
+    // slow BLE operations — push back on the client instead of piling on.
+    if (!_bleCmdQueue || xQueueSend(_bleCmdQueue, &cmd, 0) != pdTRUE) {
+        _sendJsonError(request, "Command queue full; retry shortly", 503);
+        return;
+    }
     JsonDocument doc;
     doc["success"] = true;
+    doc["queued"]  = true;
     String response;
     serializeJson(doc, response);
-    request->send(200, "application/json", response);
+    request->send(202, "application/json", response);
 }
 
-void CasambiWebServer::_sendBleSendError(AsyncWebServerRequest* request) {
-    _sendJsonError(request, "BLE send failed; command not transmitted", 503);
+void CasambiWebServer::_executeBleCommand(const BleCommand& cmd) {
+    bool ok = false;
+    switch (cmd.type) {
+        case BleCommand::Type::SceneLevel:      ok = _client->setSceneLevel(cmd.id, cmd.a); break;
+        case BleCommand::Type::UnitLevel:       ok = _client->setUnitLevel(cmd.id, cmd.a); break;
+        case BleCommand::Type::GroupLevel:      ok = _client->setGroupLevel(cmd.id, cmd.a); break;
+        case BleCommand::Type::UnitVertical:    ok = _client->setUnitVertical(cmd.id, cmd.a); break;
+        case BleCommand::Type::GroupVertical:   ok = _client->setGroupVertical(cmd.id, cmd.a); break;
+        case BleCommand::Type::UnitTemperature: ok = _client->setUnitTemperature(cmd.id, cmd.kelvin); break;
+        case BleCommand::Type::UnitColor:       ok = _client->setUnitColor(cmd.id, cmd.a, cmd.b, cmd.c); break;
+        case BleCommand::Type::UnitSlider:      ok = _client->setUnitSlider(cmd.id, cmd.a); break;
+        case BleCommand::Type::GroupSlider:     ok = _client->setGroupSlider(cmd.id, cmd.a); break;
+    }
+    if (!ok) {
+        // The HTTP 202 already went out; the failure surfaces here and via the
+        // absent unit_state event (clients keep their previous state).
+        EventLog::log(LOG_WARN, "BLE command failed (type=%u id=%u)",
+                      (unsigned)static_cast<uint8_t>(cmd.type), (unsigned)cmd.id);
+    }
 }
 
 String CasambiWebServer::_getClientIP(AsyncWebServerRequest* request) {

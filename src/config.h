@@ -212,6 +212,14 @@
 // clients cannot stay stale on a missed unit_state.
 #define WS_BROADCAST_QUEUE_DEPTH        64
 
+// Depth of the REST→loop BLE command queue (stores BleCommand values).
+// Control handlers on the async_tcp task only validate and enqueue; the loop
+// task dequeues one command per iteration and performs the BLE operation, so
+// the up-to-1 s BLE mutex wait / GATT write never blocks the async_tcp task.
+// A full queue answers 503 (client retries) — 8 in-flight commands is far
+// beyond what FHEM or a UI produces between two loop iterations (~10 ms).
+#define BLE_CMD_QUEUE_DEPTH             8
+
 // ============================================================================
 // BLE PACKET CONSTANTS
 // ============================================================================
