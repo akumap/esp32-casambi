@@ -28,26 +28,21 @@ CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
       _refreshRequested(false), _rebootRequested(false), _clearLogRequested(false),
       _ntpRequested(false),
-      _broadcastQueue(nullptr), _bleCmdQueue(nullptr), _resyncNeeded(false) {
-    _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(String*));
+      _broadcastQueue(nullptr), _bleCmdQueue(nullptr), _resyncNeeded(false),
+      _wsDropCount(0) {
+    _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(WsEvent));
     _bleCmdQueue    = xQueueCreate(BLE_CMD_QUEUE_DEPTH, sizeof(BleCommand));
 }
 
 CasambiWebServer::~CasambiWebServer() {
     stop();
-    // stop() drains the queue, but a broadcast may still have been posted
-    // between drain and here; drain again, then free the queue itself (it was
-    // leaked before). Callers must ensure no task can still hold a pointer to
-    // this instance (see the teardown sequence in main.cpp).
+    // Both queues carry plain values — nothing to free per entry, pending
+    // items are simply dropped with the queue. Callers must ensure no task
+    // can still hold a pointer to this instance (see main.cpp teardown).
     if (_broadcastQueue) {
-        String* msg = nullptr;
-        while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
-            delete msg;
-        }
         vQueueDelete(_broadcastQueue);
         _broadcastQueue = nullptr;
     }
-    // Value queue — nothing to free per entry, pending commands are dropped.
     if (_bleCmdQueue) {
         vQueueDelete(_bleCmdQueue);
         _bleCmdQueue = nullptr;
@@ -106,13 +101,9 @@ void CasambiWebServer::stop() {
         _ws = nullptr;
         _running = false;
 
-        // Drain and free any pending broadcast messages so nothing leaks when
-        // the server is torn down while the BLE task is still posting.
+        // Drop any pending broadcast events (plain values, nothing to free).
         if (_broadcastQueue) {
-            String* msg = nullptr;
-            while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
-                delete msg;
-            }
+            xQueueReset(_broadcastQueue);
         }
 
         Serial.println("Web: Server stopped");
@@ -132,16 +123,18 @@ void CasambiWebServer::loop() {
         }
     }
 
-    // Drain the inter-task broadcast queue.  Messages are posted here from the
-    // BLE task (broadcastUnitState / broadcastConnectionState) and sent out
-    // here in the loop task so _ws->textAll() is never called from a BLE
-    // callback — avoiding races with the async_tcp task's _clients management.
+    // Drain the inter-task broadcast queue.  Events are posted here from the
+    // BLE task (broadcastUnitState / broadcastConnectionState) as plain
+    // values; the JSON is built HERE at send time — so the BLE task never
+    // allocates, _ws->textAll() is never called from a BLE callback, and with
+    // no client connected the serialization is skipped entirely (the queue is
+    // still drained so stale events don't linger).
     if (_ws && _broadcastQueue) {
-        String* msg = nullptr;
-        while (xQueueReceive(_broadcastQueue, &msg, 0) == pdTRUE) {
-            if (msg) {
-                _ws->textAll(*msg);
-                delete msg;
+        const bool haveClients = (_ws->count() > 0);
+        WsEvent ev;
+        while (xQueueReceive(_broadcastQueue, &ev, 0) == pdTRUE) {
+            if (haveClients) {
+                _sendWsEvent(ev);
             }
         }
 
@@ -384,33 +377,19 @@ String CasambiWebServer::_buildHelloMessage() const {
 void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
     if (!_ws || !_broadcastQueue) return;
 
-    JsonDocument doc;
-    doc["type"]   = "unit_state";
-    doc["id"]     = unitId;
-    doc["level"]  = level;
-    doc["online"] = online;
-    doc["on"]     = (level > 0);
-
-    // Enrich with current aux state from NetworkConfig (already updated before callback fires)
-    CasambiUnit* unit = _config->getUnitById(unitId);
-    if (unit) {
-        if (unit->hasVertical) doc["vertical"]  = unit->vertical;
-        if (unit->hasCCT) {
-            doc["colorTemp"] = unit->colorTemp;
-            doc["cctMin"]    = unit->cctMinKelvin;
-            doc["cctMax"]    = unit->cctMaxKelvin;
-        }
-    }
-
-    // Post to the inter-task queue; loop() drains it in the loop task.
-    // Non-blocking: if the queue is full the message is dropped, but the
+    // Runs on the BLE notification task: post the raw event only — no JSON,
+    // no String, no config reads. loop() builds the message at send time.
+    // Non-blocking: if the queue is full the event is dropped, but the
     // resync flag makes loop() push a fresh hello snapshot — a dropped
     // unit_state would otherwise stay stale until that unit's NEXT change.
-    String* msg = new String();
-    serializeJson(doc, *msg);
-    if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
-        delete msg;
+    WsEvent ev{};
+    ev.type   = WsEvent::Type::UnitState;
+    ev.unitId = unitId;
+    ev.level  = level;
+    ev.online = online;
+    if (xQueueSend(_broadcastQueue, &ev, 0) != pdTRUE) {
         _resyncNeeded = true;
+        _wsDropCount++;
         WEB_LOG("WS: broadcast queue full, dropped unit_state id=%d (resync scheduled)\n", unitId);
     } else {
         WEB_LOG("WS: queued unit_state id=%d level=%d online=%d\n",
@@ -421,28 +400,64 @@ void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool on
 void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
     if (!_ws || !_broadcastQueue) return;
 
-    JsonDocument doc;
-    doc["type"]      = "connection_state";
-    doc["connected"] = connected;
-    if (reason != 0) doc["reason"] = reason;
-
-    // Report which gateway we are on (empty when disconnected) for transparency.
-    String gwMac = connected ? _client->getConnectedAddress() : String("");
-    JsonObject gw = doc["gateway"].to<JsonObject>();
-    gw["connected"] = connected;
-    gw["mac"]       = gwMac;
-    gw["name"]      = _gatewayName(gwMac);
-
-    String* msg = new String();
-    serializeJson(doc, *msg);
-    if (xQueueSend(_broadcastQueue, &msg, 0) != pdTRUE) {
-        delete msg;
+    WsEvent ev{};
+    ev.type      = WsEvent::Type::ConnectionState;
+    ev.connected = connected;
+    ev.reason    = (int8_t)reason;
+    if (xQueueSend(_broadcastQueue, &ev, 0) != pdTRUE) {
         _resyncNeeded = true;   // hello also carries ble_connected + gateway
+        _wsDropCount++;
         WEB_LOG("WS: broadcast queue full, dropped connection_state (resync scheduled)\n");
     } else {
         WEB_LOG("WS: queued connection_state connected=%d reason=%d\n",
                 connected, reason);
     }
+}
+
+void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
+    JsonDocument doc;
+
+    if (ev.type == WsEvent::Type::UnitState) {
+        doc["type"]   = "unit_state";
+        doc["id"]     = ev.unitId;
+        doc["level"]  = ev.level;
+        doc["online"] = ev.online;
+        doc["on"]     = (ev.level > 0);
+
+        // Enrich with the unit's aux state. Read under g_configMutex so the
+        // fields form one consistent snapshot with the BLE task's writes
+        // (_applyUnitStates). This may reflect an update newer than this
+        // event's level — events are drained within one loop tick, and the
+        // hello resync covers any drop.
+        if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+        CasambiUnit* unit = _config->getUnitById(ev.unitId);
+        if (unit) {
+            if (unit->hasVertical) doc["vertical"]  = unit->vertical;
+            if (unit->hasCCT) {
+                doc["colorTemp"] = unit->colorTemp;
+                doc["cctMin"]    = unit->cctMinKelvin;
+                doc["cctMax"]    = unit->cctMaxKelvin;
+            }
+        }
+        if (g_configMutex) xSemaphoreGive(g_configMutex);
+    } else {
+        doc["type"]      = "connection_state";
+        doc["connected"] = ev.connected;
+        if (ev.reason != 0) doc["reason"] = (int)ev.reason;
+
+        // Gateway info resolved here on the loop task — _gatewayName and
+        // getConnectedAddress take g_configMutex themselves, so this must
+        // stay outside any g_configMutex hold.
+        String gwMac = ev.connected ? _client->getConnectedAddress() : String("");
+        JsonObject gw = doc["gateway"].to<JsonObject>();
+        gw["connected"] = ev.connected;
+        gw["mac"]       = gwMac;
+        gw["name"]      = _gatewayName(gwMac);
+    }
+
+    String msg;
+    serializeJson(doc, msg);
+    _ws->textAll(msg);
 }
 
 // The dynamic POST routes that carry a JSON body. Shared by onRequestBody
@@ -636,7 +651,15 @@ void CasambiWebServer::_setupRoutes() {
                 request->_tempObject = nullptr;
             }
             String* body = new String();
-            body->reserve(total);
+            // reserve() returns false when the heap cannot provide the
+            // capacity. Leave _tempObject null then: every later chunk falls
+            // through the `if (!body)` guard and the handler answers 400
+            // (missing body) — the single-response contract of onNotFound
+            // forbids sending a 503 from this body collector.
+            if (total > 0 && !body->reserve(total)) {
+                delete body;
+                return;
+            }
             request->_tempObject = body;
             request->onDisconnect([request]() {
                 if (request->_tempObject) {
@@ -700,6 +723,8 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["largest_block"] = ESP.getMaxAllocHeap();
     doc["min_free_heap"] = ESP.getMinFreeHeap();
     doc["boot_count"] = EventLog::bootCount();
+    // Broadcast events dropped on a full queue (each triggers a hello resync).
+    doc["ws_drops"] = _wsDropCount.load();
     doc["ntp_server"] = lockedCopy(_config->ntpServer);
 
     // Wall-clock time (UTC). Only meaningful once NTP has synced.

@@ -35,6 +35,23 @@
 #include "../ble/casambi_client.h"
 #include "../cloud/network_config.h"
 
+// A broadcast event posted from the BLE notification task. Plain value type
+// by design: the BLE task enqueues a handful of bytes with NO heap
+// allocation (the previous String*-per-event scheme allocated a
+// JsonDocument, a String and its buffer on every state change — steady heap
+// churn and an unchecked `new` on the BLE task). The loop task builds the
+// JSON at send time, enriching unit events from NetworkConfig under
+// g_configMutex there.
+struct WsEvent {
+    enum class Type : uint8_t { UnitState, ConnectionState };
+    Type type;
+    uint8_t unitId;    // UnitState
+    uint8_t level;     // UnitState
+    bool online;       // UnitState
+    bool connected;    // ConnectionState
+    int8_t reason;     // ConnectionState: DisconnectReason as int (0 = n/a)
+};
+
 // A queued light-control command from a REST handler. Plain value type by
 // design: the async_tcp task validates the request and enqueues the command
 // by value, the loop task dequeues and performs the (potentially seconds-
@@ -177,8 +194,9 @@ private:
     // once in begin().
     String _apiToken;
 
-    // Queue of String* broadcast messages posted from the BLE task and drained
-    // by loop() so _ws->textAll() is always called from the loop task.
+    // Queue of WsEvent values posted from the BLE task and drained by loop()
+    // so _ws->textAll() is always called from the loop task, and no JSON/
+    // String allocation ever happens on the BLE task.
     QueueHandle_t _broadcastQueue;
 
     // Queue of BleCommand values posted by the REST control handlers
@@ -189,8 +207,13 @@ private:
 
     // Set (BLE task) when a broadcast had to be dropped because the queue was
     // full; loop() then pushes a fresh hello snapshot to all clients so nobody
-    // stays stale on a missed unit_state.
+    // stays stale on a missed unit_state. _wsDropCount tracks the total for
+    // diagnostics (/api/status ws_drops).
     std::atomic<bool> _resyncNeeded;
+    std::atomic<uint32_t> _wsDropCount;
+
+    // Build and send the JSON for one dequeued broadcast event (loop task).
+    void _sendWsEvent(const WsEvent& ev);
 
     // Setup route handlers
     void _setupRoutes();
