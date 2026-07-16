@@ -1376,57 +1376,21 @@ void handleCommand(const String& cmd) {
                     newCreds.password = newPassword;
 
                     if (ConfigStore::saveWiFiCredentials(newCreds)) {
-                        g_wifiCreds = newCreds;
-                        g_wifiCredsLoaded = true;
                         Serial.printf("WiFi credentials updated (SSID: %s)\n", newSsid.c_str());
-                        Serial.println("Reconnecting to WiFi...");
 
-                        // Stop web server if running. Publish the nulled
-                        // pointer FIRST and give in-flight users a grace
-                        // period: the BLE task checks `webServer` before
-                        // calling broadcast*() and the async_tcp task may
-                        // still be inside a request handler — deleting
-                        // immediately would be a use-after-free for both.
-                        if (webServer) {
-                            CasambiWebServer* oldServer = webServer;
-                            webServer = nullptr;
-                            delay(250);
-                            oldServer->stop();
-                            delete oldServer;
-                        }
-
-                        // Disconnect old WiFi
-                        WiFi.disconnect();
+                        // Do NOT tear down the running AsyncWebServer and
+                        // re-join WiFi at runtime: deleting the server races
+                        // the async_tcp task (a handler may still be inside a
+                        // request on the old instance — no grace period is
+                        // provably long enough, a control setter alone can
+                        // hold its BLE mutex for 1000 ms) and the BLE task's
+                        // broadcast path. Same rationale as the cloud refresh
+                        // (issue #21): reboot and come up cleanly with the new
+                        // credentials — the boot path loads and connects them.
+                        EventLog::log(LOG_INFO, "WiFi credentials changed via serial; restarting");
+                        Serial.println("Restarting to apply the new WiFi credentials...");
                         delay(500);
-
-                        // Connect to new WiFi
-                        WiFi.mode(WIFI_STA);
-                        WiFi.setAutoReconnect(true);
-                        WiFi.begin(newSsid.c_str(), newPassword.c_str());
-
-                        unsigned long start = millis();
-                        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                            delay(100);
-                            esp_task_wdt_reset();
-                            Serial.print(".");
-                        }
-                        Serial.println();
-
-                        if (WiFi.status() == WL_CONNECTED) {
-                            Serial.printf("WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
-
-                            // Restart web server
-                            if (casambiClient) {
-                                webServer = new CasambiWebServer(casambiClient, &networkConfig);
-                                if (webServer->begin()) {
-                                    Serial.printf("Web API available at: http://%s/api\n",
-                                                  WiFi.localIP().toString().c_str());
-                                }
-                                startMDNS();
-                            }
-                        } else {
-                            Serial.println("WiFi connection failed!");
-                        }
+                        ESP.restart();
                     } else {
                         Serial.println("Failed to save WiFi credentials");
                     }
