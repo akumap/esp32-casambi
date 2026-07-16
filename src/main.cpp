@@ -16,6 +16,7 @@
 #include "cloud/api_client.h"
 #include "storage/config_store.h"
 #include "ble/casambi_client.h"
+#include "ble/packet.h"
 #include "crypto/encryption.h"
 #include "web/webserver.h"
 #include "web/setup_portal.h"
@@ -833,6 +834,13 @@ void printStatus() {
             Serial.printf("  Packets received: %u\n", casambiClient->getReceivedPacketCount());
             Serial.printf("  Connected to: %s\n", casambiClient->getConnectedAddress().c_str());
             Serial.printf("  RSSI: %d dBm\n", casambiClient->getLastRssi());
+        }
+
+        // Strict-parser reject counters (radio corruption / protocol variants)
+        const PacketParseStats& ps = packetParseStats();
+        if (ps.malformed06.load() || ps.malformed07.load() || ps.malformed08.load()) {
+            Serial.printf("  Malformed packets dropped: 0x06=%u 0x07=%u 0x08=%u\n",
+                          ps.malformed06.load(), ps.malformed07.load(), ps.malformed08.load());
         }
 
         if (casambiClient->getLastDisconnectReason() != DisconnectReason::None) {
