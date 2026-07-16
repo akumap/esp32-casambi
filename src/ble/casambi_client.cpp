@@ -234,7 +234,9 @@ void CasambiClient::_disconnectLocked(DisconnectReason reason, const char* sourc
     _authChar = nullptr;
 
     // Acquire _encMutex so that any in-flight BLE-task notification handler
-    // finishes before we free the encryption object.
+    // finishes before we free the encryption object. Holders keep the mutex
+    // only for a single encrypt/decrypt (milliseconds), so this succeeds in
+    // practice; the timeout is a safety net against a wedged holder.
     if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         if (_encryption) {
             delete _encryption;
@@ -242,9 +244,14 @@ void CasambiClient::_disconnectLocked(DisconnectReason reason, const char* sourc
         }
         xSemaphoreGive(_encMutex);
     } else {
-        // Timeout: null the pointer so future callbacks see nullptr; object
-        // leaks but the alternative (use-after-free crash) is worse.
-        _encryption = nullptr;
+        // Timeout: leave _encryption untouched. Deleting it would be a
+        // use-after-free against the holder, and nulling it without the mutex
+        // (the old fallback) both raced the holder's read and leaked the
+        // object. Keeping it is safe: _setState(None) below stops the data
+        // notification paths, senders check isAuthenticated() first, and the
+        // next _performKeyExchange (or the destructor) deletes it under
+        // _encMutex — so the object is reclaimed instead of leaking.
+        EventLog::log(LOG_WARN, "BLE: encMutex busy at disconnect, encryption cleanup deferred");
     }
 
     _setState(ConnectionState::None, reason);
@@ -279,6 +286,16 @@ bool CasambiClient::sendKeepalive() {
     if (millis() - _lastNotificationTime < BLE_KEEPALIVE_IDLE_MS) return true;
 
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+
+    // Re-validate under the lock: between the unlocked pre-check above and
+    // acquiring _mutex, a sender on another task may have detected link loss
+    // and run _disconnectLocked(), nulling _authChar — dereferencing the stale
+    // pointer here would crash. A disconnect already happened then, so just
+    // report failure without triggering another one.
+    if (!isAuthenticated() || !_authChar || !isBLEConnected()) {
+        xSemaphoreGive(_mutex);
+        return false;
+    }
 
     std::string value = _authChar->readValue();
     xSemaphoreGive(_mutex);
