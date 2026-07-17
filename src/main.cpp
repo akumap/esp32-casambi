@@ -21,6 +21,7 @@
 #include "web/webserver.h"
 #include "web/setup_portal.h"
 #include "log/event_log.h"
+#include "serial_args.h"
 #include <ESPmDNS.h>
 
 // Global state
@@ -1122,47 +1123,19 @@ void runScheduledCloudRefresh() {
 // Entity kinds the control commands address.
 enum class SerialEntity : uint8_t { Unit, Group, Scene };
 
+// The parsing itself lives in serial_args.h — pure and host-tested
+// (test/test_serial_args); these wrappers only bind it to Arduino String.
+
 // Parse a decimal integer strictly: the whole trimmed string must be digits
 // (one optional leading '-') and the value must lie within [minV, maxV].
 static bool parseSerialInt(const String& raw, long minV, long maxV, long& out) {
-    String s = raw;
-    s.trim();
-    if (s.length() == 0) return false;
-    unsigned i = 0;
-    bool neg = false;
-    if (s[0] == '-') {
-        neg = true;
-        i = 1;
-        if (s.length() == 1) return false;
-    }
-    long v = 0;
-    for (; i < s.length(); i++) {
-        char c = s[i];
-        if (c < '0' || c > '9') return false;
-        v = v * 10 + (c - '0');
-        if (v > 100000L) return false;   // bound before overflow could occur
-    }
-    if (neg) v = -v;
-    if (v < minV || v > maxV) return false;
-    out = v;
-    return true;
+    return serialargs::parseInt(raw, minV, maxV, out);
 }
 
 // Split a command's argument tail into whitespace-separated tokens.
 // Returns the token count, or -1 when there are more than maxTok tokens.
 static int splitSerialArgs(const String& tail, String* tok, int maxTok) {
-    int n = 0;
-    unsigned i = 0;
-    const unsigned len = tail.length();
-    while (i < len) {
-        while (i < len && tail[i] == ' ') i++;
-        if (i >= len) break;
-        if (n == maxTok) return -1;
-        unsigned start = i;
-        while (i < len && tail[i] != ' ') i++;
-        tok[n++] = tail.substring(start, i);
-    }
-    return n;
+    return serialargs::splitArgs(tail, tok, maxTok);
 }
 
 // Verify the addressed entity exists in the loaded config (same rule as the

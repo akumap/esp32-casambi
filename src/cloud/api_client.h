@@ -97,8 +97,10 @@ private:
     bool _parseNetworkConfig(const String& json, NetworkConfig& config);
 
     // Section parsers. Contract: return false ONLY for a structural error
-    // (invalid key material, duplicate ids, list over its CLOUD_MAX_* cap)
-    // with _lastError set; a well-formed empty section returns true.
+    // (invalid key material, list over its CLOUD_MAX_* cap) with _lastError
+    // set; a well-formed empty section returns true. Cross-section
+    // invariants (duplicate ids, group references) run afterwards via
+    // cloudval::validateStructure (config_invariants.h, host-tested).
     bool _parseKeys(const JsonArrayConst& keysArray, NetworkConfig& config);
     bool _parseUnits(const JsonArrayConst& unitsArray, NetworkConfig& config);
     /** Groups: members referencing unknown units are dropped with a warning

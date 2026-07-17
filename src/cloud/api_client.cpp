@@ -3,6 +3,7 @@
  */
 
 #include "api_client.h"
+#include "config_invariants.h"
 #include <ArduinoJson.h>
 #include <utility>   // std::move for the transactional config commit
 
@@ -329,6 +330,23 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
         }
     }
 
+    // Global structural invariants over the fully parsed result (pure,
+    // host-tested — see config_invariants.h): duplicate ids would make the
+    // getXById() lookups ambiguous, limits bound the heap, and the group-
+    // member check re-verifies the stale-reference filter above.
+    uint8_t badId = 0;
+    cloudval::CloudLimits limits = { CLOUD_MAX_KEYS, CLOUD_MAX_UNITS,
+                                     CLOUD_MAX_GROUPS, CLOUD_MAX_SCENES,
+                                     CLOUD_MAX_GROUP_MEMBERS };
+    cloudval::CloudInvariantResult inv =
+        cloudval::validateStructure(config, limits, &badId);
+    if (inv != cloudval::CLOUD_OK) {
+        _lastError = String(cloudval::cloudInvariantName(inv)) +
+                     " (id " + String(badId) + ")";
+        Serial.printf("Parse: FAILED invariants - %s\n", _lastError.c_str());
+        return false;
+    }
+
     Serial.printf("Parse: Complete - %d keys, %d units, %d groups, %d scenes\n",
                   config.keys.size(), config.units.size(),
                   config.groups.size(), config.scenes.size());
@@ -354,18 +372,12 @@ bool CasambiAPIClient::_parseKeys(const JsonArrayConst& keysArray, NetworkConfig
 
         // Invalid key material is structural corruption, not something to
         // skip: a silently dropped key would make BLE auth fail later with
-        // no hint at the cause. Fail the whole parse instead.
+        // no hint at the cause. Fail the whole parse instead. (Duplicate ids
+        // are caught by the post-parse invariant check in _parseNetworkConfig.)
         String keyHex = keyObj["key"].as<String>();
         if (!_hexToBytes(keyHex, key.key, AES_KEY_SIZE)) {
             _lastError = "invalid AES key hex for '" + key.name + "'";
             return false;
-        }
-
-        for (const auto& existing : config.keys) {
-            if (existing.id == key.id) {
-                _lastError = "duplicate key id " + String(key.id);
-                return false;
-            }
         }
 
         config.keys.push_back(key);
@@ -391,15 +403,6 @@ bool CasambiAPIClient::_parseUnits(const JsonArrayConst& unitsArray, NetworkConf
         CasambiUnit unit;
 
         unit.deviceId = unitObj["deviceID"].as<uint8_t>();
-
-        // Duplicate device ids would make getUnitById() ambiguous — state
-        // updates and control commands would silently hit the wrong entry.
-        for (const auto& existing : config.units) {
-            if (existing.deviceId == unit.deviceId) {
-                _lastError = "duplicate unit deviceID " + String(unit.deviceId);
-                return false;
-            }
-        }
 
         unit.type = unitObj["type"].as<uint16_t>();
         unit.uuid = unitObj["uuid"].as<String>();
@@ -492,13 +495,6 @@ bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfi
         group.groupId = cellObj["groupID"].as<uint8_t>();
         group.name = cellObj["name"].as<String>();
 
-        for (const auto& existing : config.groups) {
-            if (existing.groupId == group.groupId) {
-                _lastError = "duplicate groupID " + String(group.groupId);
-                return false;
-            }
-        }
-
         // Parse group members. A member referencing a unit that is not in
         // the units list is stale cloud data — drop the member with a
         // warning rather than failing the refresh (controlling the rest of
@@ -546,13 +542,6 @@ bool CasambiAPIClient::_parseScenes(const JsonArrayConst& scenesArray, NetworkCo
 
         scene.sceneId = sceneObj["sceneID"].as<uint8_t>();
         scene.name = sceneObj["name"].as<String>();
-
-        for (const auto& existing : config.scenes) {
-            if (existing.sceneId == scene.sceneId) {
-                _lastError = "duplicate sceneID " + String(scene.sceneId);
-                return false;
-            }
-        }
 
         config.scenes.push_back(scene);
         Serial.printf("Parse: Scene [%d] '%s'\n", scene.sceneId, scene.name.c_str());
