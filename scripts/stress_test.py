@@ -21,6 +21,15 @@ The load is organised into PROFILES so you can start gently and ramp up:
              This is the "excessive use" scenario from issue #17 — expected to
              find the breaking point, not to pass cleanly.
 
+Since the command-queue firmware, control POSTs answer 202 (queued) and the
+BLE operation runs asynchronously on the device's loop task. The report
+therefore shows POST outcomes per status code (a rising @503 share = queue
+full / BLE down), the persistent FHEM worker verifies commands END-TO-END
+(accepted POST → matching unit_state push, reported as FHEM/e2e with true
+round-trip latency), and the firmware's own diagnostic counters (ws_drops,
+parse_partial, parse_malformed, min_free_heap) are sampled and reported as
+deltas over the run.
+
 Usage:
     python3 scripts/stress_test.py --host <ESP32_IP> [--profile realistic]
 
@@ -110,6 +119,7 @@ class Stats:
         self.latencies = collections.defaultdict(list)
         self.heap_samples = []   # (free_heap, largest_block|None, monotonic_ts)
         self.status_samples = [] # (boot_count|None, uptime_ms|None, monotonic_ts)
+        self.diag_samples = []   # dicts of firmware diagnostic counters
 
     def record(self, category, success, latency_ms=None):
         with self._lock:
@@ -120,6 +130,10 @@ class Stats:
     def record_status(self, boot_count, uptime_ms):
         with self._lock:
             self.status_samples.append((boot_count, uptime_ms, time.monotonic()))
+
+    def record_diag(self, diag):
+        with self._lock:
+            self.diag_samples.append(diag)
 
     def rebooted(self):
         """True if the device restarted during the run (boot_count jumped or
@@ -174,7 +188,35 @@ class Stats:
             print(f"  {cat:<34}  ok={ok:5d}  err={err:4d}{lat_str}")
 
         self._report_heap()
+        self._report_diag()
         print()
+
+    def _report_diag(self):
+        """First→last deltas of the firmware's cumulative diagnostic counters
+        (they count since boot, so only the growth DURING the run matters)."""
+        with self._lock:
+            samples = list(self.diag_samples)
+        if not samples:
+            return
+        print("\nDevice diagnostics (delta over run):")
+        for key, label in (("ws_drops",        "WS broadcasts dropped"),
+                           ("parse_partial",   "BLE packets partially decoded"),
+                           ("parse_malformed", "BLE packets malformed/dropped")):
+            vals = [s[key] for s in samples if s.get(key) is not None]
+            if not vals:
+                print(f"  {label:<30}: not reported (older firmware)")
+                continue
+            delta = vals[-1] - vals[0]
+            note = "" if delta == 0 else "  <-- investigate"
+            print(f"  {label:<30}: +{delta}{note}")
+        # min_free_heap is an all-time low-water mark: if it dropped during
+        # the run, THIS load produced a new worst-case heap dip.
+        mins = [s["min_free_heap"] for s in samples if s.get("min_free_heap") is not None]
+        if mins:
+            dropped = mins[-1] < mins[0]
+            print(f"  {'min_free_heap (low-water)':<30}: "
+                  f"start={mins[0]//1024}KB end={mins[-1]//1024}KB"
+                  f"{'  <-- new low during this run' if dropped else ''}")
 
     def _report_heap(self):
         if not self.heap_samples:
@@ -234,6 +276,7 @@ def http_get(host, port, path, timeout=5):
 
 
 def http_post(host, port, path, body_bytes, timeout=5):
+    """Returns (status_code|None, latency_ms|None). None status = no response."""
     t0 = time.monotonic()
     try:
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
@@ -248,10 +291,22 @@ def http_post(host, port, path, body_bytes, timeout=5):
         resp = conn.getresponse()
         resp.read()
         conn.close()
-        # 2xx and 4xx are both "handled gracefully"; only 5xx (or no response) is an error.
-        return resp.status < 500, (time.monotonic() - t0) * 1000
+        return resp.status, (time.monotonic() - t0) * 1000
     except Exception:
-        return False, None
+        return None, None
+
+
+def record_post(category, status, lat):
+    """Record a POST outcome with its status code visible in the category
+    (e.g. "POST/control@202"), so the response-code distribution shows up in
+    the per-category report. Since the command-queue firmware, control POSTs
+    answer 202 (queued) and 503 means BLE down OR command queue full — both
+    are handled responses (not device errors), but a rising @503 share under
+    load is exactly the signal worth seeing. Only 5xx / no response count as
+    errors; latency is recorded for 2xx."""
+    handled = status is not None and status < 500
+    cat = f"{category}@{status if status is not None else 'ERR'}"
+    stats.record(cat, handled, lat if (status is not None and 200 <= status < 300) else None)
 
 
 def http_post_abort(host, port, path, partial_body):
@@ -418,9 +473,11 @@ def worker_get_flood(host, port, rate, keepalive=False):
 
 
 def worker_post_control(host, port, period, unit):
-    """POST control commands to the designated test unit ONLY.
-    503 (BLE not connected) counts as ok. Never touches scenes/groups/other
-    units, so no other physical device is switched."""
+    """POST control commands to the designated test unit ONLY. The device
+    answers 202 (command queued; the BLE operation runs on its loop task —
+    end-to-end verification happens in worker_ws_fhem) or 503 (BLE down /
+    queue full). Never touches scenes/groups/other units, so no other
+    physical device is switched."""
     cases = [
         (f"/api/units/{unit}/on",    b""),
         (f"/api/units/{unit}/off",   b""),
@@ -428,13 +485,13 @@ def worker_post_control(host, port, period, unit):
     ]
     while not stop_evt.is_set():
         path, body = random.choice(cases)
-        ok, lat = http_post(host, port, path, body)
-        stats.record("POST/control", ok, lat)
+        status, lat = http_post(host, port, path, body)
+        record_post("POST/control", status, lat)
         stop_evt.wait(period)
 
 
 def worker_post_invalid(host, port, unit):
-    """Sends malformed / semantically wrong bodies — 4xx expected (counts as ok).
+    """Sends malformed / semantically wrong bodies — 4xx expected (handled).
     All target the test unit and are rejected, so nothing is switched/changed."""
     cases = [
         (f"/api/units/{unit}/level",       b"not json"),
@@ -444,8 +501,8 @@ def worker_post_invalid(host, port, unit):
     ]
     while not stop_evt.is_set():
         path, body = random.choice(cases)
-        ok, lat = http_post(host, port, path, body)
-        stats.record("POST/invalid", ok, lat)
+        status, lat = http_post(host, port, path, body)
+        record_post("POST/invalid", status, lat)
         stop_evt.wait(0.1)
 
 
@@ -453,8 +510,8 @@ def worker_post_oversize(host, port, unit):
     """POSTs a body > 512 bytes — device must return 413, not crash (no switch)."""
     body = b'{"level":128,"pad":"' + b"x" * 600 + b'"}'
     while not stop_evt.is_set():
-        ok, lat = http_post(host, port, f"/api/units/{unit}/level", body)
-        stats.record("POST/oversize", ok, lat)
+        status, lat = http_post(host, port, f"/api/units/{unit}/level", body)
+        record_post("POST/oversize", status, lat)
         stop_evt.wait(0.3)
 
 
@@ -494,6 +551,12 @@ def worker_ws_churn(host, port, period):
         stop_evt.wait(period)
 
 
+# A queued control command must surface as a unit_state push within this
+# window (queue drain is one command per ~10 ms loop tick; the BLE round trip
+# plus mesh echo is typically well under a second).
+E2E_TIMEOUT_S = 10.0
+
+
 def worker_ws_fhem(host, port, cmd_period, unit):
     """
     Mirrors the FHEM CasambiGW client: ONE persistent WebSocket that
@@ -502,9 +565,20 @@ def worker_ws_fhem(host, port, cmd_period, unit):
       - sends a client ping periodically (FHEM does every 30s),
       - issues an occasional control POST (user toggling a light),
       - reconnects after a short delay if the link drops (like DevIo).
+
+    Doubles as the END-TO-END check for the command queue: a control POST is
+    only acknowledged with 202 (queued), so HTTP status alone no longer
+    proves the light was switched. After an accepted POST this worker expects
+    the matching unit_state push (right unit id) within E2E_TIMEOUT_S and
+    records the true REST→queue→loopTask→BLE→notification→WS latency as
+    FHEM/e2e. e2e failures while BLE is connected indicate queue starvation
+    or lost commands. The level alternates so the network actually reports a
+    state change.
     """
     last_ping = time.monotonic()
     last_cmd  = time.monotonic()
+    pending_ts = None      # monotonic ts of the accepted-but-unconfirmed POST
+    e2e_level  = 96
     while not stop_evt.is_set():
         s = _ws_connect(host, port)
         if s is None:
@@ -526,6 +600,22 @@ def worker_ws_fhem(host, port, cmd_period, unit):
                     break
             elif opcode in (0, 1):      # data push
                 stats.record("FHEM/push", True)
+                if pending_ts is not None:
+                    try:
+                        msg = json.loads(payload)
+                        if (msg.get("type") == "unit_state"
+                                and msg.get("id") == unit):
+                            stats.record("FHEM/e2e", True,
+                                         (now - pending_ts) * 1000)
+                            pending_ts = None
+                    except Exception:
+                        pass
+
+            # Accepted command never confirmed by a unit_state push → the
+            # command was queued but its effect never came back.
+            if pending_ts is not None and now - pending_ts > E2E_TIMEOUT_S:
+                stats.record("FHEM/e2e", False)
+                pending_ts = None
 
             # Periodic client ping (compressed cadence vs FHEM's 30s).
             if now - last_ping >= 5.0:
@@ -538,15 +628,22 @@ def worker_ws_fhem(host, port, cmd_period, unit):
             # Occasional control command, like a user action (test unit only).
             if cmd_period and now - last_cmd >= cmd_period:
                 last_cmd = now
-                ok, _ = http_post(host, port, f"/api/units/{unit}/level",
-                                  b'{"level":128}')
-                stats.record("FHEM/cmd", ok)
+                e2e_level = 160 if e2e_level == 96 else 96
+                body = json.dumps({"level": e2e_level}).encode()
+                status, _ = http_post(host, port, f"/api/units/{unit}/level", body)
+                record_post("FHEM/cmd", status, None)
+                # Arm the end-to-end expectation only for an accepted command
+                # (202 = queued, 200 = pre-queue firmware) with none pending.
+                if status in (200, 202) and pending_ts is None:
+                    pending_ts = now
 
         s.close()
+        pending_ts = None   # connection lost — a pending confirmation is void
 
 
 def worker_heap_monitor(host, port, interval=4):
-    """Polls /api/status to track device heap.  Runs through cooldown too."""
+    """Polls /api/status to track device heap and the firmware's own
+    diagnostic counters.  Runs through cooldown too."""
     time.sleep(2)
     while not _monitor_stop.is_set():
         ok, _, body = http_get(host, port, "/api/status")
@@ -560,6 +657,14 @@ def worker_heap_monitor(host, port, interval=4):
                 # resets the heap and would otherwise fake a "recovered" verdict).
                 stats.record_status(data.get("boot_count"),
                                     data.get("uptime_ms"))
+                # Firmware diagnostic counters (all None on older firmware):
+                # cumulative since boot, so the report shows first→last deltas.
+                stats.record_diag({
+                    "min_free_heap":   data.get("min_free_heap"),
+                    "ws_drops":        data.get("ws_drops"),
+                    "parse_partial":   data.get("parse_partial"),
+                    "parse_malformed": data.get("parse_malformed"),
+                })
             except Exception:
                 pass
         _monitor_stop.wait(interval)
@@ -590,6 +695,47 @@ def check_reachable(host, port):
         return True
     print(f"ERROR: Device at {host}:{port} is not reachable.")
     return False
+
+
+def check_auth(host, port):
+    """Authenticated pre-flight against /api/status. /api/info (used by
+    check_reachable) is deliberately unauthenticated, so it cannot detect a
+    missing/wrong API token — without this probe a token problem turns the
+    whole run into 90 s of measuring nothing but 401 rejections (empty heap
+    monitor included). Aborts the run on 401."""
+    status = None
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=8)
+        conn.request("GET", "/api/status",
+                     headers=_auth_headers({"Connection": "close"}))
+        resp = conn.getresponse()
+        resp.read()
+        status = resp.status
+        conn.close()
+    except Exception:
+        pass
+
+    if status == 200:
+        print("Auth preflight OK — /api/status readable"
+              + ("" if API_TOKEN else " (device has auth disabled)"))
+        return True
+    if status == 401:
+        print("ERROR: /api/status answers 401 Unauthorized.")
+        if API_TOKEN:
+            print("  The provided --password/--token does not match the "
+                  "device's Casambi password.")
+        else:
+            print("  The device has API auth enabled (Casambi password "
+                  "stored) but no credentials were given.")
+            print("  Re-run with --password '<casambi network password>' "
+                  "(or --token <hex>).")
+        print("  Aborting: the run would only measure auth rejections.")
+        return False
+    # Unexpected but not an auth problem — warn and let the run proceed
+    # (check_reachable already proved basic reachability).
+    print(f"WARNING: auth preflight got HTTP {status} from /api/status — "
+          "continuing anyway.")
+    return True
 
 
 def main():
@@ -686,6 +832,8 @@ def main():
           f" ws_churn={prof['ws_churn']} ws_persistent={prof['ws_persistent']}\n")
 
     if not check_reachable(args.host, args.port):
+        sys.exit(1)
+    if not check_auth(args.host, args.port):
         sys.exit(1)
     print()
 

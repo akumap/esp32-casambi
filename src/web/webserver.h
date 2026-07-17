@@ -9,6 +9,8 @@
  *   {"type":"hello","network":"My Home","ble_connected":true,
  *     "units":[{"id":1,"name":"...","online":true,
  *     "on":true,"level":128,"vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000},...]}
+ *     — carries at most WS_HELLO_MAX_UNITS units; beyond that
+ *       "units_truncated":true is set and clients fetch GET /api/units
  *   {"type":"unit_state","id":1,"level":128,"online":true,"on":true,
  *     "vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000}  – aux fields omitted if unsupported
  *   {"type":"connection_state","connected":true,"reason":0}
@@ -31,8 +33,44 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>   // JsonDocument in the _parseBody/_requireUint8 helpers
 #include <freertos/queue.h>
+#include <atomic>
 #include "../ble/casambi_client.h"
 #include "../cloud/network_config.h"
+
+// A broadcast event posted from the BLE notification task. Plain value type
+// by design: the BLE task enqueues a handful of bytes with NO heap
+// allocation (the previous String*-per-event scheme allocated a
+// JsonDocument, a String and its buffer on every state change — steady heap
+// churn and an unchecked `new` on the BLE task). The loop task builds the
+// JSON at send time, enriching unit events from NetworkConfig under
+// g_configMutex there.
+struct WsEvent {
+    enum class Type : uint8_t { UnitState, ConnectionState };
+    Type type;
+    uint8_t unitId;    // UnitState
+    uint8_t level;     // UnitState
+    bool online;       // UnitState
+    bool connected;    // ConnectionState
+    int8_t reason;     // ConnectionState: DisconnectReason as int (0 = n/a)
+};
+
+// A queued light-control command from a REST handler. Plain value type by
+// design: the async_tcp task validates the request and enqueues the command
+// by value, the loop task dequeues and performs the (potentially seconds-
+// long) BLE operation — no heap allocation, no shared ownership, and the
+// async_tcp task never blocks on the BLE mutex or a GATT write.
+struct BleCommand {
+    enum class Type : uint8_t {
+        SceneLevel, UnitLevel, GroupLevel,
+        UnitVertical, GroupVertical,
+        UnitTemperature, UnitColor,
+        UnitSlider, GroupSlider,
+    };
+    Type type;
+    uint8_t id;         // scene/unit/group id (already validated against config)
+    uint8_t a, b, c;    // level/value (a) or r,g,b depending on type
+    uint16_t kelvin;    // UnitTemperature only
+};
 
 class CasambiWebServer {
 public:
@@ -138,38 +176,46 @@ private:
     // Server state
     bool _running;
 
-    // Set by POST /api/refreshCasambi, drained by the loop task via
-    // consumeRefreshRequest(). volatile because it is written from the async
-    // web-server context and read from the main loop.
-    volatile bool _refreshRequested;
-
-    // Set by POST /api/reboot, drained by the loop task via consumeRebootRequest().
-    volatile bool _rebootRequested;
+    // Request flags: set on the async_tcp task, drained by the loop task via
+    // the consume*() methods (atomic exchange, so a concurrent set cannot be
+    // lost between the check and the clear — volatile only prevented compiler
+    // caching, not the read-modify-write race).
+    std::atomic<bool> _refreshRequested;   // POST /api/refreshCasambi
+    std::atomic<bool> _rebootRequested;    // POST /api/reboot
+    std::atomic<bool> _clearLogRequested;  // DELETE /api/log
 
     // Set by POST /api/ntp, drained by the loop task via consumeNtpRequest().
-    // _pendingNtpServer is written on the async_tcp task and read on the loop
-    // task, so both sides access it under g_configMutex.
-    volatile bool _ntpRequested;
+    // The handoff is transactional: writer and consumer update/read the flag
+    // AND _pendingNtpServer under the same g_configMutex hold, so the flag can
+    // never be observed without its matching server string (or vice versa).
+    std::atomic<bool> _ntpRequested;
     String _pendingNtpServer;
-
-    // Set by DELETE /api/log, drained by the loop task via
-    // consumeClearLogRequest(). The blocking EventLog::clear() must not run on
-    // the async_tcp task, so the handler only raises this flag.
-    volatile bool _clearLogRequested;
 
     // Derived API token (hex of SHA-256(prefix||casambiPassword)). Empty string
     // means authentication is disabled (no Casambi password stored). Computed
     // once in begin().
     String _apiToken;
 
-    // Queue of String* broadcast messages posted from the BLE task and drained
-    // by loop() so _ws->textAll() is always called from the loop task.
+    // Queue of WsEvent values posted from the BLE task and drained by loop()
+    // so _ws->textAll() is always called from the loop task, and no JSON/
+    // String allocation ever happens on the BLE task.
     QueueHandle_t _broadcastQueue;
+
+    // Queue of BleCommand values posted by the REST control handlers
+    // (async_tcp task) and executed one per loop() call on the loop task, so
+    // the up-to-1 s BLE mutex wait and the GATT write never stall the
+    // async_tcp task (head-of-line blocking of all HTTP/WS traffic).
+    QueueHandle_t _bleCmdQueue;
 
     // Set (BLE task) when a broadcast had to be dropped because the queue was
     // full; loop() then pushes a fresh hello snapshot to all clients so nobody
-    // stays stale on a missed unit_state.
-    volatile bool _resyncNeeded;
+    // stays stale on a missed unit_state. _wsDropCount tracks the total for
+    // diagnostics (/api/status ws_drops).
+    std::atomic<bool> _resyncNeeded;
+    std::atomic<uint32_t> _wsDropCount;
+
+    // Build and send the JSON for one dequeued broadcast event (loop task).
+    void _sendWsEvent(const WsEvent& ev);
 
     // Setup route handlers
     void _setupRoutes();
@@ -238,16 +284,19 @@ private:
     bool _requireUint8(AsyncWebServerRequest* request, JsonDocument& doc,
                        const char* key, uint8_t& out);
 
+    // Post a validated control command to _bleCmdQueue and answer the request:
+    // 202 {"success":true,"queued":true} on accept, 503 when the queue is full
+    // (the caller should retry). The BLE operation itself runs later on the
+    // loop task (_executeBleCommand); its outcome is reported via the
+    // WebSocket unit_state events and the event log, not this HTTP response.
+    void _enqueueBleCommand(AsyncWebServerRequest* request, const BleCommand& cmd);
+    // Perform one dequeued command on the loop task; failures go to EventLog.
+    void _executeBleCommand(const BleCommand& cmd);
+
     // Utility methods
     // _sendJsonError also frees a still-buffered POST body (_tempObject), so
     // every rejection path (401/404/413/503/...) cleans up uniformly.
     void _sendJsonError(AsyncWebServerRequest* request, const String& error, int code = 400);
-    void _sendJsonSuccess(AsyncWebServerRequest* request);
-    // 503 for a control command that could not be handed to the BLE GATT stack
-    // (link lost, mutex timeout, encryption/write failure). Never report HTTP
-    // success in this case: the light did not change, so callers (e.g. FHEM)
-    // must not update their state.
-    void _sendBleSendError(AsyncWebServerRequest* request);
     String _getClientIP(AsyncWebServerRequest* request);
 
     // Resolve a gateway BLE MAC to the matching unit name (empty if unknown).

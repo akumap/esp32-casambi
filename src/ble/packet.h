@@ -9,6 +9,8 @@
 
 #include <Arduino.h>
 #include <vector>
+#include <atomic>
+#include "packet_parse.h"   // UnitStateInfo, OperationEcho, pure parser core
 
 // ============================================================================
 // OPERATION CODES (outgoing)
@@ -52,40 +54,8 @@ enum class DataPacketType : uint8_t {
 // ============================================================================
 // PARSED DATA STRUCTURES
 // ============================================================================
-
-/**
- * Parsed unit state from incoming packets
- */
-struct UnitStateInfo {
-    uint8_t unitId;
-    uint8_t level;         // 0-255
-    bool online;
-    bool on;
-    uint8_t vertical;      // 0-255 (light balance)
-    uint16_t colorTemp;    // Kelvin
-    uint8_t colorR, colorG, colorB;
-    bool hasLevel;
-    bool hasVertical;
-    bool hasColorTemp;
-    bool hasColor;
-
-    UnitStateInfo() : unitId(0), level(0), online(false), on(false),
-                      vertical(127), colorTemp(0),
-                      colorR(0), colorG(0), colorB(0),
-                      hasLevel(false), hasVertical(false),
-                      hasColorTemp(false), hasColor(false) {}
-};
-
-/**
- * Parsed operation echo from incoming packets
- */
-struct OperationEcho {
-    uint8_t opcode;
-    uint16_t target;
-    uint8_t targetType;    // TARGET_TYPE_*
-    uint8_t targetId;
-    std::vector<uint8_t> payload;
-};
+// UnitStateInfo and OperationEcho live in packet_parse.h (pure header, shared
+// with the host-side parser tests) and are re-exported via the include above.
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -129,37 +99,48 @@ const char* opcodeName(uint8_t opcode);
  */
 void rgbToHS(uint8_t r, uint8_t g, uint8_t b, uint16_t& hue, uint8_t& sat);
 
+// Firmware-facing parser wrappers around the tolerant three-state core in
+// packet_parse.h. Each returns true when the result is usable — Complete or
+// Partial (well-formed prefix parsed, unknown/undecoded tail dropped; the
+// payload is CMAC-verified, so an unknown tail is a protocol element we do
+// not decode yet, not corruption). false means Malformed: nothing usable,
+// output empty. Partial and malformed packets are counted per type and —
+// with BLE debug enabled — offset and reason are printed.
+
 /**
- * Parse a 0x06 status broadcast packet.
- * These packets contain a variable-length list of unit states
- * describing the current state of units/scenes in the network.
- *
- * Known sub-structure (per unit, within the broadcast):
- *   [unitId:1] [flags:1] [level:1] [optional extended data...]
- *
+ * Parse a 0x06 status broadcast packet (unit state change event).
  * @param data  Decrypted payload (starting AFTER the type byte)
  * @param len   Length of payload
- * @param states Output vector
- * @return true if at least one unit state was parsed
+ * @param states Output vector (empty unless true is returned)
  */
 bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitStateInfo>& states);
 
 /**
- * Parse a 0x07 operation echo packet.
- * These are operations from other controllers (apps, other ESP32s)
- * echoed over the mesh network.
- *
- * Structure (after type byte):
- *   [flags:2 big-endian] [opcode:1] [origin:2 big-endian]
- *   [target:2 big-endian] [reserved:2] [payload...]
+ * Parse a 0x07 operation echo packet (operations from other controllers).
  */
 bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo);
 
 /**
  * Parse a 0x08 unit state update packet.
- * Sent when individual unit states change.
  */
 bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitStateInfo>& states);
+
+/**
+ * Counters per packet type: `partial*` = packets whose understood prefix was
+ * applied while an undecoded tail was dropped (protocol element we do not
+ * know yet — worth investigating when it grows), `malformed*` = packets that
+ * yielded nothing usable. Written on the NimBLE host task, read for
+ * diagnostics (serial `status`) — atomics so cross-task reads are defined.
+ */
+struct PacketParseStats {
+    std::atomic<uint32_t> partial06{0};
+    std::atomic<uint32_t> partial07{0};
+    std::atomic<uint32_t> partial08{0};
+    std::atomic<uint32_t> malformed06{0};
+    std::atomic<uint32_t> malformed07{0};
+    std::atomic<uint32_t> malformed08{0};
+};
+const PacketParseStats& packetParseStats();
 
 /**
  * Hex dump helper for debug output
