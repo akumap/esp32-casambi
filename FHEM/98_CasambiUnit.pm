@@ -61,6 +61,12 @@ sub CasambiUnit_Define {
 
     my ($name, undef, $gwName, $mac) = @args;
 
+    # Canonicalize the MAC (lowercase, colon-free) so it matches the normalized
+    # keys CasambiGW uses for unit lookup. The Casambi cloud reports addresses
+    # with or without colons; storing a consistent form keeps matching robust.
+    $mac =~ s/://g;
+    $mac = lc $mac;
+
     $hash->{GW_NAME}         = $gwName;
     $hash->{UPDATING_STATUS} = 0;
 
