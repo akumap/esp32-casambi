@@ -1,11 +1,13 @@
 /**
- * Host-side unit and fuzz tests for the strict BLE packet parsers (P2 #8).
+ * Host-side unit and fuzz tests for the tolerant BLE packet parsers (P2 #8).
  *
  * These run on the build host via `pio test -e native` — no ESP32 required.
- * They pin down the strict all-or-nothing contract of packet_parse.h: a
- * parser returns Complete only when the whole payload was consumed exactly,
- * and on Malformed the output is empty (a corrupted packet can never apply a
- * partial state update).
+ * They pin down the three-state contract of packet_parse.h: Complete = whole
+ * payload understood; Partial = the well-formed prefix IS returned and the
+ * undecoded tail dropped (payloads are CMAC-verified, so unknown bytes are
+ * protocol elements we do not decode yet — the known parts must keep
+ * working); Malformed = nothing usable, output empty. A parser never
+ * fabricates state from bytes it did not understand.
  */
 
 #include <unity.h>
@@ -74,14 +76,14 @@ void test_06_cap03_constant_ok(void) {
     TEST_ASSERT_EQUAL(128, states[0].level);
 }
 
-// NEW strict rule: the constant byte must actually be 0x80
-void test_06_cap03_constant_wrong_rejected(void) {
+// TOLERANCE: an unexpected constant-byte value does not change the record
+// length, so the record still parses — the byte may be an undecoded flag.
+void test_06_cap03_constant_other_value_tolerated(void) {
     const uint8_t pkt[] = { 5, 0x03, 0x03, 0x7F, 128 };
-    ParseDiag diag;
-    TEST_ASSERT_EQUAL(ParseStatus::Malformed,
-                      packetparse::parseStatusBroadcast(pkt, sizeof(pkt), states, &diag));
-    TEST_ASSERT_TRUE(states.empty());
-    TEST_ASSERT_EQUAL(3, diag.offset);
+    TEST_ASSERT_EQUAL(ParseStatus::Complete,
+                      packetparse::parseStatusBroadcast(pkt, sizeof(pkt), states));
+    TEST_ASSERT_EQUAL(1, states.size());
+    TEST_ASSERT_EQUAL(128, states[0].level);
 }
 
 // cap 0x13: one aux channel
@@ -119,36 +121,50 @@ void test_06_multiple_records(void) {
     TEST_ASSERT_EQUAL(2, states[1].unitId);
 }
 
-// NEW strict rule: a valid record followed by garbage rejects the WHOLE
-// packet — no partial state update.
-void test_06_valid_then_truncated_rejected(void) {
+// TOLERANCE: a valid record followed by a truncated one keeps the valid
+// prefix (Partial) — the tail is dropped, never guessed at.
+void test_06_valid_then_truncated_partial(void) {
     const uint8_t pkt[] = {
         1, 0x03, 0x00, 100,     // valid record
         2, 0x03, 0x23, 200,     // truncated 2-aux record
     };
-    TEST_ASSERT_EQUAL(ParseStatus::Malformed,
+    TEST_ASSERT_EQUAL(ParseStatus::Partial,
                       packetparse::parseStatusBroadcast(pkt, sizeof(pkt), states));
-    TEST_ASSERT_TRUE(states.empty());
+    TEST_ASSERT_EQUAL(1, states.size());
+    TEST_ASSERT_EQUAL(1, states[0].unitId);
+    TEST_ASSERT_EQUAL(100, states[0].level);
 }
 
-void test_06_valid_then_bad_cap_rejected(void) {
+// TOLERANCE: an unknown capability means an unknown record length — keep the
+// understood prefix, drop the rest.
+void test_06_valid_then_unknown_cap_partial(void) {
     const uint8_t pkt[] = {
         1, 0x03, 0x00, 100,     // valid record
-        2, 0x03, 0x44, 200,     // invalid capability 0x44
+        2, 0x03, 0x44, 200,     // unknown capability 0x44
     };
     ParseDiag diag;
-    TEST_ASSERT_EQUAL(ParseStatus::Malformed,
+    TEST_ASSERT_EQUAL(ParseStatus::Partial,
                       packetparse::parseStatusBroadcast(pkt, sizeof(pkt), states, &diag));
-    TEST_ASSERT_TRUE(states.empty());
+    TEST_ASSERT_EQUAL(1, states.size());
+    TEST_ASSERT_EQUAL(1, states[0].unitId);
     TEST_ASSERT_EQUAL(6, diag.offset);
 }
 
-// NEW strict rule: trailing bytes (< header size) reject the packet
-void test_06_trailing_bytes_rejected(void) {
-    const uint8_t pkt[] = { 1, 0x03, 0x00, 100, 0xAA };
+// ...but when already the FIRST record is not understood there is nothing to
+// keep: Malformed, empty.
+void test_06_unknown_cap_first_record_malformed(void) {
+    const uint8_t pkt[] = { 2, 0x03, 0x44, 200 };
     TEST_ASSERT_EQUAL(ParseStatus::Malformed,
                       packetparse::parseStatusBroadcast(pkt, sizeof(pkt), states));
     TEST_ASSERT_TRUE(states.empty());
+}
+
+// TOLERANCE: trailing bytes after valid records keep the records (Partial)
+void test_06_trailing_bytes_partial(void) {
+    const uint8_t pkt[] = { 1, 0x03, 0x00, 100, 0xAA };
+    TEST_ASSERT_EQUAL(ParseStatus::Partial,
+                      packetparse::parseStatusBroadcast(pkt, sizeof(pkt), states));
+    TEST_ASSERT_EQUAL(1, states.size());
 }
 
 void test_06_too_short_rejected(void) {
@@ -198,8 +214,10 @@ void test_07_empty_payload_ok(void) {
     TEST_ASSERT_TRUE(echo.payload.empty());
 }
 
-// NEW strict rule: declared length > received payload → Malformed (was:
-// copy what is there and report success)
+// Declared length > received payload stays Malformed: the packet arrived
+// MAC-verified, so our length-field interpretation does not fit it — a
+// truncated operation payload must not be acted on (was: copy what is there
+// and report success).
 void test_07_declared_longer_rejected(void) {
     auto pkt = makeEcho(5, 2);
     TEST_ASSERT_EQUAL(ParseStatus::Malformed,
@@ -207,11 +225,16 @@ void test_07_declared_longer_rejected(void) {
     TEST_ASSERT_TRUE(echo.payload.empty());
 }
 
-// NEW strict rule: extra bytes beyond the declared length → Malformed
-void test_07_declared_shorter_rejected(void) {
+// TOLERANCE: extra bytes beyond the declared length are dropped (Partial) —
+// a newer protocol revision may append fields after the payload.
+void test_07_trailing_bytes_partial(void) {
     auto pkt = makeEcho(1, 3);
-    TEST_ASSERT_EQUAL(ParseStatus::Malformed,
-                      packetparse::parseOperationEcho(pkt.data(), pkt.size(), echo));
+    ParseDiag diag;
+    TEST_ASSERT_EQUAL(ParseStatus::Partial,
+                      packetparse::parseOperationEcho(pkt.data(), pkt.size(), echo, &diag));
+    TEST_ASSERT_EQUAL(1, echo.payload.size());   // exactly the declared length
+    TEST_ASSERT_EQUAL(0x40, echo.payload[0]);
+    TEST_ASSERT_EQUAL(10, diag.offset);          // 9-byte header + 1 declared
 }
 
 void test_07_header_truncated_rejected(void) {
@@ -238,14 +261,18 @@ void test_08_pairs_ok(void) {
     TEST_ASSERT_EQUAL(200, states[1].level);
 }
 
-// NEW strict rule: an odd trailing byte rejects the packet (was: silently
-// ignored)
-void test_08_odd_trailing_byte_rejected(void) {
+// TOLERANCE: an odd trailing byte is dropped, the complete pairs are kept
+// (Partial) — and no longer silently, the diag/counter records it.
+void test_08_odd_trailing_byte_partial(void) {
     const uint8_t pkt[] = { 1, 100, 2 };
-    // len 3 < 4 → cannot be 0x06 format, and odd → Malformed
-    TEST_ASSERT_EQUAL(ParseStatus::Malformed,
-                      packetparse::parseUnitStateUpdate(pkt, sizeof(pkt), states));
-    TEST_ASSERT_TRUE(states.empty());
+    // len 3 < 4 → cannot be 0x06 format → pair list with one trailing byte
+    ParseDiag diag;
+    TEST_ASSERT_EQUAL(ParseStatus::Partial,
+                      packetparse::parseUnitStateUpdate(pkt, sizeof(pkt), states, &diag));
+    TEST_ASSERT_EQUAL(1, states.size());
+    TEST_ASSERT_EQUAL(1, states[0].unitId);
+    TEST_ASSERT_EQUAL(100, states[0].level);
+    TEST_ASSERT_EQUAL(2, diag.offset);
 }
 
 void test_08_too_short_rejected(void) {
@@ -274,7 +301,9 @@ void test_08_bad_06_format_rejected(void) {
 
 // ---------------------------------------------------------------------------
 // Fuzz: random, truncated and mutated packets must never crash and must
-// honor the all-or-nothing contract.
+// honor the three-state contract: Complete/Partial ⇒ usable non-empty
+// output, Malformed ⇒ empty output. A parser never returns records it did
+// not fully understand.
 // ---------------------------------------------------------------------------
 
 // Deterministic 32-bit LCG (Numerical Recipes constants) — reproducible runs.
@@ -288,17 +317,18 @@ void test_fuzz_random_buffers(void) {
         for (size_t i = 0; i < len; i++) buf[i] = (uint8_t)(lcg(seed) >> 24);
 
         ParseStatus st = packetparse::parseStatusBroadcast(buf, len, states);
-        if (st == ParseStatus::Complete) TEST_ASSERT_FALSE(states.empty());
-        else                             TEST_ASSERT_TRUE(states.empty());
+        if (st == ParseStatus::Malformed) TEST_ASSERT_TRUE(states.empty());
+        else                              TEST_ASSERT_FALSE(states.empty());
 
         st = packetparse::parseUnitStateUpdate(buf, len, states);
-        if (st == ParseStatus::Complete) TEST_ASSERT_FALSE(states.empty());
-        else                             TEST_ASSERT_TRUE(states.empty());
+        if (st == ParseStatus::Malformed) TEST_ASSERT_TRUE(states.empty());
+        else                              TEST_ASSERT_FALSE(states.empty());
 
         st = packetparse::parseOperationEcho(buf, len, echo);
         if (st == ParseStatus::Complete) {
-            // declared length must have matched exactly
-            TEST_ASSERT_EQUAL(len - 9, echo.payload.size());
+            TEST_ASSERT_EQUAL(len - 9, echo.payload.size());   // declared == actual
+        } else if (st == ParseStatus::Partial) {
+            TEST_ASSERT_TRUE(echo.payload.size() < len - 9);   // declared < actual
         } else {
             TEST_ASSERT_TRUE(echo.payload.empty());
         }
@@ -306,8 +336,9 @@ void test_fuzz_random_buffers(void) {
 }
 
 // Fuzz around valid packets: build a well-formed 0x06 packet, then truncate
-// or mutate single bytes. Every truncation must be rejected; mutations must
-// never produce a partial result (either Complete with records or empty).
+// or mutate single bytes. Truncations degrade gracefully: the intact leading
+// records are kept (Partial), never guessed-at fragments; cuts at record
+// boundaries parse Complete.
 void test_fuzz_truncated_and_mutated_valid_packets(void) {
     const uint8_t base[] = {
         1, 0x03, 0x00, 100,
@@ -320,28 +351,33 @@ void test_fuzz_truncated_and_mutated_valid_packets(void) {
                       packetparse::parseStatusBroadcast(base, baseLen, states));
     TEST_ASSERT_EQUAL(3, states.size());
 
-    // Every proper prefix must be rejected outright (records end exactly at
-    // offsets 4, 10 and 16 — but a strict parser rejects even those cuts'
-    // siblings; prefixes that ARE valid record sequences parse Complete).
+    // Record boundaries lie at offsets 4, 10 and 16. Cuts on a boundary are
+    // Complete; cuts inside record 1 (0-3) leave nothing usable (Malformed);
+    // cuts inside later records keep the intact leading records (Partial).
     for (size_t cut = 0; cut < baseLen; cut++) {
         ParseStatus st = packetparse::parseStatusBroadcast(base, cut, states);
         if (cut == 4 || cut == 10) {
-            TEST_ASSERT_EQUAL(ParseStatus::Complete, st);   // valid record boundary
-        } else {
+            TEST_ASSERT_EQUAL(ParseStatus::Complete, st);
+            TEST_ASSERT_EQUAL(cut == 4 ? 1 : 2, states.size());
+        } else if (cut < 4) {
             TEST_ASSERT_EQUAL(ParseStatus::Malformed, st);
             TEST_ASSERT_TRUE(states.empty());
+        } else {
+            TEST_ASSERT_EQUAL(ParseStatus::Partial, st);
+            TEST_ASSERT_EQUAL(cut < 10 ? 1 : 2, states.size());
         }
     }
 
-    // Single-byte mutations: all-or-nothing must hold for every outcome.
+    // Single-byte mutations: whatever the outcome, the contract must hold —
+    // Malformed is empty, everything else carries only fully-parsed records.
     uint32_t seed = 0xDEADBEEF;
     uint8_t buf[sizeof(base)];
     for (int iter = 0; iter < 5000; iter++) {
         memcpy(buf, base, baseLen);
         buf[lcg(seed) % baseLen] = (uint8_t)(lcg(seed) >> 24);
         ParseStatus st = packetparse::parseStatusBroadcast(buf, baseLen, states);
-        if (st == ParseStatus::Complete) TEST_ASSERT_FALSE(states.empty());
-        else                             TEST_ASSERT_TRUE(states.empty());
+        if (st == ParseStatus::Malformed) TEST_ASSERT_TRUE(states.empty());
+        else                              TEST_ASSERT_FALSE(states.empty());
     }
 }
 
@@ -354,23 +390,24 @@ int main(int argc, char** argv) {
     RUN_TEST(test_06_offline_source);
     RUN_TEST(test_06_stored_level_skipped);
     RUN_TEST(test_06_cap03_constant_ok);
-    RUN_TEST(test_06_cap03_constant_wrong_rejected);
+    RUN_TEST(test_06_cap03_constant_other_value_tolerated);
     RUN_TEST(test_06_one_aux);
     RUN_TEST(test_06_two_aux);
     RUN_TEST(test_06_multiple_records);
-    RUN_TEST(test_06_valid_then_truncated_rejected);
-    RUN_TEST(test_06_valid_then_bad_cap_rejected);
-    RUN_TEST(test_06_trailing_bytes_rejected);
+    RUN_TEST(test_06_valid_then_truncated_partial);
+    RUN_TEST(test_06_valid_then_unknown_cap_partial);
+    RUN_TEST(test_06_unknown_cap_first_record_malformed);
+    RUN_TEST(test_06_trailing_bytes_partial);
     RUN_TEST(test_06_too_short_rejected);
 
     RUN_TEST(test_07_exact_length_ok);
     RUN_TEST(test_07_empty_payload_ok);
     RUN_TEST(test_07_declared_longer_rejected);
-    RUN_TEST(test_07_declared_shorter_rejected);
+    RUN_TEST(test_07_trailing_bytes_partial);
     RUN_TEST(test_07_header_truncated_rejected);
 
     RUN_TEST(test_08_pairs_ok);
-    RUN_TEST(test_08_odd_trailing_byte_rejected);
+    RUN_TEST(test_08_odd_trailing_byte_partial);
     RUN_TEST(test_08_too_short_rejected);
     RUN_TEST(test_08_delegates_to_06_format);
     RUN_TEST(test_08_bad_06_format_rejected);

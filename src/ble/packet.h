@@ -99,12 +99,13 @@ const char* opcodeName(uint8_t opcode);
  */
 void rgbToHS(uint8_t r, uint8_t g, uint8_t b, uint16_t& hue, uint8_t& sat);
 
-// Firmware-facing parser wrappers around the strict pure core in
-// packet_parse.h. Each returns true only when the ENTIRE payload parsed
-// cleanly (ParseStatus::Complete); on any structural defect the output is
-// empty, the matching malformed counter is bumped and — with BLE debug
-// enabled — offset and reason are printed. Callers must not apply any state
-// from a false return (there is none).
+// Firmware-facing parser wrappers around the tolerant three-state core in
+// packet_parse.h. Each returns true when the result is usable — Complete or
+// Partial (well-formed prefix parsed, unknown/undecoded tail dropped; the
+// payload is CMAC-verified, so an unknown tail is a protocol element we do
+// not decode yet, not corruption). false means Malformed: nothing usable,
+// output empty. Partial and malformed packets are counted per type and —
+// with BLE debug enabled — offset and reason are printed.
 
 /**
  * Parse a 0x06 status broadcast packet (unit state change event).
@@ -125,11 +126,16 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo);
 bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitStateInfo>& states);
 
 /**
- * Counters of packets rejected as malformed, per packet type. Written on the
- * NimBLE host task, read for diagnostics (serial `status`) — atomics so the
- * cross-task reads are well-defined.
+ * Counters per packet type: `partial*` = packets whose understood prefix was
+ * applied while an undecoded tail was dropped (protocol element we do not
+ * know yet — worth investigating when it grows), `malformed*` = packets that
+ * yielded nothing usable. Written on the NimBLE host task, read for
+ * diagnostics (serial `status`) — atomics so cross-task reads are defined.
  */
 struct PacketParseStats {
+    std::atomic<uint32_t> partial06{0};
+    std::atomic<uint32_t> partial07{0};
+    std::atomic<uint32_t> partial08{0};
     std::atomic<uint32_t> malformed06{0};
     std::atomic<uint32_t> malformed07{0};
     std::atomic<uint32_t> malformed08{0};

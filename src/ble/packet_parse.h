@@ -5,16 +5,25 @@
  * so the exact parsing logic the firmware runs can be exercised by host-side
  * unit and fuzz tests (`pio test -e native`, test/test_packet_parse).
  * The firmware-facing wrappers in packet.cpp add debug logging and the
- * malformed-packet counters around these functions.
+ * partial/malformed counters around these functions.
  *
- * Parsing is STRICT and all-or-nothing: a parser returns Complete only when
- * the entire payload was consumed exactly and every record was structurally
- * valid. On any defect it returns Malformed with the offending offset and a
- * static reason string, and the output is left EMPTY — a corrupted packet can
- * therefore never apply a partial state update (drift after radio corruption
- * or protocol deviations). The protocol is reverse-engineered; if a legitimate
- * device variant trips a strict check, the wrapper's hexdump plus the diag
- * reason identify it so the rule can be adjusted deliberately.
+ * Parsing is TOLERANT-BUT-HONEST, three-state:
+ *
+ *   Complete  — the whole payload was consumed and understood.
+ *   Partial   — a well-formed prefix was parsed and IS returned; the rest of
+ *               the payload was not understood (unknown capability, truncated
+ *               tail record, trailing bytes) and is dropped. Diag says where
+ *               and why.
+ *   Malformed — nothing usable; the output is empty.
+ *
+ * Rationale for tolerance: these payloads arrive decrypted AND CMAC-verified,
+ * so radio corruption never reaches the parser — bytes we do not understand
+ * are almost certainly protocol elements the reverse-engineering has not
+ * covered (yet) or a newer protocol revision. The known parts must keep
+ * working then: the understood prefix is applied, the unknown tail is dropped
+ * and counted (never guessed at), and a packet is Malformed only when it
+ * yields nothing usable at all. Callers may apply results for Complete AND
+ * Partial; a parser never fabricates state from bytes it did not understand.
  *
  * 0x06 status broadcast — one record per changed unit:
  *
@@ -32,7 +41,8 @@
  *            0x03 = simple device, 0 aux, HAS constant byte (0x80)
  *            0x13 = 1 aux (brightness + temp OR vertical)
  *            0x23 = 2 aux (brightness + vertical + temp)
- *   [0x80]           — only if cap == 0x03 exactly (value verified)
+ *   [0x80]           — only if cap == 0x03 exactly (value observed as 0x80,
+ *                      tolerated if different — possibly an undecoded flag)
  *   [stored_level]   — only if flags bit 4 set (previous brightness)
  *   Brightness       — current output level 0-255
  *   [Aux1]           — if aux_count >= 1 (vertical or temp, device-dependent)
@@ -85,11 +95,12 @@ struct OperationEcho {
 namespace packetparse {
 
 enum class ParseStatus : uint8_t {
-    Complete,   // whole payload consumed, all records valid, output filled
-    Malformed,  // structural defect — output cleared, see ParseDiag
+    Complete,   // whole payload consumed and understood, output filled
+    Partial,    // understood prefix returned, unknown tail dropped (see diag)
+    Malformed,  // nothing usable — output empty, see diag
 };
 
-// Where and why a parse failed (valid only when Malformed is returned).
+// Where and why parsing stopped (set for Partial and Malformed).
 // `reason` is always a static string, never nullptr.
 struct ParseDiag {
     size_t offset;
@@ -115,11 +126,16 @@ inline size_t recordLength(uint8_t flags, uint8_t cap) {
     return 3 + hasConst + hasPrev + 1 + auxCount;
 }
 
-inline ParseStatus fail(std::vector<UnitStateInfo>* states, ParseDiag* diag,
-                        size_t offset, const char* reason) {
-    if (states) states->clear();
+inline void setDiag(ParseDiag* diag, size_t offset, const char* reason) {
     if (diag) { diag->offset = offset; diag->reason = reason; }
-    return ParseStatus::Malformed;
+}
+
+// Stop parsing at `offset` for `reason`: keep the records understood so far
+// (Partial) — or report Malformed when there is nothing usable to keep.
+inline ParseStatus stop(std::vector<UnitStateInfo>& states, ParseDiag* diag,
+                        size_t offset, const char* reason) {
+    setDiag(diag, offset, reason);
+    return states.empty() ? ParseStatus::Malformed : ParseStatus::Partial;
 }
 
 }  // namespace detail
@@ -127,8 +143,9 @@ inline ParseStatus fail(std::vector<UnitStateInfo>* states, ParseDiag* diag,
 /**
  * Parse a 0x06 status broadcast (unit state change event).
  * `data`/`len` is the decrypted payload AFTER the type byte.
- * Complete ⇒ `states` holds at least one record and `len` was consumed
- * exactly; Malformed ⇒ `states` is empty.
+ * Complete ⇒ `len` consumed exactly, ≥1 record. Partial ⇒ `states` holds the
+ * well-formed leading records; the tail (unknown capability = unknown record
+ * length, truncated record, leftover bytes) was dropped. Malformed ⇒ empty.
  */
 inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
                                         std::vector<UnitStateInfo>& states,
@@ -137,24 +154,27 @@ inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
     states.clear();
 
     // Shortest possible record (cap 0x00, no prev): 4 bytes.
-    if (len < 4) return fail(&states, diag, 0, "packet shorter than one record");
+    if (len < 4) return stop(states, diag, 0, "packet shorter than one record");
 
     size_t offset = 0;
     while (offset < len) {
         if (offset + 3 > len) {
-            return fail(&states, diag, offset, "truncated record header");
+            return stop(states, diag, offset, "trailing bytes (no room for a record)");
         }
         uint8_t unitId = data[offset];
         uint8_t flags  = data[offset + 1];
         uint8_t cap    = data[offset + 2];
 
+        // An unknown capability means an unknown record LENGTH — nothing
+        // after this point can be located reliably, so keep what was
+        // understood and drop the rest (never guess at record boundaries).
         if (!isValidCap(cap)) {
-            return fail(&states, diag, offset + 2, "unknown capability byte");
+            return stop(states, diag, offset + 2, "unknown capability byte");
         }
 
         size_t recordLen = recordLength(flags, cap);
         if (offset + recordLen > len) {
-            return fail(&states, diag, offset, "truncated record");
+            return stop(states, diag, offset, "truncated record");
         }
 
         uint8_t auxCount = (cap >> 4) & 0x0F;
@@ -172,12 +192,10 @@ inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
 
         size_t pos = offset + 3;
 
-        // Constant byte — documented as always 0x80; anything else marks a
-        // record layout we do not actually understand.
+        // Constant byte — observed as 0x80 so far. The record length is known
+        // regardless of its value, so a different value is tolerated (it may
+        // simply be a flag byte the reverse-engineering has not decoded yet).
         if (hasConst) {
-            if (data[pos] != 0x80) {
-                return fail(&states, diag, pos, "constant byte != 0x80");
-            }
             pos++;
         }
 
@@ -208,8 +226,8 @@ inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
         offset += recordLen;
     }
 
-    // The loop exits only at offset == len (every over-run is caught above),
-    // so the payload is consumed exactly and at least one record was parsed.
+    // The loop exits only at offset == len (every over-run stops above), so
+    // the payload was consumed exactly and at least one record was parsed.
     return ParseStatus::Complete;
 }
 
@@ -218,7 +236,11 @@ inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
  * Structure (after type byte):
  *   [flags:2 BE, low 11 bits = payload length] [opcode:1] [origin:2 BE]
  *   [target:2 BE] [reserved:2] [payload...]
- * The declared payload length must match the received length exactly.
+ * Exactly the DECLARED payload length is used. Extra trailing bytes beyond it
+ * are tolerated and dropped (Partial) — a newer protocol revision may append
+ * fields. A payload SHORTER than declared is Malformed: the packet arrived
+ * MAC-verified, so the length-field interpretation does not fit this packet,
+ * and a truncated operation payload must not be acted on.
  */
 inline ParseStatus parseOperationEcho(const uint8_t* data, size_t len,
                                       OperationEcho& echo,
@@ -227,7 +249,7 @@ inline ParseStatus parseOperationEcho(const uint8_t* data, size_t len,
     echo.payload.clear();
 
     if (len < 9) {
-        if (diag) { diag->offset = 0; diag->reason = "header truncated (need 9 bytes)"; }
+        setDiag(diag, 0, "header truncated (need 9 bytes)");
         return ParseStatus::Malformed;
     }
 
@@ -235,13 +257,8 @@ inline ParseStatus parseOperationEcho(const uint8_t* data, size_t len,
     size_t declaredLen = flags & 0x07FF;
     size_t actualLen   = len - 9;
 
-    if (declaredLen != actualLen) {
-        if (diag) {
-            diag->offset = 9;
-            diag->reason = (declaredLen > actualLen)
-                               ? "payload shorter than declared"
-                               : "payload longer than declared";
-        }
+    if (declaredLen > actualLen) {
+        setDiag(diag, 9, "payload shorter than declared");
         return ParseStatus::Malformed;
     }
 
@@ -252,15 +269,21 @@ inline ParseStatus parseOperationEcho(const uint8_t* data, size_t len,
     if (declaredLen > 0) {
         echo.payload.assign(data + 9, data + 9 + declaredLen);
     }
+
+    if (declaredLen < actualLen) {
+        setDiag(diag, 9 + declaredLen, "trailing bytes beyond declared payload");
+        return ParseStatus::Partial;
+    }
     return ParseStatus::Complete;
 }
 
 /**
  * Parse a 0x08 unit state update.
  * When byte 2 looks like a valid 0x06 capability the packet is parsed with
- * the 0x06 record format (strictly, no fallback on failure — a packet that
- * announces the record format must honor it). Otherwise the payload must be
- * an exact sequence of [unitId][level] pairs.
+ * the (tolerant) 0x06 record format — no fall-back to pair interpretation on
+ * failure, record boundaries would be guesswork then. Otherwise the payload
+ * is read as [unitId][level] pairs; a trailing odd byte is tolerated and
+ * dropped (Partial).
  */
 inline ParseStatus parseUnitStateUpdate(const uint8_t* data, size_t len,
                                         std::vector<UnitStateInfo>& states,
@@ -268,17 +291,13 @@ inline ParseStatus parseUnitStateUpdate(const uint8_t* data, size_t len,
     using namespace detail;
     states.clear();
 
-    if (len < 2) return fail(&states, diag, 0, "packet shorter than one pair");
+    if (len < 2) return stop(states, diag, 0, "packet shorter than one pair");
 
     if (len >= 4 && isValidCap(data[2])) {
         return parseStatusBroadcast(data, len, states, diag);
     }
 
-    if (len % 2 != 0) {
-        return fail(&states, diag, len - 1, "trailing byte in pair list");
-    }
-
-    for (size_t offset = 0; offset < len; offset += 2) {
+    for (size_t offset = 0; offset + 1 < len; offset += 2) {
         UnitStateInfo info;
         info.unitId = data[offset];
         info.level = data[offset + 1];
@@ -286,6 +305,10 @@ inline ParseStatus parseUnitStateUpdate(const uint8_t* data, size_t len,
         info.online = true;
         info.hasLevel = true;
         states.push_back(info);
+    }
+
+    if (len % 2 != 0) {
+        return stop(states, diag, len - 1, "trailing odd byte in pair list");
     }
     return ParseStatus::Complete;
 }

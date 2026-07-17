@@ -279,6 +279,13 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
     // invalid key hex, duplicate ids, oversized lists — fails the WHOLE
     // parse. A partial configuration must never be committed or persisted:
     // it would silently drop units/keys and drift from the real network.
+    //
+    // This stays tolerant toward cloud API EVOLUTION: unknown JSON fields
+    // and sections are ignored by construction (only known keys are read),
+    // and stale references are dropped, not fatal. The hard failures above
+    // are internal inconsistencies no API revision produces legitimately —
+    // and failing keeps the previously working config in place, which is
+    // the operationally tolerant outcome.
 
     // Parse keyStore (Evolution networks)
     if (network["keyStore"].is<JsonObjectConst>()) {

@@ -89,14 +89,21 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
     }
 
     packetparse::ParseDiag diag;
-    if (packetparse::parseStatusBroadcast(data, len, states, &diag)
-            != packetparse::ParseStatus::Complete) {
+    packetparse::ParseStatus st = packetparse::parseStatusBroadcast(data, len, states, &diag);
+    if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed06++;
         if (bleDebugEnabled) {
             Serial.printf("PARSE 0x06: malformed at offset %u: %s (packet dropped)\n",
                           (unsigned)diag.offset, diag.reason);
         }
         return false;
+    }
+    if (st == packetparse::ParseStatus::Partial) {
+        g_parseStats.partial06++;
+        if (bleDebugEnabled) {
+            Serial.printf("PARSE 0x06: partial — %u record(s) applied, tail dropped at offset %u: %s\n",
+                          (unsigned)states.size(), (unsigned)diag.offset, diag.reason);
+        }
     }
 
     if (bleDebugEnabled && !states.empty()) {
@@ -139,14 +146,21 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
     }
 
     packetparse::ParseDiag diag;
-    if (packetparse::parseOperationEcho(data, len, echo, &diag)
-            != packetparse::ParseStatus::Complete) {
+    packetparse::ParseStatus st = packetparse::parseOperationEcho(data, len, echo, &diag);
+    if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed07++;
         if (bleDebugEnabled) {
             Serial.printf("PARSE 0x07: malformed at offset %u: %s (packet dropped)\n",
                           (unsigned)diag.offset, diag.reason);
         }
         return false;
+    }
+    if (st == packetparse::ParseStatus::Partial) {
+        g_parseStats.partial07++;
+        if (bleDebugEnabled) {
+            Serial.printf("PARSE 0x07: partial — %s at offset %u\n",
+                          diag.reason, (unsigned)diag.offset);
+        }
     }
 
     if (bleDebugEnabled) {
@@ -186,14 +200,21 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
     }
 
     packetparse::ParseDiag diag;
-    if (packetparse::parseUnitStateUpdate(data, len, states, &diag)
-            != packetparse::ParseStatus::Complete) {
+    packetparse::ParseStatus st = packetparse::parseUnitStateUpdate(data, len, states, &diag);
+    if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed08++;
         if (bleDebugEnabled) {
             Serial.printf("PARSE 0x08: malformed at offset %u: %s (packet dropped)\n",
                           (unsigned)diag.offset, diag.reason);
         }
         return false;
+    }
+    if (st == packetparse::ParseStatus::Partial) {
+        g_parseStats.partial08++;
+        if (bleDebugEnabled) {
+            Serial.printf("PARSE 0x08: partial — %u state(s) applied, tail dropped at offset %u: %s\n",
+                          (unsigned)states.size(), (unsigned)diag.offset, diag.reason);
+        }
     }
 
     if (bleDebugEnabled && !states.empty()) {

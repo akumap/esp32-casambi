@@ -836,8 +836,15 @@ void printStatus() {
             Serial.printf("  RSSI: %d dBm\n", casambiClient->getLastRssi());
         }
 
-        // Strict-parser reject counters (radio corruption / protocol variants)
+        // Parser counters. "partial" = the understood prefix was applied and
+        // an undecoded tail dropped (likely a protocol element the reverse-
+        // engineering does not cover yet — worth a look when it grows);
+        // "malformed" = the packet yielded nothing usable.
         const PacketParseStats& ps = packetParseStats();
+        if (ps.partial06.load() || ps.partial07.load() || ps.partial08.load()) {
+            Serial.printf("  Partially decoded packets: 0x06=%u 0x07=%u 0x08=%u\n",
+                          ps.partial06.load(), ps.partial07.load(), ps.partial08.load());
+        }
         if (ps.malformed06.load() || ps.malformed07.load() || ps.malformed08.load()) {
             Serial.printf("  Malformed packets dropped: 0x06=%u 0x07=%u 0x08=%u\n",
                           ps.malformed06.load(), ps.malformed07.load(), ps.malformed08.load());
