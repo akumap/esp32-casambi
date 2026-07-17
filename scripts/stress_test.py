@@ -697,6 +697,47 @@ def check_reachable(host, port):
     return False
 
 
+def check_auth(host, port):
+    """Authenticated pre-flight against /api/status. /api/info (used by
+    check_reachable) is deliberately unauthenticated, so it cannot detect a
+    missing/wrong API token — without this probe a token problem turns the
+    whole run into 90 s of measuring nothing but 401 rejections (empty heap
+    monitor included). Aborts the run on 401."""
+    status = None
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=8)
+        conn.request("GET", "/api/status",
+                     headers=_auth_headers({"Connection": "close"}))
+        resp = conn.getresponse()
+        resp.read()
+        status = resp.status
+        conn.close()
+    except Exception:
+        pass
+
+    if status == 200:
+        print("Auth preflight OK — /api/status readable"
+              + ("" if API_TOKEN else " (device has auth disabled)"))
+        return True
+    if status == 401:
+        print("ERROR: /api/status answers 401 Unauthorized.")
+        if API_TOKEN:
+            print("  The provided --password/--token does not match the "
+                  "device's Casambi password.")
+        else:
+            print("  The device has API auth enabled (Casambi password "
+                  "stored) but no credentials were given.")
+            print("  Re-run with --password '<casambi network password>' "
+                  "(or --token <hex>).")
+        print("  Aborting: the run would only measure auth rejections.")
+        return False
+    # Unexpected but not an auth problem — warn and let the run proceed
+    # (check_reachable already proved basic reachability).
+    print(f"WARNING: auth preflight got HTTP {status} from /api/status — "
+          "continuing anyway.")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="ESP32 Casambi web server stress / stability test",
@@ -791,6 +832,8 @@ def main():
           f" ws_churn={prof['ws_churn']} ws_persistent={prof['ws_persistent']}\n")
 
     if not check_reachable(args.host, args.port):
+        sys.exit(1)
+    if not check_auth(args.host, args.port):
         sys.exit(1)
     print()
 
