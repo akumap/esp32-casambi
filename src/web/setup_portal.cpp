@@ -13,6 +13,7 @@
 #include "../config.h"
 #include "../cloud/api_client.h"
 #include "../storage/config_store.h"
+#include "../log/event_log.h"
 
 // Seconds spent in each BLE discovery scan.
 #define PORTAL_BLE_SCAN_SECONDS   8
@@ -173,6 +174,15 @@ SetupPortal::SetupPortal()
       _provisionRequested(false), _prov(ProvState::Idle),
       _rebootAt(0) {
     _mutex = xSemaphoreCreateMutex();
+    if (!_mutex) {
+        // Every handler/state-machine hand-off relies on this lock; running
+        // without it would race the async_tcp task. Restart cleanly instead —
+        // the portal is recreated on the next boot.
+        EventLog::log(LOG_ERROR, "Portal: mutex creation failed (heap exhausted), restarting");
+        Serial.println("FATAL: portal mutex creation failed - restarting");
+        delay(250);
+        ESP.restart();
+    }
 }
 
 SetupPortal::~SetupPortal() {

@@ -36,7 +36,7 @@ bool   EventLog::_initialized = false;
 uint16_t EventLog::_bootId    = 0;
 char   EventLog::_activeFile  = '0';
 size_t EventLog::_activeSize  = 0;
-volatile uint32_t EventLog::_generation = 0;
+std::atomic<uint32_t> EventLog::_generation{0};
 SemaphoreHandle_t EventLog::_mutex = nullptr;
 TaskHandle_t EventLog::_ownerTask  = nullptr;
 

@@ -9,6 +9,8 @@
  *   {"type":"hello","network":"My Home","ble_connected":true,
  *     "units":[{"id":1,"name":"...","online":true,
  *     "on":true,"level":128,"vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000},...]}
+ *     — carries at most WS_HELLO_MAX_UNITS units; beyond that
+ *       "units_truncated":true is set and clients fetch GET /api/units
  *   {"type":"unit_state","id":1,"level":128,"online":true,"on":true,
  *     "vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000}  – aux fields omitted if unsupported
  *   {"type":"connection_state","connected":true,"reason":0}

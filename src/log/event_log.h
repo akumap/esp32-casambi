@@ -28,6 +28,7 @@
 #define EVENT_LOG_H
 
 #include <Arduino.h>
+#include <atomic>
 #include "../config.h"
 
 // ----------------------------------------------------------------------------
@@ -148,10 +149,10 @@ public:
      * ping-pong files switch or the log is cleared — i.e. whenever global
      * record indices from an earlier snapshotNewest() become invalid. A
      * chunked reader compares this against its snapshot and stops cleanly
-     * instead of streaming shifted/cleared records. Plain uint32 read
-     * (atomic on ESP32), callable from any task.
+     * instead of streaming shifted/cleared records. Atomic, callable from
+     * any task.
      */
-    static uint32_t generation() { return _generation; }
+    static uint32_t generation() { return _generation.load(); }
 
     /**
      * Human-readable level name (e.g. "ERROR").
@@ -163,7 +164,7 @@ private:
     static uint16_t _bootId;
     static char   _activeFile;     // '0' => A, '1' => B
     static size_t _activeSize;     // bytes currently in active file
-    static volatile uint32_t _generation;  // bumped on file switch / clear
+    static std::atomic<uint32_t> _generation;  // bumped on file switch / clear
     static SemaphoreHandle_t _mutex;
     static TaskHandle_t _ownerTask;  // task that ran begin(); may write flash inline
 

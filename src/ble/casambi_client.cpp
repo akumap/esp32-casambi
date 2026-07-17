@@ -26,6 +26,15 @@ CasambiClient::CasambiClient(NetworkConfig* config)
     memset(_nonce, 0, NONCE_SIZE);
     _mutex    = xSemaphoreCreateMutex();
     _encMutex = xSemaphoreCreateMutex();
+    if (!_mutex || !_encMutex) {
+        // Without these locks every send/disconnect path would race the
+        // notification handlers; a clean restart (the RTC log entry survives
+        // it) beats running unprotected on an already-exhausted heap.
+        EventLog::log(LOG_ERROR, "BLE: mutex creation failed (heap exhausted), restarting");
+        Serial.println("FATAL: BLE mutex creation failed - restarting");
+        delay(250);
+        ESP.restart();
+    }
     g_clientInstance = this;
 }
 

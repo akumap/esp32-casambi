@@ -212,6 +212,16 @@
 // clients cannot stay stale on a missed unit_state.
 #define WS_BROADCAST_QUEUE_DEPTH        64
 
+// Upper bound of unit objects serialized into one WebSocket hello snapshot.
+// Each unit is ~150 B of JSON, so 50 units ≈ 7.5 kB — safely below the
+// ~13 kB largest-free-block floor observed on a fragmented heap (see the
+// /api/log sizing note). Networks beyond the cap get the first 50 units
+// plus "units_truncated": true; clients needing the rest must fetch
+// GET /api/units themselves. Realistic Casambi home networks stay far
+// below this; the cap only guards the heap against the CLOUD_MAX_UNITS
+// worst case (250 units ≈ 37 kB, an impossible single allocation here).
+#define WS_HELLO_MAX_UNITS              50
+
 // Depth of the REST→loop BLE command queue (stores BleCommand values).
 // Control handlers on the async_tcp task only validate and enqueue; the loop
 // task dequeues one command per iteration and performs the BLE operation, so

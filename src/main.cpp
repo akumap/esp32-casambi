@@ -304,6 +304,15 @@ void setup() {
     delay(1000);
 
     g_configMutex = xSemaphoreCreateMutex();
+    if (!g_configMutex) {
+        // Heap exhaustion this early in boot is unrecoverable, and the lock
+        // helpers would deliberately run unlocked on a null mutex (see
+        // configLock) — restart instead of running with undefined races.
+        // (EventLog is not initialized yet, so Serial is all we have here.)
+        Serial.println("FATAL: config mutex creation failed - restarting");
+        delay(1000);
+        ESP.restart();
+    }
 
     Serial.println("\n================================");
     Serial.println("  ESP32 Casambi Controller");

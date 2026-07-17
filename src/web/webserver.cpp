@@ -346,9 +346,19 @@ String CasambiWebServer::_buildHelloMessage() const {
     // state updates under the same mutex (_applyUnitStates), so each unit's
     // on/level/vertical/colorTemp here is one consistent snapshot. The unit
     // list itself and the identity strings are only written at boot/refresh.
+    //
+    // Bound the snapshot size: hello is pushed proactively (connect, resync)
+    // and must never grow into an allocation a fragmented heap cannot serve
+    // (see WS_HELLO_MAX_UNITS). Clients see "units_truncated" and can fetch
+    // the full list via GET /api/units themselves.
+    if (_config->units.size() > WS_HELLO_MAX_UNITS) {
+        doc["units_truncated"] = true;
+    }
+    size_t helloUnits = 0;
     JsonArray units = doc["units"].to<JsonArray>();
     if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
     for (const auto& unit : _config->units) {
+        if (++helloUnits > WS_HELLO_MAX_UNITS) break;
         JsonObject u = units.add<JsonObject>();
         u["id"]          = unit.deviceId;
         u["name"]        = unit.name;
