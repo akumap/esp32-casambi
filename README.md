@@ -170,7 +170,8 @@ gslider 4 200      # Set group motor position
 autoconnect on/off/status    # Auto-connect control
 autoconnect set <mac>        # Set MAC for auto-connect
 reconnect on/off             # Enable/disable auto-reconnect on link loss
-wifi set <ssid> <password>   # Update WiFi credentials
+wifi set <ssid> <password>   # Update WiFi credentials (saves, then restarts —
+                             # the device comes back up on the new network)
 wifi status                  # Show WiFi connection status
 debug on/off/status          # Toggle all debug output (restores/saves per-category settings)
 debug ble on/off             # BLE/crypto layer verbose logging
@@ -274,7 +275,12 @@ or IP.
   "wifi_rssi": -32,
   "uptime_ms": 123456,
   "free_heap": 56000,
+  "largest_block": 42000,
+  "min_free_heap": 31000,
   "boot_count": 12,
+  "ws_drops": 0,
+  "parse_partial": 0,
+  "parse_malformed": 0,
   "ntp_server": "pool.ntp.org",
   "time_synced": true,
   "time_utc": "2026-06-20T09:15:42Z",
@@ -288,6 +294,19 @@ or IP.
 
 `boot_count` is a power-loss-surviving counter (stored in NVS). `time_synced`
 is `false` until NTP has set the clock; `time_utc*` fields appear only once synced.
+
+Diagnostics for load/stability analysis (all cumulative since boot;
+`scripts/stress_test.py` samples them and reports their deltas over a run):
+`largest_block` is the largest contiguous free heap block — it exposes
+fragmentation that `free_heap` alone hides — and `min_free_heap` is the
+all-time low-water mark, catching transient dips between status polls.
+`ws_drops` counts WebSocket broadcast events dropped on a full queue (each
+drop triggers a fresh `hello` snapshot, so clients never stay stale).
+`parse_partial` / `parse_malformed` count BLE packets that were only
+partially decoded (understood prefix applied, undecoded tail dropped —
+likely a protocol element the reverse-engineering does not cover yet) or
+rejected entirely; per-packet-type detail is shown by the serial `status`
+command.
 `gateway_rssi` is the BLE link strength to the gateway in dBm (refreshed every
 ~10 s; `0` = not measured yet). After a disconnect the response additionally
 carries `last_disconnect_reason` (numeric `DisconnectReason`) and
@@ -572,6 +591,12 @@ capability flags used by the FHEM integration for device identification:
 
 `vertical`, `colorTemp`, `cctMin`, and `cctMax` are only present for units that support these controls.
 
+The snapshot carries at most `WS_HELLO_MAX_UNITS` (50, `src/config.h`) units so
+the proactively pushed message can never grow into an allocation a fragmented
+heap cannot serve. Networks beyond the cap — far above realistic home
+installations — get the first 50 units plus `"units_truncated": true`; clients
+needing the rest fetch `GET /api/units` themselves.
+
 #### `unit_state` — sent on every state change
 
 ```json
@@ -840,6 +865,15 @@ The actual cloud download runs early on the **next boot**, before the BLE stack 
 
 - Ensure PSRAM flags are **not** set in `platformio.ini` for boards without PSRAM
 - Check `status` for heap values; a steadily decreasing free heap indicates a memory leak
+- Watch `min_free_heap` and `largest_block` in `/api/status`: the low-water
+  mark catches transient dips between polls, and a shrinking largest block
+  reveals fragmentation while `free_heap` still looks fine. `ws_drops` and the
+  `parse_partial`/`parse_malformed` counters should stay at 0 in normal
+  operation. `scripts/stress_test.py` reports all of them as deltas over a
+  load run, plus an end-to-end check that queued control commands actually
+  come back as `unit_state` events
+- Check the persistent event log (`GET /api/log` or serial `log`) — reset
+  reasons and the "last words" before a crash survive the reboot
 - Build with `pio run -e debug` for full stack traces on crash
 
 ### Control Issues
@@ -860,11 +894,19 @@ The actual cloud download runs early on the **next boot**, before the BLE stack 
 |`esp32-c3` |ESP32-C3 DevKit M1 — build-only, untested on hardware|
 |`debug`    |Verbose logging, debug symbols, exception decoder|
 |`release`  |Size-optimized production build                  |
+|`native`   |Host-side unit tests, no hardware required       |
 
 ```bash
 pio run -e devkit-v4 -t upload    # Default build
 pio run -e debug -t upload        # Debug build with verbose BLE logging
+pio test -e native                # Host-side unit tests
 ```
+
+The native tests cover the pure logic extracted into Arduino-free headers:
+config validation (`config_validation.h`), the BLE packet parsers incl.
+deterministic fuzzing (`packet_parse.h`), the cloud-config structural
+invariants (`config_invariants.h`) and the serial argument parsing
+(`serial_args.h`). CI runs them on every push alongside the firmware builds.
 
 **Note:** After structural changes to the config format, run `clearconfig` + `setup` on the ESP32 to repopulate the configuration with new fields.
 
@@ -886,6 +928,14 @@ The pre-build script writes a `-DFIRMWARE_BUILD=<n>` compiler flag that is
 picked up by `src/web/webserver.cpp`.  Because SCons tracks source-file
 timestamps rather than flag changes, `webserver.cpp` contains a comment that
 is updated with each release to force a recompile after `git pull`.
+
+**Verify the injection ran:** the build output must contain a line like
+`*** FIRMWARE_BUILD = 103 (git commit count on main) ***`. If it is missing
+(and the device reports `build: 0`), the script is not being executed — each
+firmware environment must reference it via
+`extra_scripts = ${common.extra_scripts}` in `platformio.ini`; PlatformIO does
+NOT apply options from the `[common]` section on its own. (This was broken
+until build 103: every earlier firmware reported 0.)
 
 -----
 
