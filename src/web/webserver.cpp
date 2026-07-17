@@ -6,6 +6,7 @@
 #include "../config.h"
 #include "../log/event_log.h"
 #include "../storage/config_store.h"
+#include "../ble/packet.h"   // packetParseStats() for /api/status diagnostics
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <time.h>
@@ -735,6 +736,16 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["boot_count"] = EventLog::bootCount();
     // Broadcast events dropped on a full queue (each triggers a hello resync).
     doc["ws_drops"] = _wsDropCount.load();
+    // Tolerant-parser diagnostics, summed over the packet types: "partial" =
+    // packets whose understood prefix was applied while an undecoded tail was
+    // dropped (a protocol element we do not know yet — worth investigating
+    // when it grows), "malformed" = packets that yielded nothing usable.
+    // Per-type detail is available via the serial `status` command.
+    const PacketParseStats& pps = packetParseStats();
+    doc["parse_partial"]   = pps.partial06.load() + pps.partial07.load()
+                           + pps.partial08.load();
+    doc["parse_malformed"] = pps.malformed06.load() + pps.malformed07.load()
+                           + pps.malformed08.load();
     doc["ntp_server"] = lockedCopy(_config->ntpServer);
 
     // Wall-clock time (UTC). Only meaningful once NTP has synced.
