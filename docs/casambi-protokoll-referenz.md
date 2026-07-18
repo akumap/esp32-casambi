@@ -2,15 +2,16 @@
 
 Status: **Referenzdokument**, abgeleitet aus der Reverse-Engineering-Bibliothek
 [lkempf/casambi-bt](https://github.com/lkempf/casambi-bt) (Stand: Analyse
-2026-07). Beschreibt das Casambi-Protokoll so, wie casambi-bt es implementiert —
-als unabhängige Referenz für den in diesem Repository umgesetzten ESP32-Client.
+2026-07). **Teil A–C** beschreiben das Casambi-Protokoll so, wie casambi-bt es
+implementiert (die unabhängige Referenz). **Teil D** stellt die Umsetzung in
+diesem Repository (esp32-casambi) daneben und macht alle Abweichungen kenntlich.
 
 > **Hinweis zur Verlässlichkeit.** Das Protokoll ist nicht öffentlich
 > dokumentiert; alle Angaben stammen aus Reverse Engineering und können lückenhaft
 > oder in Randfällen falsch sein. Wo casambi-bt selbst Unsicherheit markiert
-> (`TODO`, „unknown", „arbitrary"), ist das hier vermerkt. Abweichungen zwischen
-> casambi-bt und dieser Firmware sind in `docs/` an anderer Stelle bzw. in den
-> Issues diskutiert.
+> (`TODO`, „unknown", „arbitrary"), ist das hier vermerkt. Die konkreten
+> Abweichungen der ESP32-Firmware gegenüber casambi-bt sind in **Teil D**
+> gesammelt.
 
 Das Casambi-System besteht aus **zwei getrennten Protokollen**:
 
@@ -498,6 +499,148 @@ Revisions-/Szenen-Tracker — siehe die P09-Notizen im Firmware-Code.)
 | Nonce | `basis[0:4] ‖ id(4,LE) ‖ basis[8:16]`, 16 Byte |
 | Auth-Digest | `SHA-256(key ‖ nonce ‖ transportKey)` |
 | Zähler | out startet bei 2, in bei 1; kein Replay-Schutz eingangsseitig |
+
+---
+
+## Teil D — Umsetzung in esp32-casambi (Abweichungen)
+
+Die ESP32-Firmware implementiert **dasselbe Protokoll** wie die Referenz oben.
+Transport- und Kryptoschicht sind byte-kompatibel; die Unterschiede liegen fast
+ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
+**Interpretation eingehender Pakete** (BLE). Quellen: `src/cloud/api_client.cpp`,
+`src/ble/casambi_client.cpp`, `src/ble/packet_parse.h`, `src/crypto/*`,
+`src/config.h`.
+
+**Markierungen:** `[=]` identisch · `[Δ]` abweichend · `[+]` nur in der Firmware.
+
+### D.0 Kurzüberblick der Abweichungen
+
+| Bereich | casambi-bt | esp32-casambi |
+|---|---|---|
+| Fähigkeits-Quelle | `GET /fixture/{id}` → bit-genaue Controls | **Heuristik** aus `modes[0].state`-Länge + `settings` `[Δ]` |
+| Cloud-Revision | inkrementell (`revision`, `UPTODATE`) | `revision=0`, immer Vollabruf `[Δ]` |
+| Zustands-Dekodierung | bit-genau (offset/length) | feste Byte-Slots (aux1/aux2) `[Δ]` |
+| Paket-Typ 7 | Switch-/Sensor-Event | **Operation-Echo** `[Δ]` |
+| Paket-Typ 8/0A/0C | — | UnitState-Update / TimeSync / Keepalive `[+]` |
+| Paket-Typ 9 | ignoriert | P09-Revisions-Tracker dekodiert `[+]` |
+| 0x06-online | `flags & 2` | `(flags & 0x0F) == 0` `[Δ]` |
+| Geräteinfo unit/flags | Big-Endian | Little-Endian (nur Debug) `[Δ]` |
+| CMAC | Bibliothek (`cryptography`) | eigene RFC-4493-Impl + Selbsttest `[+]` |
+
+### D.1 Cloud (HTTPS/REST)
+
+- `[=]` Dieselben drei Endpunkte, Request-Bodies und der `X-Casambi-Session`-
+  Header (`getNetworkId` / `createSession` / `fetchNetworkConfig`,
+  `api_client.cpp`). TLS wird gegen das eingebettete Mozilla-CA-Bundle
+  **validiert** (nicht `setInsecure`, außer per `-DCASAMBI_TLS_INSECURE`).
+- `[=]` Schlüsselwahl nach höchster `role` (`getBestKey`).
+- `[Δ]` **`revision` ist fest `0`** — der ESP32 zieht bei jedem Refresh die
+  **komplette** Definition; die inkrementelle `UPTODATE`-Logik von casambi-bt
+  (A.4) existiert nicht.
+- `[Δ]` **Kein `GET /fixture/{typeId}`.** Die Firmware ruft die
+  Unit-Typ-Deskriptoren (A.6) **nie** ab. Fähigkeiten werden stattdessen aus der
+  Netzwerkdefinition **heuristisch abgeleitet** (`_parseUnits`):
+  - `numChannels = len(modes[0].state) / 2`, begrenzt auf 1–3
+  - `hasCCT` aus `settings["cct.minKelvins"]` (+ `cctMin/MaxKelvin`)
+  - `hasVertical`: bei 3 Kanälen `true`; bei 2 Kanälen `true`, falls **nicht**
+    CCT; sonst `false`
+  - **Dies ist die Ursache von Issue #34**: Die Kanalzahl ist kein verlässliches
+    Signal für einen echten Vertical-Kanal (z. B. Oligo Grace = Dimmer + CCT,
+    aber 3-Byte-Mode-String → fälschlich `hasVertical`).
+- `[Δ]` Laufzeit: Der ESP32 arbeitet aus der in LittleFS **gespeicherten**
+  Konfiguration; die Cloud wird nur bei Provisionierung/Refresh kontaktiert.
+  Zusätzlich harte Struktur-Invarianten (Duplikat-IDs, Limits) beim Parsen.
+
+### D.2 BLE-Transport & Handshake
+
+- `[=]` UUIDs, Zustandsmaschine, Paketzähler (`out=2`, `in=1`), ECDH über
+  SECP256R1, Transportschlüssel-Ableitung (Reverse → SHA-256 → XOR-Faltung),
+  Public-Key-Austausch (`0x02 ‖ X ‖ Y ‖ 0x01`), `0x03`-Ack, Auth-Digest und
+  Auth-Paket (`counter ‖ 0x04 ‖ key.id ‖ digest`) — alles identisch.
+- `[Δ]` **Geräteinfo-Endianness:** `unitId`/`flags` werden **little-endian**
+  gelesen (`_readDeviceInfo`), casambi-bt liest sie big-endian (B.4). Folgenlos —
+  beide Felder dienen nur dem Debug, die 16 Nonce-Bytes sind identisch.
+- `[Δ]` **Version-11-Sonderfall (`0x2B`)** wird nicht gesondert behandelt; die
+  Firmware warnt nur bei Versions-Mismatch und macht weiter (Ergebnis gleich).
+- `[+]` Wartet nach dem eigenen Public Key aktiv auf die `0x03`-Ack-Notification,
+  bevor authentisiert wird.
+- `[+]` **Gateway-Auswahl per RSSI-Re-Roll** und **Keepalive per GATT-Read** auf
+  der Auth-Characteristic — Betriebslogik ohne Protokoll-Entsprechung in
+  casambi-bt.
+
+### D.3 Kryptografie
+
+- `[=]` AES-128-CTR (ECB-Keystream, Blockzähler LE in Byte 12–15), AES-CMAC
+  (RFC 4493), Encrypt-then-MAC, `headerLen=4`, Nonce-Konstruktion (B.7/B.8).
+- `[+]` **Eigene CMAC-Implementierung** (mbedTLS-CMAC ist im Core nicht
+  aktiviert) mit **RFC-4493-Selbsttest**, **konstantzeit-MAC-Vergleich** und
+  **Wiping** des Zwischen-Geheimnisses/Hashes. casambi-bt nutzt die
+  `cryptography`-Bibliothek.
+- Beide: **kein** Replay-/Zähler-Check auf Empfangsseite.
+
+### D.4 Ausgehende Steuerbefehle
+
+- `[=]` OpCodes identisch (B.9). Operation-Paket byte-identisch
+  (`flags(2,BE)=lifetime<<11|len ‖ op ‖ origin(2,BE) ‖ target(2,BE) ‖ 0x0000 ‖
+  payload`), `lifetime=5`, Sende-Rahmen `counter(4,LE) ‖ 0x07 ‖ operation`
+  (`_buildOperation` / `_sendOperation`).
+- `[=]` Ziel-Kodierung `(id<<8)|typ`; die Firmware definiert die Typ-Werte
+  explizit: `Unit=0x01`, `Group=0x02`, `Scene=0x04`.
+- `[+]` **Rollback von `origin`/`outPacketCount`** bei fehlgeschlagenem
+  GATT-Write, damit die Nonce-Sequenz nicht driftet (casambi-bt inkrementiert
+  bedingungslos).
+- `[Δ]` **Payload-Kodierung der Firmware:** `SetTemperature` sendet `kelvin/50`
+  (1 Byte); `SetColor` rechnet RGB→Hue/Sättigung (`rgbToHS`, Hue 0–1023 als
+  2 Byte LE + Sättigung). Der äußere Operations-Rahmen ist identisch; diese
+  konkreten Nutzlast-Formate baut casambi-bt in seiner höheren Schicht (nicht in
+  `_operation.py`) und wurden hier **nicht** gegengeprüft.
+
+### D.5 Eingehende Pakete — die größte Divergenz
+
+Dispatch nach dem ersten Klartextbyte (`_handleDataNotification`):
+
+| Typ | casambi-bt (B.10) | esp32-casambi |
+|---|---|---|
+| 0x06 | UnitState (bit-genau) | Status-Broadcast (Byte-Slots) `[Δ]` |
+| 0x07 | **Switch-Event** | **Operation-Echo** `[Δ]` |
+| 0x08 | — | UnitState-Update (Paar- oder 0x06-Format) `[+]` |
+| 0x09 | ignoriert | P09-Revisions-/Szenen-Tracker (Debug) `[Δ]` |
+| 0x0A | — | TimeSync (nur geloggt) `[+]` |
+| 0x0C | — | Keepalive (nur geloggt) `[+]` |
+
+- `[Δ]` **Typ 7 ist der gewichtigste Unterschied:** casambi-bt deutet ihn als
+  Schalter-/Sensor-Ereignis (B.12), die Firmware als **Echo einer Operation**
+  eines anderen Controllers (gleiche Struktur wie eine ausgehende Operation) und
+  übernimmt daraus z. B. Level-Änderungen. Ein Switch-/Sensor-Parser fehlt der
+  Firmware damit vollständig.
+
+**D.5.1 Record-Format bei Typ 0x06.** Beide lesen Byte 0 = ID, Byte 1 = Flags,
+aber Byte 2 verschieden:
+
+| | casambi-bt | esp32-casambi |
+|---|---|---|
+| Byte 2 | `stateLen=(b2>>4)+1`, `prio=b2&15` | **Capability**: oberes Nibble = Aux-Zahl, unteres `0x00`/`0x03` |
+| Optionalbytes | `flags & 4/8/16` (je +1, unbekannt) | `0x80`-Byte nur bei `cap==0x03`; Prev-Level bei `flags & 0x10` |
+| online | `flags & 2` | `(flags & 0x0F) == 0` → offline `[Δ]` |
+| Padding | `(flags>>6)&3` | — |
+
+Für `cap=0x23` errechnen **beide** dieselbe Satzlänge von 6 Byte — die
+„malformed/ein-Byte-zu-kurz"-Annahme aus Issue #34 trifft in **keiner** der
+beiden Implementierungen zu.
+
+**D.5.2 Zustands-Semantik.** `[Δ]` Die Firmware weist **feste Byte-Slots** zu
+(`level`, `aux1→vertical`, `aux2→colorTemp`; `parseStatusBroadcast` +
+`_applyUnitStates`) und entscheidet über die gespeicherten Booleans
+`hasVertical`/`hasCCT`. Es gibt **keine** bit-genaue, offset/length-basierte
+Dekodierung wie in `Unit.setStateFromBytes` (B.11). Sub-Byte-Felder (z. B.
+gepacktes RGB) können damit nicht sauber dargestellt werden.
+
+> **Geplante Angleichung.** Die vorgesehene Umstellung übernimmt das
+> casambi-bt-Modell (Deskriptoren aus der Cloud, bit-genaue Dekodierung,
+> Trennung Protokollschicht ↔ Unit-Modell) — regressionssicher gegenüber den
+> heute lauffähigen Occhio-Leuchten. Dazu gehört zwingend, in D.1 den
+> `/fixture/{id}`-Abruf (A.6) zu ergänzen, statt Fähigkeiten aus der Kanalzahl
+> zu raten.
 
 ---
 
