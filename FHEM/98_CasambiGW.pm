@@ -12,6 +12,18 @@ eval { require JSON; JSON->import(); 1 }
     or $CasambiGW_missingJSON = "Perl module JSON not installed "
                               . "(e.g. 'apt install libjson-perl' or 'cpanm JSON')";
 
+# Normalize a MAC/BLE address to a canonical form for storage and comparison.
+# The Casambi cloud delivers the unit `address` verbatim and may or may not
+# include colons (e.g. "828a2f6e3f8c" or "82:8a:2f:6e:3f:8c"); the ESP32
+# firmware likewise strips colons before comparing. Canonicalizing to
+# lowercase, colon-free hex here keeps MAC matching robust regardless of the
+# format the network happens to report.
+sub CasambiGW_NormalizeMac {
+    my $mac = shift // "";
+    $mac =~ s/://g;
+    return lc $mac;
+}
+
 # ============================================================================
 # CasambiGW — FHEM gateway module for the ESP32 Casambi BLE bridge
 #
@@ -661,7 +673,7 @@ sub CasambiGW_HandleHello {
         my $dh = $defs{$devName};
         next unless ($dh->{TYPE}    // "") eq "CasambiUnit";
         next unless ($dh->{GW_NAME} // "") eq $name;
-        my $mac = AttrVal($devName, "casambiMac", "");
+        my $mac = CasambiGW_NormalizeMac(AttrVal($devName, "casambiMac", ""));
         $byMac{$mac} = $devName if $mac;
     }
 
@@ -669,7 +681,7 @@ sub CasambiGW_HandleHello {
     my (@pendingNew, %pendingRemove);
 
     for my $unit (@{$msg->{units}}) {
-        my $mac = $unit->{address} // "";
+        my $mac = CasambiGW_NormalizeMac($unit->{address} // "");
         $seenMac{$mac} = 1 if $mac;
 
         my $devName = $byMac{$mac} // "";
@@ -862,13 +874,20 @@ sub CasambiGW_CreateUnit {
 
     # Validate the MAC before interpolating it into a fhem() command. The
     # address comes from the network config / hello message; rejecting anything
-    # that is not a plain colon-separated MAC prevents command injection via a
-    # crafted address field.
-    if ($mac !~ /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i) {
+    # that is not a valid MAC prevents command injection via a crafted address
+    # field. The Casambi cloud reports the address with or without colons
+    # (e.g. "828a2f6e3f8c" or "82:8a:2f:6e:3f:8c"), so the optional-colon form
+    # is accepted — both variants contain only hex/colon and are safe to
+    # interpolate.
+    if ($mac !~ /^[0-9a-f]{2}(:?[0-9a-f]{2}){5}$/i) {
         Log3 $name, 2,
             "$name: refusing to create unit '$raw' — invalid MAC address '$mac'";
         return undef;
     }
+
+    # Store the MAC in canonical (lowercase, colon-free) form so it matches the
+    # normalized keys used for unit lookup regardless of the format reported.
+    $mac = CasambiGW_NormalizeMac($mac);
 
     # Ensure uniqueness
     my $base = $devName;
