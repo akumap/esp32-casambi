@@ -288,10 +288,16 @@ void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
         // divergence is visible for verification.
         for (CasambiUnit& u : config.units) {
             if (u.type != unit.type) continue;
-            Serial.printf("Fixture: unit %d (type %u) '%s' [%s] fixture=[vertical=%d cct=%d",
-                          u.deviceId, u.type, model.c_str(), mode.c_str(), hasVertical, hasCCT);
-            if (hasCCT && cctMin && cctMax) Serial.printf(" %u-%uK", cctMin, cctMax);
-            Serial.printf("]  heuristic=[vertical=%d cct=%d]\n", u.hasVertical, u.hasCCT);
+            // Generic: list the actual controls; keep the heuristic flags in
+            // parentheses purely as a verification cross-check.
+            Serial.printf("Fixture: unit %d (type %u) '%s' [%s] controls=[",
+                          u.deviceId, u.type, model.c_str(), mode.c_str());
+            for (size_t i = 0; i < controls.size(); i++) {
+                Serial.printf("%s%s", i ? "," : "", controls[i].typeName.c_str());
+                if (controls[i].typeName == "temperature" && controls[i].max > controls[i].min)
+                    Serial.printf("(%u-%uK)", controls[i].min, controls[i].max);
+            }
+            Serial.printf("]  (heuristic was vertical=%d cct=%d)\n", u.hasVertical, u.hasCCT);
 
             u.controls     = controls;
             u.stateLength  = stateLength;

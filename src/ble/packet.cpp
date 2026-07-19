@@ -111,12 +111,15 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
     }
 
     if (bleDebugEnabled && !states.empty()) {
-        Serial.printf("PARSE 0x06: Parsed %d unit state(s)\n", states.size());
+        // Protocol layer: raw POSITIONAL state bytes only (byte 0 / 1 / 2). It
+        // has no cloud config, so it cannot name the channels — the named,
+        // cloud-derived output ("Casambi: Unit ...") comes from _applyUnitStates.
+        Serial.printf("PARSE 0x06: %d record(s)\n", states.size());
         for (const auto& s : states) {
-            Serial.printf("  Unit %d: level=%d online=%d on=%d",
-                          s.unitId, s.level, s.online, s.on);
-            if (s.hasVertical) Serial.printf(" aux1=%d", s.vertical);
-            if (s.hasColorTemp) Serial.printf(" aux2=%d", s.colorTemp);
+            Serial.printf("  Unit %d: online=%d on=%d state[0]=%d",
+                          s.unitId, s.online, s.on, s.level);
+            if (s.hasVertical)  Serial.printf(" state[1]=%d", s.vertical);
+            if (s.hasColorTemp) Serial.printf(" state[2]=%d", s.colorTemp);
             Serial.println();
         }
     }
@@ -128,10 +131,10 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         if (!states.empty()) {
             Serial.print("P06:");
             for (const auto& s : states) {
-                Serial.printf(" U%d=%d", s.unitId, s.level);
+                Serial.printf(" U%d[0]=%d", s.unitId, s.level);
                 if (!s.online) Serial.print("(offline)");
-                if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
-                if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
+                if (s.hasVertical)  Serial.printf(" [1]=%d", s.vertical);
+                if (s.hasColorTemp) Serial.printf(" [2]=%d", s.colorTemp);
             }
             Serial.println();
         }
@@ -222,9 +225,14 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
     }
 
     if (bleDebugEnabled && !states.empty()) {
-        Serial.printf("PARSE 0x08: Parsed %d unit states\n", states.size());
+        // Raw positional state bytes only — named channels are logged by the
+        // Casambi layer (which has the cloud control definitions).
+        Serial.printf("PARSE 0x08: %d record(s)\n", states.size());
         for (const auto& s : states) {
-            Serial.printf("  Unit %d: level=%d on=%d\n", s.unitId, s.level, s.on);
+            Serial.printf("  Unit %d: on=%d state[0]=%d", s.unitId, s.on, s.level);
+            if (s.hasVertical)  Serial.printf(" state[1]=%d", s.vertical);
+            if (s.hasColorTemp) Serial.printf(" state[2]=%d", s.colorTemp);
+            Serial.println();
         }
     }
 
@@ -235,10 +243,10 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
         if (!states.empty()) {
             Serial.print("P08:");
             for (const auto& s : states) {
-                Serial.printf(" U%d=%d", s.unitId, s.level);
+                Serial.printf(" U%d[0]=%d", s.unitId, s.level);
                 if (!s.online) Serial.print("(offline)");
-                if (s.hasVertical)  Serial.printf(" v=%d", s.vertical);
-                if (s.hasColorTemp) Serial.printf(" t=%d", s.colorTemp);
+                if (s.hasVertical)  Serial.printf(" [1]=%d", s.vertical);
+                if (s.hasColorTemp) Serial.printf(" [2]=%d", s.colorTemp);
             }
             Serial.println();
         }

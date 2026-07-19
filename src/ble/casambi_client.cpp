@@ -1263,14 +1263,28 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
 
         if (g_configMutex) xSemaphoreGive(g_configMutex);
 
-        // Log state change
-        if (casambiDebugEnabled) {
-            Serial.printf("Casambi: Unit [%d] '%s' -> level=%d %s",
+        // Log state change — fully generic: each channel is named by its cloud
+        // control type and annotated with its byte position (b<n>). Shown for
+        // either debug flag so it also appears with `debug ble on`.
+        if (casambiDebugEnabled || bleDebugEnabled) {
+            Serial.printf("Casambi: Unit [%d] '%s' %s%s",
                           unit->deviceId, unit->name.c_str(),
-                          unit->level, unit->on ? "ON" : "OFF");
-            if (unit->hasVertical) Serial.printf(" v=%d", unit->vertical);
-            if (unit->hasCCT) Serial.printf(" t=%d", unit->colorTemp);
-            if (!state.online) Serial.print(" OFFLINE");
+                          unit->on ? "ON" : "OFF",
+                          state.online ? "" : " OFFLINE");
+            if (unit->hasFixture && !unit->controls.empty()) {
+                for (const UnitControl& c : unit->controls) {
+                    Serial.printf(" %s(b%u)=%u", c.typeName.c_str(), c.offset / 8, c.value);
+                    if (c.typeName == "temperature" && c.max > c.min) {
+                        Serial.printf("(%uK)",
+                            (uint16_t)(c.min + (uint32_t)c.value * (c.max - c.min) / 255));
+                    }
+                }
+            } else {
+                // Fallback (no fixture controls): legacy named fields.
+                Serial.printf(" level=%d", unit->level);
+                if (unit->hasVertical) Serial.printf(" vertical=%d", unit->vertical);
+                if (unit->hasCCT)      Serial.printf(" colorTemp=%d", unit->colorTemp);
+            }
             Serial.println();
         }
 
