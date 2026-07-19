@@ -168,7 +168,7 @@ Neue bzw. bestehende Readings am Gateway-Device:
 | Reading | Inhalt | Quelle | neu? |
 |---|---|---|---|
 | `casambiProtocolVersion` | z. B. `11` | Hello `casambi_protocol_version` | neu |
-| `espCasambiVersionRange` | z. B. `10-11` | Hello `casambi_protocol_min/max` | neu |
+| `casambiProtocolVersionRange` | z. B. `10-11` | Hello `casambi_protocol_min/max` | neu |
 | `casambiVersionWarning` | `ok` oder Klartext | von FHEM berechnet | neu |
 | `espApiVersion` | z. B. `1.0` | Hello `api_version_major/minor` | neu |
 | `fhemApiVersion` | z. B. `1.0` | Konstante im Modul | neu |
@@ -177,7 +177,7 @@ Neue bzw. bestehende Readings am Gateway-Device:
 | `esp32BuildWarning` | `ok` oder Klartext | bestehend | bestehend |
 
 `casambiVersionWarning` wird gesetzt, wenn `casambiProtocolVersion` außerhalb
-`espCasambiVersionRange` liegt — mit unterschiedlichem Text für „zu alt"
+`casambiProtocolVersionRange` liegt — mit unterschiedlichem Text für „zu alt"
 (Netz unter Minimum) und „neuer als getestet" (über Maximum), analog zu den
 Serial-Warnungen in `checkCasambiVersions()`.
 

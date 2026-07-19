@@ -348,7 +348,7 @@ String CasambiWebServer::_gatewayName(const String& mac) const {
 String CasambiWebServer::_buildHelloMessage() const {
     JsonDocument doc;
     doc["type"] = "hello";
-    doc["build"] = FIRMWARE_BUILD;  // injected by scripts/build_number.py
+    doc["build"] = FIRMWARE_BUILD;  // from generated firmware_build.h (see config.h)
     // ESP<->FHEM interface version. If you add/remove/rename fields in ANY
     // WebSocket message or /api/* endpoint, follow the VERSIONING CONTRACT at
     // FHEM_API_VERSION_MAJOR in config.h (bump version + mirror in FHEM).

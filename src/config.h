@@ -30,9 +30,21 @@
 #define MAX_PROTOCOL_VERSION      11
 
 // ESP32 firmware build number.
-// Normally injected at compile time by scripts/build_number.py
-// (git rev-list --count origin/main).  The fallback below is used only
-// when building outside of PlatformIO (e.g. Arduino IDE) or without git.
+// scripts/build_number.py (PlatformIO pre-build script) writes the current
+// git commit count of origin/main into src/firmware_build.h (gitignored) and
+// rewrites that file ONLY when the number changes.  Delivered as a generated
+// header instead of a -DFIRMWARE_BUILD flag on purpose: SCons does not
+// recompile unchanged sources when an injected flag changes, so a flag-based
+// number silently survives incremental builds (`git pull && pio run` kept
+// reporting the old build).  A content change in the header is tracked by the
+// dependency scanner, so exactly the affected translation units recompile.
+// The fallback below is used only when the header does not exist — building
+// outside of PlatformIO (e.g. Arduino IDE) or without git.
+#if defined(__has_include)
+#  if __has_include("firmware_build.h")
+#    include "firmware_build.h"
+#  endif
+#endif
 #ifndef FIRMWARE_BUILD
 #define FIRMWARE_BUILD            0
 #endif

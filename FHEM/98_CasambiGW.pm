@@ -752,7 +752,9 @@ sub CasambiGW_HandleHello {
     if (defined $msg->{casambi_protocol_version}) {
         readingsBulkUpdate($hash, "casambiProtocolVersion",
             $msg->{casambi_protocol_version});
-        readingsBulkUpdate($hash, "espCasambiVersionRange",
+        # Named casambiProtocolVersionRange (not espCasambi...) so the default
+        # alphabetical readings order places it next to casambiProtocolVersion.
+        readingsBulkUpdate($hash, "casambiProtocolVersionRange",
             ($msg->{casambi_protocol_min} // "?") . "-"
           . ($msg->{casambi_protocol_max} // "?"));
     }
@@ -1173,11 +1175,11 @@ sub CasambiGW_Ready {
         an update. A mismatch never blocks operation.</li>
     <li><b>casambiProtocolVersion</b> &mdash; protocol version of the Casambi
         network (from the hello message)</li>
-    <li><b>espCasambiVersionRange</b> &mdash; range of Casambi protocol
+    <li><b>casambiProtocolVersionRange</b> &mdash; range of Casambi protocol
         versions the ESP32 firmware is tested with, e.g. "10-11"</li>
     <li><b>casambiVersionWarning</b> &mdash; "ok" while casambiProtocolVersion
-        lies inside espCasambiVersionRange, otherwise a warning (the Casambi
-        network version cannot be influenced; operation continues)</li>
+        lies inside casambiProtocolVersionRange, otherwise a warning (the
+        Casambi network version cannot be influenced; operation continues)</li>
   </ul>
 </ul>
 =end html

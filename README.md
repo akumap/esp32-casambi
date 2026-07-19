@@ -998,10 +998,15 @@ git pull
 pio run -e devkit-v4 -t upload
 ```
 
-The pre-build script writes a `-DFIRMWARE_BUILD=<n>` compiler flag that is
-picked up by `src/web/webserver.cpp`.  Because SCons tracks source-file
-timestamps rather than flag changes, `webserver.cpp` contains a comment that
-is updated with each release to force a recompile after `git pull`.
+The pre-build script writes the number into the generated header
+`src/firmware_build.h` (gitignored), which `src/config.h` includes with a
+fallback of `0`. The file is rewritten **only when the number changes**, so
+the build system's dependency tracking recompiles exactly the affected
+translation units on the next `pio run` after a `git pull` — no clean build
+or manual source touching required. (The number was previously injected as a
+`-DFIRMWARE_BUILD` compiler flag; SCons does not recompile unchanged sources
+when such a flag changes, so incremental builds silently kept reporting a
+stale build number.)
 
 **Verify the injection ran:** the build output must contain a line like
 `*** FIRMWARE_BUILD = 103 (git commit count on main) ***`. If it is missing
@@ -1122,7 +1127,7 @@ automatically on link loss or FHEM startup.
 | `fhemApiVersion` | `major.minor` | Interface version implemented by the FHEM module |
 | `apiVersionWarning` | `ok` / warning text | Warns (naming the side to update) when the major versions differ; minor differences are compatible. Operation continues either way. |
 | `casambiProtocolVersion` | integer | Protocol version of the Casambi network (from `hello`) |
-| `espCasambiVersionRange` | e.g. `10-11` | Casambi protocol versions the ESP32 firmware is tested with |
+| `casambiProtocolVersionRange` | e.g. `10-11` | Casambi protocol versions the ESP32 firmware is tested with |
 | `casambiVersionWarning` | `ok` / warning text | Set when the network protocol version lies outside the tested range (informational — the network version cannot be influenced) |
 
 **Gateway attributes:**
