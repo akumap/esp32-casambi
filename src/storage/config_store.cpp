@@ -103,6 +103,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     doc["webDebugEnabled"]     = config.webDebugEnabled;
     doc["parseDebugEnabled"]   = config.parseDebugEnabled;
     doc["heapDebugEnabled"]    = config.heapDebugEnabled;
+    doc["cloudDebugEnabled"]   = config.cloudDebugEnabled;
 
     // Save keys
     JsonArray keysArray = doc["keys"].to<JsonArray>();
@@ -140,6 +141,21 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
         if (unit.hasCCT) {
             unitObj["cctMin"] = unit.cctMinKelvin;
             unitObj["cctMax"] = unit.cctMaxKelvin;
+        }
+
+        // Fixture controls (bit layout + Kelvin bounds) — the authoritative
+        // source for generic decoding and naming; persisted so it survives a
+        // reboot without a cloud round-trip.
+        if (!unit.controls.empty()) {
+            unitObj["stateLength"] = unit.stateLength;
+            JsonArray ctrlArr = unitObj["controls"].to<JsonArray>();
+            for (const auto& c : unit.controls) {
+                JsonObject co = ctrlArr.add<JsonObject>();
+                co["type"]   = c.typeName;
+                co["offset"] = c.offset;
+                co["length"] = c.length;
+                if (c.min || c.max) { co["min"] = c.min; co["max"] = c.max; }
+            }
         }
     }
 
@@ -321,6 +337,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     config.webDebugEnabled     = doc["webDebugEnabled"]     | true;
     config.parseDebugEnabled   = doc["parseDebugEnabled"]   | false;
     config.heapDebugEnabled    = doc["heapDebugEnabled"]    | false;
+    config.cloudDebugEnabled   = doc["cloudDebugEnabled"]   | false;
 
     // Load keys
     config.keys.clear();
@@ -365,6 +382,25 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
             unit.hasVertical = unitObj["hasVertical"] | false;
             unit.cctMinKelvin = unitObj["cctMin"] | 0;
             unit.cctMaxKelvin = unitObj["cctMax"] | 0;
+
+            // Fixture controls (absent in configs saved before this existed —
+            // a later refresh re-fetches them from the cloud).
+            unit.stateLength = unitObj["stateLength"] | 0;
+            unit.controls.clear();
+            unit.hasFixture = false;
+            if (unitObj["controls"].is<JsonArrayConst>()) {
+                for (JsonObjectConst co : unitObj["controls"].as<JsonArrayConst>()) {
+                    UnitControl c;
+                    c.typeName = co["type"].as<String>();
+                    c.typeName.toLowerCase();
+                    c.offset = co["offset"] | 0;
+                    c.length = co["length"] | 8;
+                    c.min = static_cast<uint16_t>(co["min"] | 0);
+                    c.max = static_cast<uint16_t>(co["max"] | 0);
+                    unit.controls.push_back(c);
+                }
+                unit.hasFixture = !unit.controls.empty();
+            }
 
             config.units.push_back(unit);
         }

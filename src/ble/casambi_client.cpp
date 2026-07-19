@@ -990,37 +990,32 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
             std::vector<UnitStateInfo> states;
             if (parseStatusBroadcast(payload, payloadLen, states)) {
                 _applyUnitStates(states);
-            } else {
+            } else if (bleDebugEnabled) {
                 hexDump("BLE: Unparsed 0x06 payload", payload, payloadLen);
             }
             break;
         }
 
         case 0x07: {
-            // Operation echo from other controllers
+            // Incoming 0x07 — DIAGNOSTIC ONLY, no state is applied.
+            //
+            // Reading 0x07 as an "operation echo" is an unvalidated inference
+            // from the OUTGOING operation format; it conflicts with casambi-bt
+            // (which decodes incoming 0x07 as switch/sensor events) and has never
+            // been observed on the wire here. Any real state change also arrives
+            // as a 0x06, so acting on 0x07 would at best be redundant and at
+            // worst inject a bogus level from a mis-read switch event. We
+            // therefore decode it only for visibility and the malformed07 counter
+            // and deliberately do NOT call _applyUnitStates. Revisit with a real
+            // capture (add a Casambi switch/sensor) before acting on 0x07.
             OperationEcho echo;
-            if (parseOperationEcho(payload, payloadLen, echo)) {
-                if (casambiDebugEnabled) {
-                    Serial.printf("Casambi: Echo %s %s[%d]",
-                                  opcodeName(echo.opcode),
-                                  targetTypeName(echo.targetType),
-                                  echo.targetId);
-                }
-                if (echo.opcode == static_cast<uint8_t>(OpCode::SetLevel) && !echo.payload.empty()) {
-                    if (casambiDebugEnabled) Serial.printf(" level=%d", echo.payload[0]);
-
-                    if (echo.targetType == TARGET_TYPE_UNIT) {
-                        UnitStateInfo info;
-                        info.unitId = echo.targetId;
-                        info.level = echo.payload[0];
-                        info.on = (echo.payload[0] > 0);
-                        info.online = true;
-                        info.hasLevel = true;
-                        std::vector<UnitStateInfo> states = { info };
-                        _applyUnitStates(states);
-                    }
-                }
-                if (casambiDebugEnabled) Serial.println();
+            if (parseOperationEcho(payload, payloadLen, echo) && casambiDebugEnabled) {
+                Serial.printf("Casambi: 0x07 (diagnostic) %s %s[%d]",
+                              opcodeName(echo.opcode),
+                              targetTypeName(echo.targetType),
+                              echo.targetId);
+                if (!echo.payload.empty()) Serial.printf(" payload[0]=%d", echo.payload[0]);
+                Serial.println();
             }
             break;
         }
@@ -1183,8 +1178,10 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         }
 
         default: {
-            Serial.printf("BLE: <<< Unknown 0x%02x (%d bytes)\n", packetType, payloadLen);
-            hexDump("BLE: Unknown", payload, payloadLen);
+            if (bleDebugEnabled) {
+                Serial.printf("BLE: <<< Unknown 0x%02x (%d bytes)\n", packetType, payloadLen);
+                hexDump("BLE: Unknown", payload, payloadLen);
+            }
             break;
         }
     }
@@ -1226,41 +1223,67 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
             unit->level = state.level;
         }
 
-        // Interpret aux channels based on stored capabilities
-        // Cap 0x23 (3 channels): aux1=vertical, aux2=colorTemp
-        // Cap 0x13 (2 channels): aux1=vertical OR colorTemp (based on hasCCT/hasVertical)
-        // Cap 0x03/0x00 (1 channel): no aux
-
-        if (state.hasVertical && state.hasColorTemp) {
-            // 2 aux channels: vertical + temp
-            unit->vertical = state.vertical;
+        // Map the positional state bytes to the unit's controls by BIT OFFSET —
+        // the authoritative, cloud-driven interpretation. The parser fills the
+        // bytes positionally (byte 0 = level, byte 1 = aux1 in .vertical, byte 2
+        // = aux2 in .colorTemp); the fixture control at offset N*8 tells us what
+        // that byte MEANS (e.g. aux1 is vertical on unit 7 but temperature on
+        // unit 5). Each control's decoded value is stored for the generic API.
+        if (unit->hasFixture && !unit->controls.empty()) {
+            // colorTemp is uint16_t in UnitStateInfo but only ever carries a
+            // single 0x06 state byte here — narrow explicitly to silence -Wnarrowing.
+            const uint8_t stateBytes[3] = { state.level, state.vertical,
+                                            static_cast<uint8_t>(state.colorTemp) };
+            const bool    present[3]    = { state.hasLevel, state.hasVertical, state.hasColorTemp };
+            for (UnitControl& c : unit->controls) {
+                uint8_t idx = c.offset / 8;               // 8-bit byte-aligned controls
+                if (idx >= 3 || !present[idx]) continue;
+                c.value = stateBytes[idx];
+                if      (c.typeName == "vertical")    unit->vertical  = c.value;
+                else if (c.typeName == "temperature") unit->colorTemp = c.value;
+                // "dimmer" is already reflected in unit->level above.
+            }
+        }
+        // Fallback for units without a fixture definition: the old positional
+        // heuristic driven by the capability flags.
+        else if (state.hasVertical && state.hasColorTemp) {
+            unit->vertical  = state.vertical;
             unit->colorTemp = state.colorTemp;
         }
         else if (state.hasVertical) {
-            // 1 aux channel: use unit capabilities to decide
-            if (unit->hasVertical && unit->hasCCT) {
-                // Shouldn't happen for 1-aux, but store as vertical
-                unit->vertical = state.vertical;
-            } else if (unit->hasVertical) {
-                unit->vertical = state.vertical;
-            } else if (unit->hasCCT) {
-                unit->colorTemp = state.vertical;  // aux1 is actually CCT
+            if (unit->hasCCT && !unit->hasVertical) {
+                unit->colorTemp = state.vertical;   // the single aux is CCT
             } else {
-                // Unknown aux — store in vertical as fallback
-                unit->vertical = state.vertical;
+                unit->vertical  = state.vertical;   // vertical (or unknown → vertical)
             }
         }
 
         if (g_configMutex) xSemaphoreGive(g_configMutex);
 
-        // Log state change
-        if (casambiDebugEnabled) {
-            Serial.printf("Casambi: Unit [%d] '%s' -> level=%d %s",
+        // Log state change — fully generic: each channel is named by its cloud
+        // control type and annotated with its byte position (b<n>). Shown for
+        // either debug flag so it also appears with `debug ble on`.
+        if (casambiDebugEnabled || bleDebugEnabled) {
+            Serial.printf("Casambi: Unit [%d] '%s' %s%s",
                           unit->deviceId, unit->name.c_str(),
-                          unit->level, unit->on ? "ON" : "OFF");
-            if (unit->hasVertical) Serial.printf(" v=%d", unit->vertical);
-            if (unit->hasCCT) Serial.printf(" t=%d", unit->colorTemp);
-            if (!state.online) Serial.print(" OFFLINE");
+                          unit->on ? "ON" : "OFF",
+                          state.online ? "" : " OFFLINE");
+            if (unit->hasFixture && !unit->controls.empty()) {
+                for (const UnitControl& c : unit->controls) {
+                    Serial.printf(" %s(b%u)=%u", c.typeName.c_str(), c.offset / 8, c.value);
+                    if (c.typeName == "temperature" && c.max > c.min) {
+                        Serial.printf("(%uK)",
+                            (uint16_t)(c.min + (uint32_t)c.value * (c.max - c.min) / 255));
+                    }
+                }
+            } else {
+                // Fallback (no fixture controls): legacy named fields. Tagged so
+                // it is unmistakable that no cloud fixture drives this unit.
+                Serial.print(" [no-fixture/legacy]");
+                Serial.printf(" level=%d", unit->level);
+                if (unit->hasVertical) Serial.printf(" vertical=%d", unit->vertical);
+                if (unit->hasCCT)      Serial.printf(" colorTemp=%d", unit->colorTemp);
+            }
             Serial.println();
         }
 

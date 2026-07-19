@@ -25,6 +25,27 @@ static String lockedCopy(const String& s) {
     return out;
 }
 
+// Emit a unit's channels as a generic `controls` array so consumers (FHEM)
+// derive reading names from the cloud control types instead of hardcoding
+// vertical/colorTemp. Each entry: { type, value }, and temperature adds the
+// resolved kelvin plus its min/max bounds. Caller must already hold
+// g_configMutex (control values are written by the BLE task). No-op for units
+// without a fixture definition (older configs) — the legacy fields still ship.
+static void addUnitControls(JsonObject u, const CasambiUnit& unit) {
+    if (unit.controls.empty()) return;
+    JsonArray arr = u["controls"].to<JsonArray>();
+    for (const auto& c : unit.controls) {
+        JsonObject co = arr.add<JsonObject>();
+        co["type"]  = c.typeName;
+        co["value"] = c.value;
+        if (c.typeName == "temperature" && c.max > c.min) {
+            co["kelvin"] = (uint16_t)(c.min + (uint32_t)c.value * (c.max - c.min) / 255);
+            co["min"]    = c.min;
+            co["max"]    = c.max;
+        }
+    }
+}
+
 CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
     : _server(nullptr), _ws(nullptr), _client(client), _config(config), _running(false),
       _refreshRequested(false), _rebootRequested(false), _clearLogRequested(false),
@@ -377,6 +398,7 @@ String CasambiWebServer::_buildHelloMessage() const {
             u["cctMin"]    = unit.cctMinKelvin;
             u["cctMax"]    = unit.cctMaxKelvin;
         }
+        addUnitControls(u, unit);   // generic, cloud-derived channel list
     }
     if (g_configMutex) xSemaphoreGive(g_configMutex);
 
@@ -449,6 +471,7 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
                 doc["cctMin"]    = unit->cctMinKelvin;
                 doc["cctMax"]    = unit->cctMaxKelvin;
             }
+            addUnitControls(doc.as<JsonObject>(), *unit);   // generic channel list
         }
         if (g_configMutex) xSemaphoreGive(g_configMutex);
     } else {
@@ -806,6 +829,7 @@ void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
             u["cctMin"] = unit.cctMinKelvin;
             u["cctMax"] = unit.cctMaxKelvin;
         }
+        addUnitControls(u, unit);   // generic, cloud-derived channel list
     }
     if (g_configMutex) xSemaphoreGive(g_configMutex);
     String response;

@@ -179,7 +179,9 @@ debug casambi on/off         # Casambi network events (unit states, echo, callba
 debug web on/off             # HTTP API request logging
 debug parse on/off           # Protocol parse output with raw bytes (for analysis)
 debug heap on/off            # Heap monitoring output
+debug cloud on/off           # Dump raw cloud config on refresh (AES keys redacted)
 refresh                      # Re-download config from Casambi cloud
+                             # (with 'debug cloud on', prints the raw JSON for analysis)
 clearconfig                  # Factory reset
 ```
 
@@ -305,8 +307,18 @@ drop triggers a fresh `hello` snapshot, so clients never stay stale).
 `parse_partial` / `parse_malformed` count BLE packets that were only
 partially decoded (understood prefix applied, undecoded tail dropped —
 likely a protocol element the reverse-engineering does not cover yet) or
-rejected entirely; per-packet-type detail is shown by the serial `status`
-command.
+rejected entirely (nothing usable). Both fields are the **sum across packet
+types** 0x06 / 0x07 / 0x08. The **per-type breakdown** is available via the
+serial `status` command, which prints these lines only when a counter is
+non-zero:
+
+```
+  Partially decoded packets: 0x06=0 0x07=0 0x08=0
+  Malformed packets dropped: 0x06=0 0x07=0 0x08=0
+```
+
+In normal operation both stay at 0; a rising counter points to a protocol
+element worth capturing (get the raw hex with `debug parse on`).
 `gateway_rssi` is the BLE link strength to the gateway in dBm (refreshed every
 ~10 s; `0` = not measured yet). After a disconnect the response additionally
 carries `last_disconnect_reason` (numeric `DisconnectReason`) and
@@ -344,27 +356,41 @@ ESP32 the re-roll almost always lands there. Re-rolls appear in the event log
       "vertical": 127,
       "colorTemp": 58,
       "cctMin": 2700,
-      "cctMax": 4000
+      "cctMax": 4000,
+      "controls": [
+        { "type": "dimmer",      "value": 200 },
+        { "type": "vertical",    "value": 127 },
+        { "type": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
+      ]
     },
     {
       "id": 2,
-      "name": "Sento pendant",
+      "name": "air module",
       "type": 1422,
       "address": "aa:bb:cc:dd:ee:03",
       "online": true,
       "on": true,
       "level": 255,
-      "numChannels": 1
+      "numChannels": 1,
+      "controls": [
+        { "type": "dimmer", "value": 255 }
+      ]
     }
   ]
 }
 ```
 
-The `level`, `on`, `vertical`, and `colorTemp` fields are updated in real-time from status broadcasts received over the BLE mesh. Changes made via the Casambi app, timers, sensors, or other controllers are reflected here.
+The `controls` array is the canonical, cloud-derived per-channel state: one entry
+per fixture control, named by its control type, with the raw `value` (0–255) and,
+for `temperature`, the resolved `kelvin` plus its `min`/`max` bounds. Consumers
+(e.g. the FHEM integration) should read `controls` to name readings generically.
 
-`colorTemp` is a device-normalized value (0–255). To convert to Kelvin: `kelvin = cctMin + (colorTemp / 255) * (cctMax - cctMin)`.
-
-Fields like `vertical` and `colorTemp` only appear for units that support these controls.
+The legacy `level`, `vertical`, `colorTemp`, `cctMin`, and `cctMax` fields are
+kept for backward compatibility and only appear for units that support them;
+`colorTemp` is the same normalized 0–255 value (`kelvin = cctMin + (colorTemp /
+255) * (cctMax - cctMin)`). All state fields are updated in real-time from status
+broadcasts — changes via the Casambi app, timers, sensors, or other controllers
+are reflected here.
 
 **GET /api/groups** — List all groups
 
@@ -571,11 +597,16 @@ capability flags used by the FHEM integration for device identification:
       "vertical": 127,
       "colorTemp": 58,
       "cctMin": 2700,
-      "cctMax": 4000
+      "cctMax": 4000,
+      "controls": [
+        { "type": "dimmer",      "value": 200 },
+        { "type": "vertical",    "value": 127 },
+        { "type": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
+      ]
     },
     {
       "id": 2,
-      "name": "Sento pendant",
+      "name": "air module",
       "address": "aa:bb:cc:dd:ee:03",
       "uuid": "5678efgh-...",
       "online": true,
@@ -583,13 +614,19 @@ capability flags used by the FHEM integration for device identification:
       "level": 255,
       "hasCCT": false,
       "hasVertical": false,
-      "numChannels": 1
+      "numChannels": 1,
+      "controls": [
+        { "type": "dimmer", "value": 255 }
+      ]
     }
   ]
 }
 ```
 
-`vertical`, `colorTemp`, `cctMin`, and `cctMax` are only present for units that support these controls.
+The `controls` array (same shape as in `GET /api/units`) is the canonical,
+cloud-derived per-channel state that the FHEM integration uses to name readings
+generically. The legacy `vertical`, `colorTemp`, `cctMin`, and `cctMax` fields
+remain for compatibility and appear only for units that support them.
 
 The snapshot carries at most `WS_HELLO_MAX_UNITS` (50, `src/config.h`) units so
 the proactively pushed message can never grow into an allocation a fragmented
@@ -609,11 +646,16 @@ needing the rest fetch `GET /api/units` themselves.
   "vertical": 127,
   "colorTemp": 58,
   "cctMin": 2700,
-  "cctMax": 4000
+  "cctMax": 4000,
+  "controls": [
+    { "type": "dimmer",      "value": 200 },
+    { "type": "vertical",    "value": 127 },
+    { "type": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
+  ]
 }
 ```
 
-Triggered by any change originating from the Casambi mesh — whether sent by this controller, the Casambi app, a scene timer, a sensor, or another controller.
+Triggered by any change originating from the Casambi mesh — whether sent by this controller, the Casambi app, a scene timer, a sensor, or another controller. The `controls` array carries the generic, cloud-named per-channel state (see `GET /api/units`).
 
 #### `connection_state` — sent on BLE connect/disconnect
 
@@ -747,8 +789,8 @@ The controller is designed for 24/7 unattended operation:
 
 |Type|Description                                     |Status                                                |
 |----|------------------------------------------------|------------------------------------------------------|
-|0x06|Status Broadcast (unit states)                  |Fully parsed — brightness, vertical, color temperature; event-driven, one record per changed unit|
-|0x07|Operation Echo (commands from other controllers)|Parsed and applied to state                                                                      |
+|0x06|Status Broadcast (unit states)                  |Fully decoded — state bytes mapped generically to the unit's fixture controls (dimmer/vertical/temperature/…); event-driven, one record per changed unit|
+|0x07|Operation Echo / Switch Event (from other controllers)|**Diagnostic only** — decoded and logged, but no state applied. The operation-echo reading is an unverified inference (conflicts with casambi-bt's switch-event reading) and never observed on the wire; real changes always arrive as 0x06|
 |0x08|Unit State Update                               |Parsed via `parseUnitStateUpdate()`                                                              |
 |0x09|Mesh Topology                                   |Experimental parser — `[0x80+nodeId][metric][quality]` triplets; IDs map to units/groups/scenes  |
 |0x0A|Time Sync                                       |Recognized                                            |
@@ -761,13 +803,25 @@ The controller is designed for 24/7 unattended operation:
 
 ### Generic Capability Detection
 
-Unit capabilities are derived from the Casambi Cloud API response during setup:
+For each distinct unit type, the controller fetches the fixture definition
+(`GET https://api.casambi.com/fixture/{type}`) and reads its `controls` list —
+the authoritative description of every channel: control `type`
+(dimmer/vertical/temperature/white/slider/…), bit `offset`/`length`, and the
+Kelvin `min`/`max` for temperature — plus `stateLength`. These controls drive:
 
-- **Number of channels:** Length of `modes[0].state` string / 2 (1=dimmer, 2=dimmer+aux, 3=dimmer+vertical+temp)
-- **CCT support:** Presence of `settings.cct.minKelvins` and `settings.cct.maxKelvins`
-- **Vertical support:** Inferred — 3 channels always has vertical; 2 channels without CCT has vertical
+- **Decoding:** each incoming state byte is mapped to its control by bit offset
+  (`state byte n → control at offset n·8`), so a channel's meaning comes from the
+  cloud, not a fixed slot (e.g. the 2nd byte is *temperature* on a Dim+CCT unit
+  but *vertical* on a Dim+Vertical unit).
+- **Naming:** field and FHEM reading names are derived from the control types.
 
-No fixture-type-specific hardcoding is needed. New Casambi device types are supported automatically.
+Controls are persisted to LittleFS, so decoding works after a reboot without a
+cloud round-trip. If a fixture cannot be fetched, the controller falls back to a
+heuristic (channel count from `modes[0].state` length; CCT from
+`settings.cct.minKelvins`), logged alongside for verification.
+
+No fixture-type-specific hardcoding is needed; new device types and control
+types are supported automatically.
 
 ### Directory Structure
 
@@ -1073,12 +1127,20 @@ Casambi reassigns unit IDs.
 | `state` | `on` / `off` |
 | `brightness` | 0–100 (%) |
 | `online` | `true` / `false` |
-| `colorTemp` | Color temperature in **Kelvin** (CCT-capable units only) |
-| `vertical` | 0–255 light distribution (units with vertical control only) |
+| *(per control type)* | One reading per fixture control, **named by the cloud control type** — e.g. `vertical` (0–255), `temperature` (**Kelvin**), and future types (`white`, `slider`, …) appear automatically |
+| `temperature` | Color temperature in **Kelvin** (units with a `temperature` control) |
+| `colorTemp` | Compatibility alias of `temperature` (Kelvin), kept for existing dashboards / the HomeKit mapping |
+| `vertical` | 0–255 light distribution (units with a `vertical` control) |
 | `casambiId` | Current Casambi unit ID (may change after network reconfiguration) |
 | `casambiName` | Unit name as configured in the Casambi network |
 
-Units with vertical capability automatically get a companion **`CasambiVertical`**
+The channel readings are derived generically from the `controls` array the
+gateway sends (see the WebSocket `hello`/`unit_state` messages), so no per-fixture
+code is needed and new control types surface as readings automatically. If the
+gateway sends no `controls` (older firmware), the module falls back to the legacy
+`vertical`/`colorTemp` fields.
+
+Units with a `vertical` control automatically get a companion **`CasambiVertical`**
 device named `<unitName>_vertical`.  See [CasambiVertical](#casambivertical-companion-device) below.
 
 **Set commands** (capability-dependent, generated automatically):

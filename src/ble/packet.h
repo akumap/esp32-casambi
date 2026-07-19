@@ -143,8 +143,11 @@ struct PacketParseStats {
 const PacketParseStats& packetParseStats();
 
 /**
- * Hex dump helper for debug output
+ * Hex dump helper for debug output.
+ * maxBytes == 0 (the default) prints the COMPLETE buffer — raw BLE packet dumps
+ * rely on this so nothing is truncated. Pass a positive value only for a
+ * deliberately shortened preview.
  */
-void hexDump(const char* label, const uint8_t* data, size_t len, size_t maxBytes = 32);
+void hexDump(const char* label, const uint8_t* data, size_t len, size_t maxBytes = 0);
 
 #endif // PACKET_H

@@ -224,6 +224,13 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
 
     Serial.printf("API: Received %d bytes\n", response.length());
 
+    // Optional raw dump for protocol analysis (fixture modes/settings, capability
+    // signals). AES keys are redacted — see _dumpRedactedConfig. Opt-in via
+    // `debug cloud on`; off by default so key material is never printed unasked.
+    if (cloudDebugEnabled) {
+        _dumpRedactedConfig(response);
+    }
+
     // Transactional parse: build a scratch config first, and on full success
     // commit only the cloud-owned fields. A structurally broken response can
     // therefore never leave `config` half-overwritten — important for callers
@@ -240,6 +247,133 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
     config.units  = std::move(parsed.units);
     config.groups = std::move(parsed.groups);
     config.scenes = std::move(parsed.scenes);
+
+    // Non-fatal enhancement: replace the mode-string capability heuristic with
+    // the authoritative controls from each unit's fixture definition. Runs
+    // after the commit so it can never affect the transactional guarantee; a
+    // failed fixture fetch just leaves that unit on its heuristic values.
+    _fetchFixtures(config);
+    return true;
+}
+
+void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
+    std::vector<uint16_t> doneTypes;
+    for (CasambiUnit& unit : config.units) {
+        // Each distinct type is fetched once (types repeat across units).
+        bool seen = false;
+        for (uint16_t t : doneTypes) if (t == unit.type) { seen = true; break; }
+        if (seen) continue;
+        doneTypes.push_back(unit.type);
+
+        std::vector<UnitControl> controls;
+        uint8_t stateLength = 0;
+        String model, mode;
+        if (!_fetchFixtureControls(unit.type, controls, stateLength, model, mode)) {
+            Serial.printf("Fixture: type %u fetch/parse failed - keeping heuristic capabilities\n",
+                          unit.type);
+            continue;
+        }
+
+        // Derive the (backward-compatible) capability flags from the controls:
+        // presence of a vertical / temperature control is the authoritative
+        // signal, and the temperature control carries the Kelvin bounds.
+        bool hasVertical = false, hasCCT = false;
+        uint16_t cctMin = 0, cctMax = 0;
+        for (const UnitControl& c : controls) {
+            if (c.typeName == "vertical")         hasVertical = true;
+            else if (c.typeName == "temperature") { hasCCT = true; cctMin = c.min; cctMax = c.max; }
+        }
+
+        // Apply to every unit of this type; log heuristic vs. fixture so a
+        // divergence is visible for verification.
+        for (CasambiUnit& u : config.units) {
+            if (u.type != unit.type) continue;
+            // Generic: list the actual controls; keep the heuristic flags in
+            // parentheses purely as a verification cross-check.
+            Serial.printf("Fixture: unit %d (type %u) '%s' [%s] controls=[",
+                          u.deviceId, u.type, model.c_str(), mode.c_str());
+            for (size_t i = 0; i < controls.size(); i++) {
+                Serial.printf("%s%s", i ? "," : "", controls[i].typeName.c_str());
+                if (controls[i].typeName == "temperature" && controls[i].max > controls[i].min)
+                    Serial.printf("(%u-%uK)", controls[i].min, controls[i].max);
+            }
+            Serial.printf("]  (heuristic was vertical=%d cct=%d)\n", u.hasVertical, u.hasCCT);
+
+            u.controls     = controls;
+            u.stateLength  = stateLength;
+            u.hasFixture   = true;
+            u.hasVertical  = hasVertical;
+            u.hasCCT       = hasCCT;
+            if (hasCCT && cctMin && cctMax) {
+                u.cctMinKelvin = cctMin;
+                u.cctMaxKelvin = cctMax;
+            }
+        }
+    }
+}
+
+bool CasambiAPIClient::_fetchFixtureControls(uint16_t type, std::vector<UnitControl>& controls,
+                                             uint8_t& stateLength, String& model, String& mode) {
+    if (!isWiFiConnected()) {
+        _lastError = "WiFi not connected";
+        return false;
+    }
+
+    String url = String(CASAMBI_API_BASE) + API_FIXTURE_PATH + String(type);
+    Serial.printf("API: GET %s\n", url.c_str());
+
+    // The fixture endpoint is public (no session header — see casambi-bt).
+    _beginRequest(url);
+    _http.setTimeout(API_REQUEST_TIMEOUT_MS);
+
+    int httpCode = _http.GET();
+    if (httpCode != 200) {
+        Serial.printf("API: Fixture %u -> HTTP %d\n", type, httpCode);
+        _http.end();
+        return false;
+    }
+
+    String response = _http.getString();
+    _http.end();
+
+    // Raw dump for analysis (fixture defs carry no secrets, so no redaction).
+    if (cloudDebugEnabled) {
+        Serial.printf("API: ---- raw fixture %u (%d bytes) ----\n", type, response.length());
+        Serial.println(response);
+        Serial.println("API: ---- end raw fixture ----");
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, response)) {
+        Serial.printf("API: Fixture %u JSON parse error\n", type);
+        return false;
+    }
+    if (!doc["controls"].is<JsonArrayConst>()) {
+        Serial.printf("API: Fixture %u has no controls array\n", type);
+        return false;
+    }
+
+    // Human-readable identity for the verification log (e.g. model "Mito
+    // sospeso", mode "EXT/3ch/Dim,Vertical,TW[NoMix]").
+    model = doc["model"].as<String>();
+    mode  = doc["mode"].as<String>();
+    stateLength = doc["stateLength"] | 0;
+
+    // Store the controls verbatim (type name lower-cased). These carry the
+    // bit layout (offset/length) and the Kelvin bounds and become the single
+    // source of truth for naming and decoding.
+    controls.clear();
+    for (JsonObjectConst ctrl : doc["controls"].as<JsonArrayConst>()) {
+        UnitControl uc;
+        uc.typeName = ctrl["type"].as<String>();
+        uc.typeName.toLowerCase();
+        uc.offset = ctrl["offset"] | 0;
+        uc.length = ctrl["length"] | 8;
+        // min/max are integers in the JSON (e.g. 2700/4000); tolerate float too.
+        uc.min = static_cast<uint16_t>(ctrl["min"] | 0);
+        uc.max = static_cast<uint16_t>(ctrl["max"] | 0);
+        controls.push_back(uc);
+    }
     return true;
 }
 
@@ -559,4 +693,59 @@ bool CasambiAPIClient::_hexToBytes(const String& hex, uint8_t* bytes, size_t len
     }
 
     return true;
+}
+
+// True only for a run of exactly AES_KEY_SIZE*2 hex digits — the shape of a
+// keyStore AES key. The length guard makes a false positive on some other
+// "key"-named field essentially impossible; even if one matched, redaction only
+// removes data from a debug view, so it is harmless either way.
+static bool _looksLikeAesKeyHex(const char* s, size_t len) {
+    if (len != AES_KEY_SIZE * 2) return false;
+    for (size_t k = 0; k < len; k++) {
+        const char c = s[k];
+        const bool hex = (c >= '0' && c <= '9') ||
+                         (c >= 'a' && c <= 'f') ||
+                         (c >= 'A' && c <= 'F');
+        if (!hex) return false;
+    }
+    return true;
+}
+
+void CasambiAPIClient::_dumpRedactedConfig(const String& json) {
+    const char* p = json.c_str();
+    const size_t n = json.length();
+    static const char* NEEDLE = "\"key\"";
+    static const size_t NLEN  = 5;
+
+    Serial.println("API: ---- raw cloud config (AES keys redacted) ----");
+
+    // Emit verbatim in chunks; only the 32-hex value after a "key" field is
+    // swapped for "***". `seg` marks the start of the not-yet-flushed run.
+    size_t seg = 0;
+    size_t i = 0;
+    while (i < n) {
+        if (i + NLEN <= n && memcmp(p + i, NEEDLE, NLEN) == 0) {
+            size_t j = i + NLEN;
+            while (j < n && (p[j] == ' ' || p[j] == '\t' || p[j] == ':')) j++;
+            if (j < n && p[j] == '"') {
+                const size_t valStart = j + 1;
+                size_t valEnd = valStart;
+                while (valEnd < n && p[valEnd] != '"') valEnd++;
+                if (valEnd < n && _looksLikeAesKeyHex(p + valStart, valEnd - valStart)) {
+                    // Flush up to and including the opening quote, then redact.
+                    Serial.write(reinterpret_cast<const uint8_t*>(p + seg), valStart - seg);
+                    Serial.print("***");
+                    seg = valEnd;      // resume at the closing quote
+                    i = valEnd;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+    if (seg < n) {
+        Serial.write(reinterpret_cast<const uint8_t*>(p + seg), n - seg);
+    }
+    Serial.println();
+    Serial.println("API: ---- end raw cloud config ----");
 }

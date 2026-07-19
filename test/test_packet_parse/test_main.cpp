@@ -383,6 +383,94 @@ void test_fuzz_truncated_and_mutated_valid_packets(void) {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Golden vectors — real 0x06 payloads captured from a live network
+// (Occhio Mito sospeso, unit 7, type 19425: dimmer@0, vertical@8, temperature@16).
+// These freeze the parser output byte-for-byte against hardware, so the move to
+// generic control-driven decoding cannot silently change what the parser emits.
+// aux1 is stored in the .vertical field, aux2 in .colorTemp (positional; the
+// semantic meaning is assigned later from the fixture controls).
+// ---------------------------------------------------------------------------
+
+static void expect_one(const uint8_t* pkt, size_t len, uint8_t id, uint8_t level,
+                       uint8_t aux1, bool hasAux1, uint8_t aux2, bool hasAux2) {
+    states.clear();
+    TEST_ASSERT_EQUAL(ParseStatus::Complete,
+                      packetparse::parseStatusBroadcast(pkt, len, states));
+    TEST_ASSERT_EQUAL(1, states.size());
+    TEST_ASSERT_EQUAL(id, states[0].unitId);
+    TEST_ASSERT_EQUAL(level, states[0].level);
+    TEST_ASSERT_EQUAL(hasAux1, states[0].hasVertical);
+    if (hasAux1) TEST_ASSERT_EQUAL(aux1, states[0].vertical);
+    TEST_ASSERT_EQUAL(hasAux2, states[0].hasColorTemp);
+    if (hasAux2) TEST_ASSERT_EQUAL(aux2, states[0].colorTemp);
+}
+
+void test_06_golden_unit7_sweep(void) {
+    // on: level 255, vertical 127, temp 0
+    const uint8_t on[]     = { 0x07,0x03,0x23,0xff,0x7f,0x00 };
+    expect_one(on, sizeof(on), 7, 255, 127, true, 0, true);
+    // dimmed 46%: flags 0x13 => stored_level byte present, level 117
+    const uint8_t dim[]    = { 0x07,0x13,0x23,0x75,0x75,0x7f,0x00 };
+    expect_one(dim, sizeof(dim), 7, 117, 127, true, 0, true);
+    // temperature cold: aux2 = 255
+    const uint8_t cold[]   = { 0x07,0x13,0x23,0x75,0x75,0x7f,0xff };
+    expect_one(cold, sizeof(cold), 7, 117, 127, true, 255, true);
+    // vertical 100%: aux1 = 255
+    const uint8_t vhi[]    = { 0x07,0x13,0x23,0x75,0x75,0xff,0x00 };
+    expect_one(vhi, sizeof(vhi), 7, 117, 255, true, 0, true);
+    // vertical 0%: aux1 = 0
+    const uint8_t vlo[]    = { 0x07,0x13,0x23,0x75,0x75,0x00,0x00 };
+    expect_one(vlo, sizeof(vlo), 7, 117, 0, true, 0, true);
+}
+
+void test_06_golden_multiunit_snapshot(void) {
+    // 49-byte connect snapshot, 9 records, consumed exactly (Complete).
+    const uint8_t pkt[] = {
+        0x01,0x13,0x13,0xfe,0x00,0x80,           // unit 1: level 0, aux1 128
+        0x02,0x10,0x00,0x71,0x00,                // unit 2: level 0, offline
+        0x03,0x00,0x00,0x00,                     // unit 3: level 0, offline
+        0x05,0x10,0x10,0xf7,0x00,0x00,           // unit 5: level 0, aux1 0
+        0x07,0x03,0x23,0xff,0x7f,0x00,           // unit 7: level 255, aux1 127, aux2 0
+        0x08,0x10,0x10,0xf7,0x00,0x00,           // unit 8: level 0, aux1 0
+        0x09,0x10,0x10,0xfe,0x00,0x00,           // unit 9: level 0, aux1 0
+        0x0a,0x10,0x00,0xfe,0x00,                // unit 10: level 0, offline
+        0x0b,0x07,0x03,0x80,0xff                 // unit 11: cap 0x03 const byte, level 255
+    };
+    TEST_ASSERT_EQUAL(ParseStatus::Complete,
+                      packetparse::parseStatusBroadcast(pkt, sizeof(pkt), states));
+    TEST_ASSERT_EQUAL(9, states.size());
+
+    // ids in order
+    const uint8_t ids[9] = { 1,2,3,5,7,8,9,10,11 };
+    for (int i = 0; i < 9; i++) TEST_ASSERT_EQUAL(ids[i], states[i].unitId);
+
+    // unit 1: online, aux1 present = 128
+    TEST_ASSERT_TRUE(states[0].online);
+    TEST_ASSERT_TRUE(states[0].hasVertical);
+    TEST_ASSERT_EQUAL(128, states[0].vertical);
+    // unit 2/3: offline, no aux
+    TEST_ASSERT_FALSE(states[1].online);
+    TEST_ASSERT_FALSE(states[1].hasVertical);
+    TEST_ASSERT_FALSE(states[2].online);
+    // unit 5: offline, one aux = 0
+    TEST_ASSERT_FALSE(states[3].online);
+    TEST_ASSERT_TRUE(states[3].hasVertical);
+    TEST_ASSERT_EQUAL(0, states[3].vertical);
+    // unit 7: online on, level 255, aux1 127, aux2 0
+    TEST_ASSERT_TRUE(states[4].online);
+    TEST_ASSERT_TRUE(states[4].on);
+    TEST_ASSERT_EQUAL(255, states[4].level);
+    TEST_ASSERT_EQUAL(127, states[4].vertical);
+    TEST_ASSERT_TRUE(states[4].hasColorTemp);
+    TEST_ASSERT_EQUAL(0, states[4].colorTemp);
+    // unit 11: online on, level 255, cap 0x03 (0 aux, const byte)
+    TEST_ASSERT_TRUE(states[8].online);
+    TEST_ASSERT_TRUE(states[8].on);
+    TEST_ASSERT_EQUAL(255, states[8].level);
+    TEST_ASSERT_FALSE(states[8].hasVertical);
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
 
@@ -399,6 +487,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_06_unknown_cap_first_record_malformed);
     RUN_TEST(test_06_trailing_bytes_partial);
     RUN_TEST(test_06_too_short_rejected);
+    RUN_TEST(test_06_golden_unit7_sweep);
+    RUN_TEST(test_06_golden_multiunit_snapshot);
 
     RUN_TEST(test_07_exact_length_ok);
     RUN_TEST(test_07_empty_payload_ok);
