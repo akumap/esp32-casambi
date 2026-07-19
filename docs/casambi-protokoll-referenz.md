@@ -638,20 +638,24 @@ Für `cap=0x23` errechnen **beide** dieselbe Satzlänge von 6 Byte — die
 „malformed/ein-Byte-zu-kurz"-Annahme aus Issue #34 trifft in **keiner** der
 beiden Implementierungen zu.
 
-**D.5.2 Zustands-Semantik.** `[Δ]` Die Firmware weist **feste Byte-Slots** zu
-(`level`, `aux1→vertical`, `aux2→colorTemp`; `parseStatusBroadcast` +
-`_applyUnitStates`) und entscheidet über die gespeicherten Booleans
-`hasVertical`/`hasCCT`. Es gibt **keine** bit-genaue, offset/length-basierte
-Dekodierung wie in `Unit.setStateFromBytes` (B.11). Sub-Byte-Felder (z. B.
-gepacktes RGB) können damit nicht sauber dargestellt werden.
+**D.5.2 Zustands-Semantik.** `[≈]` Die Protokollschicht (`parseStatusBroadcast`)
+extrahiert die State-Bytes weiter positionsbasiert (`level`, `aux1`, `aux2`);
+die **Bedeutung** wird im Unit-Modell (`_applyUnitStates`) **generisch aus den
+Fixture-Controls** zugeordnet: State-Byte `n` → Control mit `offset = n·8`, und
+dessen `typeName` (dimmer/vertical/temperature/…) bestimmt Ziel und Benennung.
+Damit ist die feste „aux1→vertical"-Annahme aufgehoben (aux1 ist z. B.
+temperature auf Unit 5, vertical auf Unit 7). Jeder Control-Wert wird für die
+generische API gespeichert. Sub-Byte-Felder (RGB/XY) werden noch nicht
+bit-entpackt — im aktuellen Bestand kommen sie nicht vor.
 
-> **Stand der Angleichung.** Der `/fixture/{id}`-Abruf (A.6) ist umgesetzt
-> (`_fetchFixtures`, D.1): die Fähigkeits-**Flags** kommen nun aus den echten
-> Controls, die Kanalzahl-Heuristik ist nur noch Fallback. **Offen** bleibt die
-> bit-genaue Zustands-Dekodierung nach `offset`/`length` (statt Byte-Slots,
-> D.5.2) samt Trennung Protokollschicht ↔ Unit-Modell — regressionssicher gegen
-> die heute lauffähigen Occhio-Leuchten (Golden-Vector-Tests aus echten
-> BLE-Captures, Deskriptoren aus denselben Fixture-Daten).
+> **Stand der Angleichung.** Umgesetzt: `/fixture/{id}`-Abruf (D.1) mit
+> Speicherung + Persistenz der Controls (offset/length/min/max/stateLength),
+> **control-gesteuerte, cloud-abgeleitete Dekodierung** (`_applyUnitStates`),
+> **generische API** (`controls`-Array je Unit) und **FHEM**-Readings, deren
+> Namen aus den Cloud-Control-Typen stammen. Golden-Vector-Tests
+> (`test/test_packet_parse`) frieren die Occhio-Captures byte-für-byte ein.
+> Offen nur noch: bit-genaues Entpacken von Sub-Byte-Controls (RGB/XY) und
+> generische Set-/Homebridge-Pfade für neue Control-Typen.
 
 ---
 
