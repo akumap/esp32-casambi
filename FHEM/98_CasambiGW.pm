@@ -67,6 +67,22 @@ sub CasambiGW_NormalizeMac {
 use constant WS_PING_INTERVAL    => 30;   # seconds between WS keepalive pings
 use constant WS_PONG_TIMEOUT     => 60;   # seconds without pong → reconnect
 use constant MIN_FIRMWARE_BUILD  => 1;    # minimum accepted ESP32 build number
+
+# ESP32 <-> FHEM interface version implemented by THIS module (one shared
+# version for the ESP's REST API and WebSocket protocol).
+#
+# VERSIONING CONTRACT — read this before editing the ESP<->FHEM interface.
+# These constants MUST always equal FHEM_API_VERSION_MAJOR/MINOR in
+# src/config.h (the full contract with semver rules and the per-change
+# checklist lives there). Whenever a change alters what travels between this
+# module and the firmware — any /api/* request/response, any WebSocket
+# message type or field — bump the version on BOTH sides in the same commit:
+# MINOR for compatible extensions, MAJOR (MINOR reset to 0) for incompatible
+# changes. A hello without api_version_* fields means firmware at 1.0
+# (predates the contract). Mismatches only warn (apiVersionWarning reading),
+# they never block operation.
+use constant API_VERSION_MAJOR   => 1;    # keep in sync with src/config.h
+use constant API_VERSION_MINOR   => 0;    # keep in sync with src/config.h
 use constant INFO_POLL_SETUP     => 15;   # seconds between /api/info polls while the ESP is in setup mode
 use constant INFO_POLL_OFFLINE   => 30;   # seconds between /api/info polls while the ESP is unreachable
 
@@ -144,6 +160,45 @@ sub CasambiGW_ClassifyRefreshResponse {
     return 'conflict'     if $code == 409;
     return 'gatewayerror' if $code >= 500;
     return 'unexpected';
+}
+
+# Compare the ESP's reported API version against the version implemented by
+# this module. Missing/undef fields mean firmware at 1.0 (predates the
+# versioning contract — see API_VERSION_MAJOR above). Returns "ok" when the
+# major versions match (minor differences are compatible by definition,
+# regardless of which side is newer), otherwise a human-readable warning.
+# Pure helper (no FHEM runtime) so it is unit-testable in t/.
+sub CasambiGW_ApiVersionWarning {
+    my ($espMajor, $espMinor) = @_;
+    $espMajor //= 1;
+    $espMinor //= 0;
+    return "ok" if $espMajor == API_VERSION_MAJOR;
+    my $hint = $espMajor > API_VERSION_MAJOR
+        ? "please update the FHEM module"
+        : "please update the ESP32 firmware";
+    return sprintf("ESP32 API version %d.%d is incompatible with FHEM module "
+                 . "API version %d.%d - %s",
+                   $espMajor, $espMinor, API_VERSION_MAJOR, API_VERSION_MINOR,
+                   $hint);
+}
+
+# Compare the Casambi network protocol version against the range the ESP32
+# firmware reports as tested ([$min,$max], from the hello message). Returns
+# "ok" when inside the range or when any input is missing (old firmware that
+# does not report the numbers yet), otherwise a human-readable warning. The
+# Casambi network version cannot be influenced, so a mismatch is informational
+# only — mirrors the firmware's own serial warnings (checkCasambiVersions()).
+# Pure helper (no FHEM runtime) so it is unit-testable in t/.
+sub CasambiGW_CasambiVersionWarning {
+    my ($ver, $min, $max) = @_;
+    return "ok" if !defined $ver || !defined $min || !defined $max;
+    return sprintf("Casambi network protocol v%d is older than the minimum "
+                 . "supported v%d - operation may fail", $ver, $min)
+        if $ver < $min;
+    return sprintf("Casambi network protocol v%d is newer than the latest "
+                 . "tested v%d - should work, watch for anomalies", $ver, $max)
+        if $ver > $max;
+    return "ok";
 }
 
 # Build an HTTP header string for HttpUtils, appending the X-API-Key line when a
@@ -265,11 +320,24 @@ sub CasambiGW_InfoCb {
     }
 
     my $configured = $info->{configured} ? 1 : 0;
+    # Interface version from the unauthenticated /api/info: detects an
+    # incompatible firmware BEFORE the WebSocket is opened (the authenticated
+    # hello repeats the fields and refreshes the same readings). Missing
+    # fields mean firmware at 1.0 — see VERSIONING CONTRACT at
+    # API_VERSION_MAJOR.
+    my $espMajor = $info->{api_version_major} // 1;
+    my $espMinor = $info->{api_version_minor} // 0;
+    my $apiWarn  = CasambiGW_ApiVersionWarning($espMajor, $espMinor);
     readingsBeginUpdate($hash);
     readingsBulkUpdate($hash, "esp32Build", $info->{build})  if defined $info->{build};
     readingsBulkUpdate($hash, "configured", $configured ? "true" : "false");
     readingsBulkUpdate($hash, "network", $info->{network})   if defined $info->{network};
+    readingsBulkUpdate($hash, "espApiVersion",  "$espMajor.$espMinor");
+    readingsBulkUpdate($hash, "fhemApiVersion",
+        API_VERSION_MAJOR . "." . API_VERSION_MINOR);
+    readingsBulkUpdate($hash, "apiVersionWarning", $apiWarn);
     readingsEndUpdate($hash, 1);
+    Log3 $name, 2, "$name: WARNING: $apiWarn" if $apiWarn ne "ok";
 
     if ($configured) {
         Log3 $name, 3, "$name: ESP configured (network '"
@@ -663,6 +731,41 @@ sub CasambiGW_HandleHello {
     } else {
         readingsSingleUpdate($hash, "esp32BuildWarning", "ok", 1);
     }
+
+    # Interface versions (see VERSIONING CONTRACT at API_VERSION_MAJOR).
+    # Missing fields mean firmware at interface version 1.0 / firmware that
+    # does not report the Casambi protocol numbers yet — the helpers handle
+    # both, so old firmware never produces a spurious warning.
+    my $espMajor = $msg->{api_version_major} // 1;
+    my $espMinor = $msg->{api_version_minor} // 0;
+    my $apiWarn  = CasambiGW_ApiVersionWarning($espMajor, $espMinor);
+    my $casWarn  = CasambiGW_CasambiVersionWarning(
+        $msg->{casambi_protocol_version},
+        $msg->{casambi_protocol_min},
+        $msg->{casambi_protocol_max});
+
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "espApiVersion",  "$espMajor.$espMinor");
+    readingsBulkUpdate($hash, "fhemApiVersion",
+        API_VERSION_MAJOR . "." . API_VERSION_MINOR);
+    readingsBulkUpdate($hash, "apiVersionWarning", $apiWarn);
+    if (defined $msg->{casambi_protocol_version}) {
+        readingsBulkUpdate($hash, "casambiProtocolVersion",
+            $msg->{casambi_protocol_version});
+        # Named casambiProtocolVersionRange (not espCasambi...) so the default
+        # alphabetical readings order places it next to casambiProtocolVersion.
+        readingsBulkUpdate($hash, "casambiProtocolVersionRange",
+            ($msg->{casambi_protocol_min} // "?") . "-"
+          . ($msg->{casambi_protocol_max} // "?"));
+    }
+    readingsBulkUpdate($hash, "casambiVersionWarning", $casWarn);
+    readingsEndUpdate($hash, 1);
+
+    Log3 $name, 2, "$name: WARNING: $apiWarn" if $apiWarn ne "ok";
+    Log3 $name, 2, "$name: WARNING: $casWarn" if $casWarn ne "ok";
+    Log3 $name, 4, "$name: ESP32 API $espMajor.$espMinor, FHEM module API "
+                 . API_VERSION_MAJOR . "." . API_VERSION_MINOR
+        if $apiWarn eq "ok" && $espMinor != API_VERSION_MINOR;
 
     # Report the currently used gateway (name/MAC/status) for transparency.
     CasambiGW_UpdateGateway($hash, $msg->{gateway});
@@ -1061,6 +1164,22 @@ sub CasambiGW_Ready {
     <li><b>esp32Build</b> &mdash; build number reported by the ESP32 in the hello message</li>
     <li><b>esp32BuildWarning</b> &mdash; "ok" or a human-readable warning when the ESP32
         build is below the minimum required build</li>
+    <li><b>espApiVersion</b> &mdash; ESP32&harr;FHEM interface version
+        (major.minor) reported by the firmware; firmware that predates
+        interface versioning is shown as 1.0</li>
+    <li><b>fhemApiVersion</b> &mdash; interface version implemented by this
+        module</li>
+    <li><b>apiVersionWarning</b> &mdash; "ok" while the major versions of
+        espApiVersion and fhemApiVersion match (minor differences are
+        compatible by design), otherwise a warning naming the side that needs
+        an update. A mismatch never blocks operation.</li>
+    <li><b>casambiProtocolVersion</b> &mdash; protocol version of the Casambi
+        network (from the hello message)</li>
+    <li><b>casambiProtocolVersionRange</b> &mdash; range of Casambi protocol
+        versions the ESP32 firmware is tested with, e.g. "10-11"</li>
+    <li><b>casambiVersionWarning</b> &mdash; "ok" while casambiProtocolVersion
+        lies inside casambiProtocolVersionRange, otherwise a warning (the
+        Casambi network version cannot be influenced; operation continues)</li>
   </ul>
 </ul>
 =end html

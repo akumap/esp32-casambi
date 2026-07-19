@@ -30,12 +30,60 @@
 #define MAX_PROTOCOL_VERSION      11
 
 // ESP32 firmware build number.
-// Normally injected at compile time by scripts/build_number.py
-// (git rev-list --count origin/main).  The fallback below is used only
-// when building outside of PlatformIO (e.g. Arduino IDE) or without git.
+// scripts/build_number.py (PlatformIO pre-build script) writes the current
+// git commit count of origin/main into src/firmware_build.h (gitignored) and
+// rewrites that file ONLY when the number changes.  Delivered as a generated
+// header instead of a -DFIRMWARE_BUILD flag on purpose: SCons does not
+// recompile unchanged sources when an injected flag changes, so a flag-based
+// number silently survives incremental builds (`git pull && pio run` kept
+// reporting the old build).  A content change in the header is tracked by the
+// dependency scanner, so exactly the affected translation units recompile.
+// The fallback below is used only when the header does not exist — building
+// outside of PlatformIO (e.g. Arduino IDE) or without git.
+#if defined(__has_include)
+#  if __has_include("firmware_build.h")
+#    include "firmware_build.h"
+#  endif
+#endif
 #ifndef FIRMWARE_BUILD
 #define FIRMWARE_BUILD            0
 #endif
+
+// ESP32 <-> FHEM interface version (one shared version for the REST API and
+// the WebSocket protocol — both live in the same firmware and are consumed by
+// the same FHEM module).
+//
+// VERSIONING CONTRACT — read this before editing the ESP<->FHEM interface.
+// The interface is everything FHEM can observe: every /api/* endpoint
+// (routes, methods, status codes, JSON request/response fields) and every
+// WebSocket message type and its fields (see webserver.cpp and
+// setup_portal.cpp). Whenever a change you make alters any of that, you MUST
+// update the two constants below IN THE SAME COMMIT, following semver rules:
+//
+//   - Compatible EXTENSION (new endpoint, new message type, new optional
+//     field; both sides ignore what they don't know):
+//         increment FHEM_API_VERSION_MINOR.
+//   - INCOMPATIBLE change (endpoint/field/message removed or renamed,
+//     meaning/type/unit of an existing field changed, auth changed):
+//         increment FHEM_API_VERSION_MAJOR and reset MINOR to 0.
+//   - Pure refactoring/bugfixes that leave the wire format unchanged:
+//         no version change.
+//
+// Checklist for every interface change (all steps mandatory):
+//   1. Bump the constants below per the rules above.
+//   2. Mirror the same values in FHEM/98_CasambiGW.pm
+//      (use constant API_VERSION_MAJOR/MINOR) — they must always be equal
+//      here and there, because both sides ship together in this repo.
+//   3. Document the change in the README.md sections "REST API" /
+//      "WebSocket Push" (that is where the interface is specified).
+//   4. On a MAJOR bump, also update the FHEM-side handling so the module
+//      still degrades gracefully against the previous major version.
+//
+// A missing api_version_* field on the wire means version 1.0 (firmware
+// predating this contract). Version mismatches are WARNED about in FHEM but
+// never block operation (fail-operational, see docs/konzept-versionierung.md).
+#define FHEM_API_VERSION_MAJOR    1
+#define FHEM_API_VERSION_MINOR    0
 
 // Minimum Casambi unit firmware version (the numeric part of "Evolution/X.Y")
 #define MIN_UNIT_FIRMWARE_VERSION 48.0f

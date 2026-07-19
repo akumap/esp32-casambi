@@ -348,7 +348,18 @@ String CasambiWebServer::_gatewayName(const String& mac) const {
 String CasambiWebServer::_buildHelloMessage() const {
     JsonDocument doc;
     doc["type"] = "hello";
-    doc["build"] = FIRMWARE_BUILD;  // injected by scripts/build_number.py
+    doc["build"] = FIRMWARE_BUILD;  // from generated firmware_build.h (see config.h)
+    // ESP<->FHEM interface version. If you add/remove/rename fields in ANY
+    // WebSocket message or /api/* endpoint, follow the VERSIONING CONTRACT at
+    // FHEM_API_VERSION_MAJOR in config.h (bump version + mirror in FHEM).
+    doc["api_version_major"] = FHEM_API_VERSION_MAJOR;
+    doc["api_version_minor"] = FHEM_API_VERSION_MINOR;
+    // Casambi network protocol version vs. the range this firmware is tested
+    // with (FHEM computes the mismatch warning from these three numbers).
+    // Authenticated hello only — deliberately NOT in the open /api/info.
+    doc["casambi_protocol_version"] = _config->protocolVersion;
+    doc["casambi_protocol_min"]     = MIN_PROTOCOL_VERSION;
+    doc["casambi_protocol_max"]     = MAX_PROTOCOL_VERSION;
     // Network name for the FHEM "network" reading. Deliberately NOT part of
     // the unauthenticated /api/info — hello only reaches authenticated
     // WebSocket clients. Safe unlocked read: written only at boot/refresh,
@@ -523,6 +534,13 @@ void CasambiWebServer::_setupRoutes() {
         JsonDocument d;
         d["configured"] = true;
         d["build"]      = FIRMWARE_BUILD;
+        // Interface version, exposed unauthenticated on purpose: it reveals
+        // nothing about the network and lets FHEM detect an incompatible
+        // firmware BEFORE opening the WebSocket. Any change to this endpoint's
+        // fields falls under the VERSIONING CONTRACT in config.h — keep the
+        // setup-portal /api/info (setup_portal.cpp) shape-identical.
+        d["api_version_major"] = FHEM_API_VERSION_MAJOR;
+        d["api_version_minor"] = FHEM_API_VERSION_MINOR;
         String out; serializeJson(d, out);
         request->send(200, "application/json", out);
     });

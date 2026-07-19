@@ -14,6 +14,11 @@
  *   {"type":"unit_state","id":1,"level":128,"online":true,"on":true,
  *     "vertical":127,"colorTemp":58,"cctMin":2700,"cctMax":4000}  – aux fields omitted if unsupported
  *   {"type":"connection_state","connected":true,"reason":0}
+ *
+ * This WebSocket protocol and the /api/* REST endpoints together form the
+ * versioned ESP<->FHEM interface. Before changing message types, fields,
+ * endpoints, or their semantics, read and follow the VERSIONING CONTRACT at
+ * FHEM_API_VERSION_MAJOR in config.h.
  */
 
 #ifndef WEBSERVER_H

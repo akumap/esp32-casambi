@@ -254,7 +254,7 @@ Notes:
 **GET /api/info** — Lightweight discovery endpoint (used by the FHEM module)
 
 ```json
-{ "configured": true, "build": 42 }
+{ "configured": true, "build": 42, "api_version_major": 1, "api_version_minor": 0 }
 ```
 
 Served in both modes: while the device is still in the setup portal it returns
@@ -262,8 +262,14 @@ Served in both modes: while the device is still in the setup portal it returns
 can poll this to tell a ready gateway apart from one still in setup, and connect
 automatically once it becomes ready. This is the **only** endpoint that stays
 unauthenticated (so discovery works before the client knows the token), and it
-deliberately exposes nothing beyond `configured`/`build` — no network name, MAC
-or IP.
+deliberately exposes nothing beyond `configured`/`build` and the interface
+version — no network name, MAC or IP.
+
+`api_version_major`/`api_version_minor` carry the **ESP↔FHEM interface
+version** (one shared version for the REST API and the WebSocket protocol; see
+[Interface versioning](#interface-versioning-esp--fhem) below). Firmware
+predating interface versioning omits the fields; clients must treat that as
+version `1.0`.
 
 **GET /api/status**
 
@@ -580,6 +586,11 @@ capability flags used by the FHEM integration for device identification:
 {
   "type": "hello",
   "build": 1,
+  "api_version_major": 1,
+  "api_version_minor": 0,
+  "casambi_protocol_version": 11,
+  "casambi_protocol_min": 10,
+  "casambi_protocol_max": 11,
   "network": "My Home",
   "ble_connected": true,
   "units": [
@@ -627,6 +638,15 @@ The `controls` array (same shape as in `GET /api/units`) is the canonical,
 cloud-derived per-channel state that the FHEM integration uses to name readings
 generically. The legacy `vertical`, `colorTemp`, `cctMin`, and `cctMax` fields
 remain for compatibility and appear only for units that support them.
+
+`api_version_major`/`api_version_minor` are the ESP↔FHEM interface version
+(see [Interface versioning](#interface-versioning-esp--fhem)).
+`casambi_protocol_version` is the protocol version of the connected Casambi
+network, `casambi_protocol_min`/`casambi_protocol_max` the range this firmware
+is tested with (`MIN_PROTOCOL_VERSION`/`MAX_PROTOCOL_VERSION` in
+`src/config.h`) — FHEM computes its `casambiVersionWarning` reading from these
+three numbers. They travel only in the authenticated `hello`, not in the open
+`/api/info`.
 
 The snapshot carries at most `WS_HELLO_MAX_UNITS` (50, `src/config.h`) units so
 the proactively pushed message can never grow into an allocation a fragmented
@@ -978,10 +998,21 @@ git pull
 pio run -e devkit-v4 -t upload
 ```
 
-The pre-build script writes a `-DFIRMWARE_BUILD=<n>` compiler flag that is
-picked up by `src/web/webserver.cpp`.  Because SCons tracks source-file
-timestamps rather than flag changes, `webserver.cpp` contains a comment that
-is updated with each release to force a recompile after `git pull`.
+The pre-build script writes the number into the generated header
+`src/firmware_build.h` (gitignored), which `src/config.h` includes with a
+fallback of `0`. The file is rewritten **only when the number changes**, so
+the build system's dependency tracking recompiles exactly the affected
+translation units on the next `pio run` after a `git pull` — no clean build
+or manual source touching required. (The number was previously injected as a
+`-DFIRMWARE_BUILD` compiler flag; SCons does not recompile unchanged sources
+when such a flag changes, so incremental builds silently kept reporting a
+stale build number.)
+
+The count is taken from the **last fetched** state of `origin/main`, so the
+script runs a `git fetch origin main` itself before counting (short timeout;
+offline it silently falls back to the last fetched state and prints a hint).
+Without this, a checkout that only ever pulls a feature branch never advances
+`origin/main` and the build number freezes at that old count.
 
 **Verify the injection ran:** the build output must contain a line like
 `*** FIRMWARE_BUILD = 103 (git commit count on main) ***`. If it is missing
@@ -990,6 +1021,29 @@ firmware environment must reference it via
 `extra_scripts = ${common.extra_scripts}` in `platformio.ini`; PlatformIO does
 NOT apply options from the `[common]` section on its own. (This was broken
 until build 103: every earlier firmware reported 0.)
+
+### Interface versioning (ESP ↔ FHEM)
+
+The REST API and the WebSocket protocol share one explicit **interface
+version** (`major.minor`), independent of the build number: the build number
+answers *"which firmware state is running?"*, the interface version answers
+*"do ESP and FHEM understand each other?"*.
+
+- **Minor** is incremented for compatible extensions (new endpoints, message
+  types, or optional fields — both sides ignore what they don't know), in
+  either direction: a newer or older minor on one side is never a problem.
+- **Major** is incremented (minor reset to 0) for incompatible changes; one
+  side then needs an update. FHEM warns via the `apiVersionWarning` reading
+  but keeps operating (fail-operational).
+
+The version is defined in `src/config.h` (`FHEM_API_VERSION_MAJOR/MINOR`) and
+mirrored in `FHEM/98_CasambiGW.pm` (`API_VERSION_MAJOR/MINOR`); both files
+carry the full **versioning contract** as a comment at those constants —
+**anyone (human or AI assistant) changing the ESP↔FHEM interface must follow
+the checklist there** (bump both sides in the same commit, document the change
+here). The version travels in `GET /api/info` and the WebSocket `hello`; a
+missing field means firmware at version `1.0` (predating the contract). Design
+rationale: `docs/konzept-versionierung.md` (issue #29).
 
 -----
 
@@ -1075,6 +1129,12 @@ automatically on link loss or FHEM startup.
 | `lastSync` | timestamp | Time of last successful hello sync |
 | `esp32Build` | integer | Build number reported by the ESP32 firmware |
 | `esp32BuildWarning` | `ok` / warning text | Set when ESP32 build is below `MIN_FIRMWARE_BUILD` |
+| `espApiVersion` | `major.minor` | ESP↔FHEM interface version reported by the firmware (`1.0` for firmware predating interface versioning) |
+| `fhemApiVersion` | `major.minor` | Interface version implemented by the FHEM module |
+| `apiVersionWarning` | `ok` / warning text | Warns (naming the side to update) when the major versions differ; minor differences are compatible. Operation continues either way. |
+| `casambiProtocolVersion` | integer | Protocol version of the Casambi network (from `hello`) |
+| `casambiProtocolVersionRange` | e.g. `10-11` | Casambi protocol versions the ESP32 firmware is tested with |
+| `casambiVersionWarning` | `ok` / warning text | Set when the network protocol version lies outside the tested range (informational — the network version cannot be influenced) |
 
 **Gateway attributes:**
 
