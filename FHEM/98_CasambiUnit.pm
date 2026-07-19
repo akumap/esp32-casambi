@@ -204,27 +204,58 @@ sub CasambiUnit_UpdateFromState {
         readingsBulkUpdate($hash, "casambiId",  $unit->{id})   if defined $unit->{id};
         readingsBulkUpdate($hash, "casambiName",$unit->{name}) if defined $unit->{name};
 
-        if (defined $unit->{vertical}) {
-            readingsBulkUpdate($hash, "vertical", $unit->{vertical});
-        }
-
-        # colorTemp: raw 0-255 → Kelvin (for human-readable WebUI display)
-        if (defined $unit->{colorTemp} && defined $unit->{cctMin} && defined $unit->{cctMax}) {
-            my ($raw, $min, $max) = ($unit->{colorTemp}, $unit->{cctMin}, $unit->{cctMax});
-            if ($max > $min) {
-                my $kelvin = int($min + ($raw / 255.0) * ($max - $min) + 0.5);
-                readingsBulkUpdate($hash, "colorTemp", $kelvin);
+        if (ref($unit->{controls}) eq 'ARRAY') {
+            # Generic, cloud-derived channel readings: one reading per fixture
+            # control, named by the control type reported by the cloud
+            # (dimmer/vertical/temperature/white/slider/...). New control types
+            # therefore surface as readings automatically, without code changes.
+            # temperature is reported in Kelvin (resolved by the gateway from the
+            # raw value + bounds); "colorTemp" is kept as an alias so the existing
+            # homebridgeMapping / dashboards keep working.
+            for my $c (@{$unit->{controls}}) {
+                next unless ref($c) eq 'HASH' && defined $c->{type};
+                my $t = $c->{type};
+                next if $t eq 'dimmer' || $t eq 'onoff';   # covered by brightness/state
+                if ($t eq 'temperature') {
+                    my $k = $c->{kelvin};
+                    next unless defined $k;
+                    readingsBulkUpdate($hash, "temperature", $k);
+                    readingsBulkUpdate($hash, "colorTemp",   $k);   # compat alias
+                } elsif (defined $c->{value}) {
+                    readingsBulkUpdate($hash, $t, $c->{value});
+                }
+            }
+        } else {
+            # Fallback for gateways/configs without the generic controls array.
+            if (defined $unit->{vertical}) {
+                readingsBulkUpdate($hash, "vertical", $unit->{vertical});
+            }
+            if (defined $unit->{colorTemp} && defined $unit->{cctMin} && defined $unit->{cctMax}) {
+                my ($raw, $min, $max) = ($unit->{colorTemp}, $unit->{cctMin}, $unit->{cctMax});
+                if ($max > $min) {
+                    my $kelvin = int($min + ($raw / 255.0) * ($max - $min) + 0.5);
+                    readingsBulkUpdate($hash, "colorTemp", $kelvin);
+                }
             }
         }
 
         readingsEndUpdate($hash, 1);
     }
 
-    # Forward vertical state to companion CasambiVertical device
-    if (defined $unit->{vertical}) {
+    # Forward vertical state to companion CasambiVertical device. Prefer the
+    # generic control value; fall back to the legacy field.
+    my $vval;
+    if (ref($unit->{controls}) eq 'ARRAY') {
+        for my $c (@{$unit->{controls}}) {
+            $vval = $c->{value}
+                if ref($c) eq 'HASH' && ($c->{type} // '') eq 'vertical';
+        }
+    }
+    $vval = $unit->{vertical} unless defined $vval;
+    if (defined $vval) {
         my $vName = $hash->{NAME} . "_vertical";
         if ($defs{$vName} && ($defs{$vName}->{TYPE} // "") eq "CasambiVertical") {
-            CasambiVertical_UpdateFromParent($defs{$vName}, $unit->{vertical}, $on);
+            CasambiVertical_UpdateFromParent($defs{$vName}, $vval, $on);
         }
     }
 }
@@ -244,6 +275,23 @@ sub CasambiUnit_SetCapabilities {
     my $hasVertical = $unit->{hasVertical} ? 1 : 0;
     my $cctMin      = $unit->{cctMin}  // 2700;
     my $cctMax      = $unit->{cctMax}  // 6500;
+
+    # Prefer the authoritative cloud controls when present: capabilities and the
+    # Kelvin range are derived from the fixture control list rather than the
+    # heuristic flags.
+    if (ref($unit->{controls}) eq 'ARRAY') {
+        ($hasCCT, $hasVertical) = (0, 0);
+        for my $c (@{$unit->{controls}}) {
+            next unless ref($c) eq 'HASH';
+            my $t = $c->{type} // '';
+            $hasVertical = 1 if $t eq 'vertical';
+            if ($t eq 'temperature') {
+                $hasCCT = 1;
+                $cctMin = $c->{min} if defined $c->{min};
+                $cctMax = $c->{max} if defined $c->{max};
+            }
+        }
+    }
 
     # --- CCT range attributes ---
     if ($hasCCT) {
