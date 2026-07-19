@@ -1226,28 +1226,35 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
             unit->level = state.level;
         }
 
-        // Interpret aux channels based on stored capabilities
-        // Cap 0x23 (3 channels): aux1=vertical, aux2=colorTemp
-        // Cap 0x13 (2 channels): aux1=vertical OR colorTemp (based on hasCCT/hasVertical)
-        // Cap 0x03/0x00 (1 channel): no aux
-
-        if (state.hasVertical && state.hasColorTemp) {
-            // 2 aux channels: vertical + temp
-            unit->vertical = state.vertical;
+        // Map the positional state bytes to the unit's controls by BIT OFFSET —
+        // the authoritative, cloud-driven interpretation. The parser fills the
+        // bytes positionally (byte 0 = level, byte 1 = aux1 in .vertical, byte 2
+        // = aux2 in .colorTemp); the fixture control at offset N*8 tells us what
+        // that byte MEANS (e.g. aux1 is vertical on unit 7 but temperature on
+        // unit 5). Each control's decoded value is stored for the generic API.
+        if (unit->hasFixture && !unit->controls.empty()) {
+            const uint8_t stateBytes[3] = { state.level, state.vertical, state.colorTemp };
+            const bool    present[3]    = { state.hasLevel, state.hasVertical, state.hasColorTemp };
+            for (UnitControl& c : unit->controls) {
+                uint8_t idx = c.offset / 8;               // 8-bit byte-aligned controls
+                if (idx >= 3 || !present[idx]) continue;
+                c.value = stateBytes[idx];
+                if      (c.typeName == "vertical")    unit->vertical  = c.value;
+                else if (c.typeName == "temperature") unit->colorTemp = c.value;
+                // "dimmer" is already reflected in unit->level above.
+            }
+        }
+        // Fallback for units without a fixture definition: the old positional
+        // heuristic driven by the capability flags.
+        else if (state.hasVertical && state.hasColorTemp) {
+            unit->vertical  = state.vertical;
             unit->colorTemp = state.colorTemp;
         }
         else if (state.hasVertical) {
-            // 1 aux channel: use unit capabilities to decide
-            if (unit->hasVertical && unit->hasCCT) {
-                // Shouldn't happen for 1-aux, but store as vertical
-                unit->vertical = state.vertical;
-            } else if (unit->hasVertical) {
-                unit->vertical = state.vertical;
-            } else if (unit->hasCCT) {
-                unit->colorTemp = state.vertical;  // aux1 is actually CCT
+            if (unit->hasCCT && !unit->hasVertical) {
+                unit->colorTemp = state.vertical;   // the single aux is CCT
             } else {
-                // Unknown aux — store in vertical as fallback
-                unit->vertical = state.vertical;
+                unit->vertical  = state.vertical;   // vertical (or unknown → vertical)
             }
         }
 
