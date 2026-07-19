@@ -997,30 +997,25 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         }
 
         case 0x07: {
-            // Operation echo from other controllers
+            // Incoming 0x07 — DIAGNOSTIC ONLY, no state is applied.
+            //
+            // Reading 0x07 as an "operation echo" is an unvalidated inference
+            // from the OUTGOING operation format; it conflicts with casambi-bt
+            // (which decodes incoming 0x07 as switch/sensor events) and has never
+            // been observed on the wire here. Any real state change also arrives
+            // as a 0x06, so acting on 0x07 would at best be redundant and at
+            // worst inject a bogus level from a mis-read switch event. We
+            // therefore decode it only for visibility and the malformed07 counter
+            // and deliberately do NOT call _applyUnitStates. Revisit with a real
+            // capture (add a Casambi switch/sensor) before acting on 0x07.
             OperationEcho echo;
-            if (parseOperationEcho(payload, payloadLen, echo)) {
-                if (casambiDebugEnabled) {
-                    Serial.printf("Casambi: Echo %s %s[%d]",
-                                  opcodeName(echo.opcode),
-                                  targetTypeName(echo.targetType),
-                                  echo.targetId);
-                }
-                if (echo.opcode == static_cast<uint8_t>(OpCode::SetLevel) && !echo.payload.empty()) {
-                    if (casambiDebugEnabled) Serial.printf(" level=%d", echo.payload[0]);
-
-                    if (echo.targetType == TARGET_TYPE_UNIT) {
-                        UnitStateInfo info;
-                        info.unitId = echo.targetId;
-                        info.level = echo.payload[0];
-                        info.on = (echo.payload[0] > 0);
-                        info.online = true;
-                        info.hasLevel = true;
-                        std::vector<UnitStateInfo> states = { info };
-                        _applyUnitStates(states);
-                    }
-                }
-                if (casambiDebugEnabled) Serial.println();
+            if (parseOperationEcho(payload, payloadLen, echo) && casambiDebugEnabled) {
+                Serial.printf("Casambi: 0x07 (diagnostic) %s %s[%d]",
+                              opcodeName(echo.opcode),
+                              targetTypeName(echo.targetType),
+                              echo.targetId);
+                if (!echo.payload.empty()) Serial.printf(" payload[0]=%d", echo.payload[0]);
+                Serial.println();
             }
             break;
         }

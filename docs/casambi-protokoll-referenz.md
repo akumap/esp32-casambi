@@ -519,8 +519,8 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
 |---|---|---|
 | Fähigkeits-Quelle | `GET /fixture/{id}` → Controls | `GET /fixture/{id}` → Controls; Mode-String-Heuristik nur als Fallback `[≈]` |
 | Cloud-Revision | inkrementell (`revision`, `UPTODATE`) | `revision=0`, immer Vollabruf `[Δ]` |
-| Zustands-Dekodierung | bit-genau (offset/length) | feste Byte-Slots (aux1/aux2) `[Δ]` |
-| Paket-Typ 7 | Switch-/Sensor-Event | **Operation-Echo** `[Δ]` |
+| Zustands-Dekodierung | bit-genau (offset/length) | control-gesteuert per Byte-Offset (offset/8); Sub-Byte noch offen `[≈]` |
+| Paket-Typ 7 | Switch-/Sensor-Event | Operation-Echo, nur Diagnose (kein State) `[Δ]` |
 | Paket-Typ 8/0A/0C | — | UnitState-Update / TimeSync / Keepalive `[+]` |
 | Paket-Typ 9 | ignoriert | P09-Revisions-Tracker dekodiert `[+]` |
 | 0x06-online | `flags & 2` | `(flags & 0x0F) == 0` `[Δ]` |
@@ -612,17 +612,21 @@ Dispatch nach dem ersten Klartextbyte (`_handleDataNotification`):
 | Typ | casambi-bt (B.10) | esp32-casambi |
 |---|---|---|
 | 0x06 | UnitState (bit-genau) | Status-Broadcast (Byte-Slots) `[Δ]` |
-| 0x07 | **Switch-Event** | **Operation-Echo** `[Δ]` |
+| 0x07 | **Switch-Event** | Operation-Echo, **nur Diagnose** `[Δ]` |
 | 0x08 | — | UnitState-Update (Paar- oder 0x06-Format) `[+]` |
 | 0x09 | ignoriert | P09-Revisions-/Szenen-Tracker (Debug) `[Δ]` |
 | 0x0A | — | TimeSync (nur geloggt) `[+]` |
 | 0x0C | — | Keepalive (nur geloggt) `[+]` |
 
 - `[Δ]` **Typ 7 ist der gewichtigste Unterschied:** casambi-bt deutet ihn als
-  Schalter-/Sensor-Ereignis (B.12), die Firmware als **Echo einer Operation**
-  eines anderen Controllers (gleiche Struktur wie eine ausgehende Operation) und
-  übernimmt daraus z. B. Level-Änderungen. Ein Switch-/Sensor-Parser fehlt der
-  Firmware damit vollständig.
+  Schalter-/Sensor-Ereignis (B.12), die Firmware dekodiert ihn als **Echo einer
+  Operation** (gleiche Struktur wie eine ausgehende Operation). Diese Deutung ist
+  eine unbelegte Symmetrie-Annahme aus dem Sende-Format und wurde nie gegen ein
+  echtes eingehendes 0x07 verifiziert (im Netz nie beobachtet). Die Firmware
+  **wendet daraus bewusst keinen Zustand mehr an** (nur Dekodieren/Loggen +
+  `malformed07`-Zähler) — jede reale Änderung kommt ohnehin als 0x06, und ein
+  fehlgedeutetes Switch-Event soll keinen falschen Level injizieren können. Ein
+  echter Switch-/Sensor-Parser (casambi-bt-Port) folgt erst mit einem Mitschnitt.
 
 **D.5.1 Record-Format bei Typ 0x06.** Beide lesen Byte 0 = ID, Byte 1 = Flags,
 aber Byte 2 verschieden:
