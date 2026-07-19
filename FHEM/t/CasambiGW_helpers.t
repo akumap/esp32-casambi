@@ -6,7 +6,7 @@
 # is required. Run: perl FHEM/t/CasambiGW_helpers.t
 use strict;
 use warnings;
-use Test::More tests => 17;
+use Test::More tests => 31;
 use FindBin qw($RealBin);
 
 # Load the module body into package main (defines the subs).
@@ -51,3 +51,38 @@ is(main::CasambiGW_ClassifyRefreshResponse('', 500), 'gatewayerror', 'HTTP 500 -
 # never silently reported as accepted.
 is(main::CasambiGW_ClassifyRefreshResponse('partial', 500), 'gatewayerror',
    'HTTP 500 with transport error -> gatewayerror (not reboot/accepted)');
+
+# ---- CasambiGW_ApiVersionWarning --------------------------------------------
+# The module's own version constants (whatever they currently are).
+my $maj = main::API_VERSION_MAJOR();
+my $min = main::API_VERSION_MINOR();
+
+is(main::CasambiGW_ApiVersionWarning($maj, $min), 'ok', 'exact version match -> ok');
+# Missing fields = firmware predating the versioning contract = 1.0. This test
+# doubles as a guard: the pre-contract firmware is only compatible while the
+# module's major version is 1, so it must be revisited on a major bump.
+is(main::CasambiGW_ApiVersionWarning(undef, undef),
+   $maj == 1 ? 'ok' : main::CasambiGW_ApiVersionWarning(1, 0),
+   'missing fields are treated as 1.0');
+# Minor differences are compatible by definition, in both directions.
+is(main::CasambiGW_ApiVersionWarning($maj, $min + 1), 'ok', 'ESP minor newer -> ok');
+is(main::CasambiGW_ApiVersionWarning($maj, 0),        'ok', 'ESP minor older -> ok');
+# Major mismatches warn and name the side that needs the update.
+like(main::CasambiGW_ApiVersionWarning($maj + 1, 0), qr/update the FHEM module/,
+     'ESP major newer -> warn, FHEM module needs update');
+like(main::CasambiGW_ApiVersionWarning($maj - 1, 0), qr/update the ESP32 firmware/,
+     'ESP major older -> warn, ESP32 firmware needs update');
+like(main::CasambiGW_ApiVersionWarning($maj + 1, 2), qr/\Q$maj.$min\E/,
+     'warning names the module version');
+
+# ---- CasambiGW_CasambiVersionWarning ----------------------------------------
+is(main::CasambiGW_CasambiVersionWarning(11, 10, 11), 'ok', 'inside range -> ok');
+is(main::CasambiGW_CasambiVersionWarning(10, 10, 11), 'ok', 'lower bound -> ok');
+is(main::CasambiGW_CasambiVersionWarning(11, 11, 11), 'ok', 'single-version range -> ok');
+like(main::CasambiGW_CasambiVersionWarning(9, 10, 11), qr/older than the minimum/,
+     'below range -> too-old warning');
+like(main::CasambiGW_CasambiVersionWarning(12, 10, 11), qr/newer than the latest tested/,
+     'above range -> newer-than-tested warning');
+# Old firmware does not report the numbers — never warn on missing input.
+is(main::CasambiGW_CasambiVersionWarning(undef, 10, 11), 'ok', 'missing version -> ok');
+is(main::CasambiGW_CasambiVersionWarning(11, undef, undef), 'ok', 'missing range -> ok');

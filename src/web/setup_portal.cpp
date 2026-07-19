@@ -235,6 +235,11 @@ void SetupPortal::_setupRoutes() {
         JsonDocument d;
         d["configured"] = false;
         d["build"]      = FIRMWARE_BUILD;
+        // Keep shape-identical with the operation-mode /api/info in
+        // webserver.cpp; changes fall under the VERSIONING CONTRACT at
+        // FHEM_API_VERSION_MAJOR in config.h.
+        d["api_version_major"] = FHEM_API_VERSION_MAJOR;
+        d["api_version_minor"] = FHEM_API_VERSION_MINOR;
         String out; serializeJson(d, out);
         req->send(200, "application/json", out);
     });

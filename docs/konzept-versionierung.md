@@ -1,6 +1,6 @@
 # Konzept: Versionierung der Schnittstellen (Issue #29)
 
-Status: Konzept — noch nicht umgesetzt.
+Status: umgesetzt (ESP-Firmware + FHEM-Modul + Tests + Doku, dieser Branch).
 Issue: [#29](https://github.com/akumap/esp32-casambi/issues/29)
 Branch: `claude/issue-29-solution-6su80s`
 
@@ -194,7 +194,7 @@ Warnungen bei Mismatch.
 | `src/web/setup_portal.cpp` | `/api/info`: dieselben 2 Felder |
 | `FHEM/98_CasambiGW.pm` | Konstanten, Auswertung + Readings in `HandleHello`, Hilfsfunktion für den Versionsvergleich, commandref-Abschnitt |
 | `FHEM/t/CasambiGW_helpers.t` | Tests für die Vergleichs-Hilfsfunktion (s. u.) |
-| `README.md` / `docs/casambi-protokoll-referenz.md` | Versionskontrakt und neue Felder dokumentieren |
+| `README.md` | Versionskontrakt und neue Felder dokumentieren (die REST/WS-Schnittstelle ist im README spezifiziert, nicht in der Protokollreferenz — die behandelt das BLE-Protokoll) |
 
 Die Versionsvergleiche in FHEM werden als **reine Perl-Hilfsfunktionen** ohne
 FHEM-Laufzeitabhängigkeit geschnitten (z. B.
