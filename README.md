@@ -307,8 +307,18 @@ drop triggers a fresh `hello` snapshot, so clients never stay stale).
 `parse_partial` / `parse_malformed` count BLE packets that were only
 partially decoded (understood prefix applied, undecoded tail dropped —
 likely a protocol element the reverse-engineering does not cover yet) or
-rejected entirely; per-packet-type detail is shown by the serial `status`
-command.
+rejected entirely (nothing usable). Both fields are the **sum across packet
+types** 0x06 / 0x07 / 0x08. The **per-type breakdown** is available via the
+serial `status` command, which prints these lines only when a counter is
+non-zero:
+
+```
+  Partially decoded packets: 0x06=0 0x07=0 0x08=0
+  Malformed packets dropped: 0x06=0 0x07=0 0x08=0
+```
+
+In normal operation both stay at 0; a rising counter points to a protocol
+element worth capturing (get the raw hex with `debug parse on`).
 `gateway_rssi` is the BLE link strength to the gateway in dBm (refreshed every
 ~10 s; `0` = not measured yet). After a disconnect the response additionally
 carries `last_disconnect_reason` (numeric `DisconnectReason`) and
