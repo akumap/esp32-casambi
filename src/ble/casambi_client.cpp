@@ -990,7 +990,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
             std::vector<UnitStateInfo> states;
             if (parseStatusBroadcast(payload, payloadLen, states)) {
                 _applyUnitStates(states);
-            } else {
+            } else if (bleDebugEnabled) {
                 hexDump("BLE: Unparsed 0x06 payload", payload, payloadLen);
             }
             break;
@@ -1183,8 +1183,10 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         }
 
         default: {
-            Serial.printf("BLE: <<< Unknown 0x%02x (%d bytes)\n", packetType, payloadLen);
-            hexDump("BLE: Unknown", payload, payloadLen);
+            if (bleDebugEnabled) {
+                Serial.printf("BLE: <<< Unknown 0x%02x (%d bytes)\n", packetType, payloadLen);
+                hexDump("BLE: Unknown", payload, payloadLen);
+            }
             break;
         }
     }
