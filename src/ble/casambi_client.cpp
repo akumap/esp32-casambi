@@ -1233,7 +1233,10 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
         // that byte MEANS (e.g. aux1 is vertical on unit 7 but temperature on
         // unit 5). Each control's decoded value is stored for the generic API.
         if (unit->hasFixture && !unit->controls.empty()) {
-            const uint8_t stateBytes[3] = { state.level, state.vertical, state.colorTemp };
+            // colorTemp is uint16_t in UnitStateInfo but only ever carries a
+            // single 0x06 state byte here — narrow explicitly to silence -Wnarrowing.
+            const uint8_t stateBytes[3] = { state.level, state.vertical,
+                                            static_cast<uint8_t>(state.colorTemp) };
             const bool    present[3]    = { state.hasLevel, state.hasVertical, state.hasColorTemp };
             for (UnitControl& c : unit->controls) {
                 uint8_t idx = c.offset / 8;               // 8-bit byte-aligned controls
