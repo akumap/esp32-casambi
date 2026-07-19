@@ -555,8 +555,14 @@ sub _CasambiVertical_SetAttrIfChanged {
   <ul>
     <li><b>state</b> on|off|initialized</li>
     <li><b>brightness</b> 0-100 %</li>
-    <li><b>colorTemp</b> Kelvin (CCT units only)</li>
-    <li><b>vertical</b> 0-255 (vertical units only)</li>
+    <li>one reading per channel, <b>named by the cloud control type</b> (derived
+        from the gateway's <code>controls</code> data): e.g.
+        <b>vertical</b> 0-255, <b>temperature</b> Kelvin, and future types
+        (white, slider, &hellip;) appear automatically</li>
+    <li><b>temperature</b> Kelvin (units with a temperature control)</li>
+    <li><b>colorTemp</b> compatibility alias of temperature (Kelvin), kept for
+        existing dashboards and the HomeKit mapping</li>
+    <li><b>vertical</b> 0-255 (units with a vertical control)</li>
     <li><b>online</b> true|false</li>
     <li><b>casambiId</b> current Casambi unit ID (may change after network re-config)</li>
     <li><b>casambiName</b> unit name as configured in the Casambi network</li>

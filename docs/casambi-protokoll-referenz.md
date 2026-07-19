@@ -549,9 +549,11 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
   (1–3); `hasCCT` aus `settings["cct.minKelvins"]`; `hasVertical` bei 3 Kanälen,
   oder bei 2 Kanälen ohne CCT. Bei jedem Fixture-Treffer wird der
   Heuristik-Wert zum Vergleich mitgeloggt (Verifikation).
-- `[Δ]` **Noch offen:** Die *Dekodierung* der Zustandsbytes nutzt weiterhin feste
-  Byte-Slots (D.5.2), nicht die bit-genauen `offset`/`length` der Controls. Die
-  Controls steuern derzeit nur die Fähigkeits-**Flags**, nicht das Bit-Layout.
+- `[≈]` **Dekodierung:** Die Zustandsbytes werden **control-gesteuert** per Byte-
+  Offset zugeordnet (State-Byte `n` → Control mit `offset = n·8`), und jeder
+  Control-Wert wird gespeichert (D.5.2). **Noch offen** ist nur das bit-genaue
+  Entpacken von **Sub-Byte-Controls** (RGB/XY) — im aktuellen Bestand nicht
+  vorhanden.
 - `[Δ]` Laufzeit: Der ESP32 arbeitet aus der in LittleFS **gespeicherten**
   Konfiguration; die Cloud wird nur bei Provisionierung/Refresh kontaktiert.
   Zusätzlich harte Struktur-Invarianten (Duplikat-IDs, Limits) beim Parsen.
@@ -611,7 +613,7 @@ Dispatch nach dem ersten Klartextbyte (`_handleDataNotification`):
 
 | Typ | casambi-bt (B.10) | esp32-casambi |
 |---|---|---|
-| 0x06 | UnitState (bit-genau) | Status-Broadcast (Byte-Slots) `[Δ]` |
+| 0x06 | UnitState (bit-genau) | Status-Broadcast, control-gesteuert per Byte-Offset `[≈]` |
 | 0x07 | **Switch-Event** | Operation-Echo, **nur Diagnose** `[Δ]` |
 | 0x08 | — | UnitState-Update (Paar- oder 0x06-Format) `[+]` |
 | 0x09 | ignoriert | P09-Revisions-/Szenen-Tracker (Debug) `[Δ]` |
