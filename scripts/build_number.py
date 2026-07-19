@@ -31,9 +31,34 @@ HEADER_TEMPLATE = """\
 """
 
 
+def refresh_origin_main():
+    # The count is only meaningful against the *published* main, but
+    # `git rev-list --count origin/main` sees the last *fetched* state: a user
+    # who only ever pulls a feature branch (`git pull origin <branch>`) never
+    # advances origin/main, and the build number silently freezes at that old
+    # count (observed in the field: device stuck at 103 while main was at
+    # 185). So refresh the ref ourselves; offline or timeout just means we
+    # build against the last fetched state — same as before, never fatal.
+    try:
+        result = subprocess.run(
+            ["git", "fetch", "--quiet", "origin", "main"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=env.subst("$PROJECT_DIR"),
+            timeout=15,
+        )
+        ok = result.returncode == 0
+    except Exception:
+        ok = False
+    if not ok:
+        print("*** FIRMWARE_BUILD: could not refresh origin/main "
+              "(offline?), using last fetched state ***")
+
+
 def get_build_number():
     # Try origin/main first (reflects the published state), fall back to main,
     # then HEAD, then 0 (e.g. shallow clone or no git at all).
+    refresh_origin_main()
     for ref in ("origin/main", "main", "HEAD"):
         try:
             out = subprocess.check_output(

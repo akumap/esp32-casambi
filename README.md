@@ -1008,6 +1008,12 @@ or manual source touching required. (The number was previously injected as a
 when such a flag changes, so incremental builds silently kept reporting a
 stale build number.)
 
+The count is taken from the **last fetched** state of `origin/main`, so the
+script runs a `git fetch origin main` itself before counting (short timeout;
+offline it silently falls back to the last fetched state and prints a hint).
+Without this, a checkout that only ever pulls a feature branch never advances
+`origin/main` and the build number freezes at that old count.
+
 **Verify the injection ran:** the build output must contain a line like
 `*** FIRMWARE_BUILD = 103 (git commit count on main) ***`. If it is missing
 (and the device reports `build: 0`), the script is not being executed — each
