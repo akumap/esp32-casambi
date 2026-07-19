@@ -263,6 +263,7 @@
 #define API_NETWORK_UUID_PATH     "/network/uuid/"
 #define API_NETWORK_SESSION_PATH  "/network/"
 #define API_NETWORK_CONFIG_PATH   "/network/"
+#define API_FIXTURE_PATH          "/fixture/"    // + <typeId> → unit-type controls
 
 // Cloud TLS: the requests above carry the Casambi network password and the
 // session token, so the HTTPS server certificate is validated against the

@@ -247,6 +247,111 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
     config.units  = std::move(parsed.units);
     config.groups = std::move(parsed.groups);
     config.scenes = std::move(parsed.scenes);
+
+    // Non-fatal enhancement: replace the mode-string capability heuristic with
+    // the authoritative controls from each unit's fixture definition. Runs
+    // after the commit so it can never affect the transactional guarantee; a
+    // failed fixture fetch just leaves that unit on its heuristic values.
+    _fetchFixtures(config);
+    return true;
+}
+
+void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
+    std::vector<uint16_t> doneTypes;
+    for (CasambiUnit& unit : config.units) {
+        // Each distinct type is fetched once (types repeat across units).
+        bool seen = false;
+        for (uint16_t t : doneTypes) if (t == unit.type) { seen = true; break; }
+        if (seen) continue;
+        doneTypes.push_back(unit.type);
+
+        bool hasVertical = false, hasCCT = false;
+        uint16_t cctMin = 0, cctMax = 0;
+        if (!_fetchFixtureControls(unit.type, hasVertical, hasCCT, cctMin, cctMax)) {
+            Serial.printf("Fixture: type %u fetch/parse failed - keeping heuristic capabilities\n",
+                          unit.type);
+            continue;
+        }
+
+        // Apply to every unit of this type; log heuristic vs. fixture so a
+        // divergence is visible for verification before it changes behaviour.
+        for (CasambiUnit& u : config.units) {
+            if (u.type != unit.type) continue;
+            Serial.printf("Fixture: unit %d (type %u) fixture=[vertical=%d cct=%d",
+                          u.deviceId, u.type, hasVertical, hasCCT);
+            if (hasCCT && cctMin && cctMax) Serial.printf(" %u-%uK", cctMin, cctMax);
+            Serial.printf("]  heuristic=[vertical=%d cct=%d]\n", u.hasVertical, u.hasCCT);
+
+            u.hasVertical = hasVertical;
+            u.hasCCT      = hasCCT;
+            if (hasCCT && cctMin && cctMax) {
+                u.cctMinKelvin = cctMin;
+                u.cctMaxKelvin = cctMax;
+            }
+        }
+    }
+}
+
+bool CasambiAPIClient::_fetchFixtureControls(uint16_t type, bool& hasVertical, bool& hasCCT,
+                                             uint16_t& cctMinKelvin, uint16_t& cctMaxKelvin) {
+    if (!isWiFiConnected()) {
+        _lastError = "WiFi not connected";
+        return false;
+    }
+
+    String url = String(CASAMBI_API_BASE) + API_FIXTURE_PATH + String(type);
+    Serial.printf("API: GET %s\n", url.c_str());
+
+    // The fixture endpoint is public (no session header — see casambi-bt).
+    _beginRequest(url);
+    _http.setTimeout(API_REQUEST_TIMEOUT_MS);
+
+    int httpCode = _http.GET();
+    if (httpCode != 200) {
+        Serial.printf("API: Fixture %u -> HTTP %d\n", type, httpCode);
+        _http.end();
+        return false;
+    }
+
+    String response = _http.getString();
+    _http.end();
+
+    // Raw dump for analysis (fixture defs carry no secrets, so no redaction).
+    if (cloudDebugEnabled) {
+        Serial.printf("API: ---- raw fixture %u (%d bytes) ----\n", type, response.length());
+        Serial.println(response);
+        Serial.println("API: ---- end raw fixture ----");
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, response)) {
+        Serial.printf("API: Fixture %u JSON parse error\n", type);
+        return false;
+    }
+    if (!doc["controls"].is<JsonArrayConst>()) {
+        Serial.printf("API: Fixture %u has no controls array\n", type);
+        return false;
+    }
+
+    // Capabilities follow the presence of the corresponding control. Control
+    // type names mirror casambi-bt's UnitControlType (upper-cased).
+    hasVertical = false;
+    hasCCT = false;
+    cctMinKelvin = 0;
+    cctMaxKelvin = 0;
+    for (JsonObjectConst ctrl : doc["controls"].as<JsonArrayConst>()) {
+        String t = ctrl["type"].as<String>();
+        t.toUpperCase();
+        if (t == "VERTICAL") {
+            hasVertical = true;
+        } else if (t == "TEMPERATURE") {
+            hasCCT = true;
+            // Kelvin bounds live on the control (min/max); may be absent, in
+            // which case the caller keeps the settings-derived range.
+            if (ctrl["min"].is<float>()) cctMinKelvin = static_cast<uint16_t>(ctrl["min"].as<float>());
+            if (ctrl["max"].is<float>()) cctMaxKelvin = static_cast<uint16_t>(ctrl["max"].as<float>());
+        }
+    }
     return true;
 }
 

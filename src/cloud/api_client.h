@@ -114,6 +114,27 @@ private:
     bool _hexToBytes(const String& hex, uint8_t* bytes, size_t len);
 
     /**
+     * Enhance the parsed units with capabilities from their fixture (unit-type)
+     * definition. For each DISTINCT unit type, GETs /fixture/{type}, dumps the
+     * raw response when cloudDebugEnabled, parses its `controls`, and derives
+     * hasVertical/hasCCT/cctMin/Max from the actual control list — the
+     * authoritative signal, replacing the mode-string heuristic. Non-fatal: a
+     * type whose fixture cannot be fetched or parsed keeps its heuristic
+     * capabilities (fallback), so an unreachable endpoint never breaks a unit.
+     * The pre-existing heuristic values are logged alongside for verification.
+     */
+    void _fetchFixtures(NetworkConfig& config);
+
+    /**
+     * Fetch and parse a single fixture (unit type). Fills the capability
+     * out-params from the fixture `controls`. Returns false (out-params
+     * untouched) on HTTP/JSON failure or a missing `controls` array — the
+     * caller then keeps the heuristic values for that type.
+     */
+    bool _fetchFixtureControls(uint16_t type, bool& hasVertical, bool& hasCCT,
+                               uint16_t& cctMinKelvin, uint16_t& cctMaxKelvin);
+
+    /**
      * Dump the raw cloud config response to Serial for analysis, with every
      * AES key value (keyStore.keys[].key — exactly AES_KEY_SIZE*2 hex chars)
      * replaced by "***" so no BLE key material is leaked. Gated by the caller

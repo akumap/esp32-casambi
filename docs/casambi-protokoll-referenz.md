@@ -517,7 +517,7 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
 
 | Bereich | casambi-bt | esp32-casambi |
 |---|---|---|
-| Fähigkeits-Quelle | `GET /fixture/{id}` → bit-genaue Controls | **Heuristik** aus `modes[0].state`-Länge + `settings` `[Δ]` |
+| Fähigkeits-Quelle | `GET /fixture/{id}` → Controls | `GET /fixture/{id}` → Controls; Mode-String-Heuristik nur als Fallback `[≈]` |
 | Cloud-Revision | inkrementell (`revision`, `UPTODATE`) | `revision=0`, immer Vollabruf `[Δ]` |
 | Zustands-Dekodierung | bit-genau (offset/length) | feste Byte-Slots (aux1/aux2) `[Δ]` |
 | Paket-Typ 7 | Switch-/Sensor-Event | **Operation-Echo** `[Δ]` |
@@ -537,23 +537,29 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
 - `[Δ]` **`revision` ist fest `0`** — der ESP32 zieht bei jedem Refresh die
   **komplette** Definition; die inkrementelle `UPTODATE`-Logik von casambi-bt
   (A.4) existiert nicht.
-- `[Δ]` **Kein `GET /fixture/{typeId}`.** Die Firmware ruft die
-  Unit-Typ-Deskriptoren (A.6) **nie** ab. Fähigkeiten werden stattdessen aus der
-  Netzwerkdefinition **heuristisch abgeleitet** (`_parseUnits`):
-  - `numChannels = len(modes[0].state) / 2`, begrenzt auf 1–3
-  - `hasCCT` aus `settings["cct.minKelvins"]` (+ `cctMin/MaxKelvin`)
-  - `hasVertical`: bei 3 Kanälen `true`; bei 2 Kanälen `true`, falls **nicht**
-    CCT; sonst `false`
-  - **Dies ist die Ursache von Issue #34**: Die Kanalzahl ist kein verlässliches
-    Signal für einen echten Vertical-Kanal (z. B. Oligo Grace = Dimmer + CCT,
-    aber 3-Byte-Mode-String → fälschlich `hasVertical`).
+- `[≈]` **`GET /fixture/{typeId}` (implementiert, `_fetchFixtures`).** Nach dem
+  Netzwerk-Parse holt die Firmware je **distinktem** Unit-Typ die
+  Fixture-Definition (A.6), parst deren `controls` und leitet daraus die
+  Fähigkeiten ab: `hasVertical` = ein `VERTICAL`-Control vorhanden, `hasCCT` =
+  ein `TEMPERATURE`-Control (Kelvin-Grenzen aus dessen `min`/`max`). Das ist das
+  **verlässliche Signal** statt der Kanalzahl — und behebt die Wurzel von
+  Issue #34 (Oligo Grace = Dimmer + CCT, aber 3-Byte-Mode-String).
+- `[Δ]` **Fallback-Heuristik** (`_parseUnits`, nur wenn ein Fixture-Abruf
+  scheitert oder keine `controls` liefert): `numChannels = len(modes[0].state)/2`
+  (1–3); `hasCCT` aus `settings["cct.minKelvins"]`; `hasVertical` bei 3 Kanälen,
+  oder bei 2 Kanälen ohne CCT. Bei jedem Fixture-Treffer wird der
+  Heuristik-Wert zum Vergleich mitgeloggt (Verifikation).
+- `[Δ]` **Noch offen:** Die *Dekodierung* der Zustandsbytes nutzt weiterhin feste
+  Byte-Slots (D.5.2), nicht die bit-genauen `offset`/`length` der Controls. Die
+  Controls steuern derzeit nur die Fähigkeits-**Flags**, nicht das Bit-Layout.
 - `[Δ]` Laufzeit: Der ESP32 arbeitet aus der in LittleFS **gespeicherten**
   Konfiguration; die Cloud wird nur bei Provisionierung/Refresh kontaktiert.
   Zusätzlich harte Struktur-Invarianten (Duplikat-IDs, Limits) beim Parsen.
 - `[+]` **Analyse-Hilfe:** `debug cloud on` gibt beim nächsten `refresh` die rohe
-  Cloud-Antwort auf Serial aus (`_dumpRedactedConfig`), um `modes`/`settings`/
-  `type` je Unit auszuwerten — die AES-Schlüssel (`keyStore.keys[].key`) werden
-  dabei durch `***` ersetzt, sodass kein Schlüsselmaterial geloggt wird.
+  Netzwerk-Antwort (`_dumpRedactedConfig`, AES-Schlüssel durch `***` ersetzt)
+  **und** jede rohe Fixture-Antwort (`/fixture/{type}`, ohne Redaktion — enthält
+  keine Geheimnisse) auf Serial aus, um `modes`/`settings`/`controls` je Unit
+  auszuwerten.
 
 ### D.2 BLE-Transport & Handshake
 
@@ -639,12 +645,13 @@ beiden Implementierungen zu.
 Dekodierung wie in `Unit.setStateFromBytes` (B.11). Sub-Byte-Felder (z. B.
 gepacktes RGB) können damit nicht sauber dargestellt werden.
 
-> **Geplante Angleichung.** Die vorgesehene Umstellung übernimmt das
-> casambi-bt-Modell (Deskriptoren aus der Cloud, bit-genaue Dekodierung,
-> Trennung Protokollschicht ↔ Unit-Modell) — regressionssicher gegenüber den
-> heute lauffähigen Occhio-Leuchten. Dazu gehört zwingend, in D.1 den
-> `/fixture/{id}`-Abruf (A.6) zu ergänzen, statt Fähigkeiten aus der Kanalzahl
-> zu raten.
+> **Stand der Angleichung.** Der `/fixture/{id}`-Abruf (A.6) ist umgesetzt
+> (`_fetchFixtures`, D.1): die Fähigkeits-**Flags** kommen nun aus den echten
+> Controls, die Kanalzahl-Heuristik ist nur noch Fallback. **Offen** bleibt die
+> bit-genaue Zustands-Dekodierung nach `offset`/`length` (statt Byte-Slots,
+> D.5.2) samt Trennung Protokollschicht ↔ Unit-Modell — regressionssicher gegen
+> die heute lauffähigen Occhio-Leuchten (Golden-Vector-Tests aus echten
+> BLE-Captures, Deskriptoren aus denselben Fixture-Daten).
 
 ---
 
