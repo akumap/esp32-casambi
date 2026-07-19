@@ -112,6 +112,15 @@ private:
      * Convert hex string to bytes
      */
     bool _hexToBytes(const String& hex, uint8_t* bytes, size_t len);
+
+    /**
+     * Dump the raw cloud config response to Serial for analysis, with every
+     * AES key value (keyStore.keys[].key — exactly AES_KEY_SIZE*2 hex chars)
+     * replaced by "***" so no BLE key material is leaked. Gated by the caller
+     * on cloudDebugEnabled. Streams verbatim segments in chunks (no full-copy
+     * of the — potentially multi-kByte — response).
+     */
+    void _dumpRedactedConfig(const String& json);
 };
 
 #endif // API_CLIENT_H

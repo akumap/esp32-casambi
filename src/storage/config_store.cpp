@@ -103,6 +103,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     doc["webDebugEnabled"]     = config.webDebugEnabled;
     doc["parseDebugEnabled"]   = config.parseDebugEnabled;
     doc["heapDebugEnabled"]    = config.heapDebugEnabled;
+    doc["cloudDebugEnabled"]   = config.cloudDebugEnabled;
 
     // Save keys
     JsonArray keysArray = doc["keys"].to<JsonArray>();
@@ -321,6 +322,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     config.webDebugEnabled     = doc["webDebugEnabled"]     | true;
     config.parseDebugEnabled   = doc["parseDebugEnabled"]   | false;
     config.heapDebugEnabled    = doc["heapDebugEnabled"]    | false;
+    config.cloudDebugEnabled   = doc["cloudDebugEnabled"]   | false;
 
     // Load keys
     config.keys.clear();

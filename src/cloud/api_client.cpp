@@ -224,6 +224,13 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
 
     Serial.printf("API: Received %d bytes\n", response.length());
 
+    // Optional raw dump for protocol analysis (fixture modes/settings, capability
+    // signals). AES keys are redacted — see _dumpRedactedConfig. Opt-in via
+    // `debug cloud on`; off by default so key material is never printed unasked.
+    if (cloudDebugEnabled) {
+        _dumpRedactedConfig(response);
+    }
+
     // Transactional parse: build a scratch config first, and on full success
     // commit only the cloud-owned fields. A structurally broken response can
     // therefore never leave `config` half-overwritten — important for callers
@@ -559,4 +566,59 @@ bool CasambiAPIClient::_hexToBytes(const String& hex, uint8_t* bytes, size_t len
     }
 
     return true;
+}
+
+// True only for a run of exactly AES_KEY_SIZE*2 hex digits — the shape of a
+// keyStore AES key. The length guard makes a false positive on some other
+// "key"-named field essentially impossible; even if one matched, redaction only
+// removes data from a debug view, so it is harmless either way.
+static bool _looksLikeAesKeyHex(const char* s, size_t len) {
+    if (len != AES_KEY_SIZE * 2) return false;
+    for (size_t k = 0; k < len; k++) {
+        const char c = s[k];
+        const bool hex = (c >= '0' && c <= '9') ||
+                         (c >= 'a' && c <= 'f') ||
+                         (c >= 'A' && c <= 'F');
+        if (!hex) return false;
+    }
+    return true;
+}
+
+void CasambiAPIClient::_dumpRedactedConfig(const String& json) {
+    const char* p = json.c_str();
+    const size_t n = json.length();
+    static const char* NEEDLE = "\"key\"";
+    static const size_t NLEN  = 5;
+
+    Serial.println("API: ---- raw cloud config (AES keys redacted) ----");
+
+    // Emit verbatim in chunks; only the 32-hex value after a "key" field is
+    // swapped for "***". `seg` marks the start of the not-yet-flushed run.
+    size_t seg = 0;
+    size_t i = 0;
+    while (i < n) {
+        if (i + NLEN <= n && memcmp(p + i, NEEDLE, NLEN) == 0) {
+            size_t j = i + NLEN;
+            while (j < n && (p[j] == ' ' || p[j] == '\t' || p[j] == ':')) j++;
+            if (j < n && p[j] == '"') {
+                const size_t valStart = j + 1;
+                size_t valEnd = valStart;
+                while (valEnd < n && p[valEnd] != '"') valEnd++;
+                if (valEnd < n && _looksLikeAesKeyHex(p + valStart, valEnd - valStart)) {
+                    // Flush up to and including the opening quote, then redact.
+                    Serial.write(reinterpret_cast<const uint8_t*>(p + seg), valStart - seg);
+                    Serial.print("***");
+                    seg = valEnd;      // resume at the closing quote
+                    i = valEnd;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+    if (seg < n) {
+        Serial.write(reinterpret_cast<const uint8_t*>(p + seg), n - seg);
+    }
+    Serial.println();
+    Serial.println("API: ---- end raw cloud config ----");
 }

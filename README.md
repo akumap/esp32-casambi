@@ -179,7 +179,9 @@ debug casambi on/off         # Casambi network events (unit states, echo, callba
 debug web on/off             # HTTP API request logging
 debug parse on/off           # Protocol parse output with raw bytes (for analysis)
 debug heap on/off            # Heap monitoring output
+debug cloud on/off           # Dump raw cloud config on refresh (AES keys redacted)
 refresh                      # Re-download config from Casambi cloud
+                             # (with 'debug cloud on', prints the raw JSON for analysis)
 clearconfig                  # Factory reset
 ```
 

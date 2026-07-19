@@ -43,6 +43,7 @@ bool casambiDebugEnabled = true;
 bool webDebugEnabled     = true;
 bool parseDebugEnabled   = false;
 bool heapDebugEnabled    = false;
+bool cloudDebugEnabled   = false;
 
 // Cached WiFi credentials — loaded once at boot and updated by 'wifi set'.
 // Avoids repeated LittleFS reads in the 30 s reconnect loop.
@@ -371,6 +372,7 @@ void setup() {
             webDebugEnabled     = networkConfig.webDebugEnabled;
             parseDebugEnabled   = networkConfig.parseDebugEnabled;
             heapDebugEnabled    = networkConfig.heapDebugEnabled;
+            cloudDebugEnabled   = networkConfig.cloudDebugEnabled;
 
             // A refresh scheduled via the serial command or POST /api/refreshCasambi
             // runs here, before BLE/web are up, on a clean heap with no concurrent
@@ -1242,6 +1244,7 @@ void handleCommand(const String& cmd) {
                 Serial.println("debug web on/off      - Web API request logging");
                 Serial.println("debug parse on/off    - Protocol compact output (P06/P07...)");
                 Serial.println("debug heap on/off     - Heap monitoring");
+                Serial.println("debug cloud on/off    - Raw cloud config dump on refresh (keys redacted)");
                 Serial.println("debug status          - Show debug status per category");
                 Serial.println();
                 Serial.println("=== Control Commands ===");
@@ -1540,12 +1543,14 @@ void handleCommand(const String& cmd) {
                 webDebugEnabled     = networkConfig.webDebugEnabled;
                 parseDebugEnabled   = networkConfig.parseDebugEnabled;
                 heapDebugEnabled    = networkConfig.heapDebugEnabled;
-                Serial.printf("Debug on: ble=%s casambi=%s web=%s parse=%s heap=%s\n",
+                cloudDebugEnabled   = networkConfig.cloudDebugEnabled;
+                Serial.printf("Debug on: ble=%s casambi=%s web=%s parse=%s heap=%s cloud=%s\n",
                               bleDebugEnabled     ? "on" : "off",
                               casambiDebugEnabled ? "on" : "off",
                               webDebugEnabled     ? "on" : "off",
                               parseDebugEnabled   ? "on" : "off",
-                              heapDebugEnabled    ? "on" : "off");
+                              heapDebugEnabled    ? "on" : "off",
+                              cloudDebugEnabled   ? "on" : "off");
             }
             else if (subcmd == "off") {
                 // Suppress all output without changing saved settings
@@ -1554,6 +1559,7 @@ void handleCommand(const String& cmd) {
                 webDebugEnabled     = false;
                 parseDebugEnabled   = false;
                 heapDebugEnabled    = false;
+                cloudDebugEnabled   = false;
                 Serial.println("Debug off (settings preserved, use 'debug on' to restore)");
             }
             else if (subcmd.startsWith("ble ")) {
@@ -1591,13 +1597,22 @@ void handleCommand(const String& cmd) {
                 ConfigStore::saveNetworkConfig(networkConfig);
                 Serial.printf("Heap debug: %s\n", val ? "on" : "off");
             }
+            else if (subcmd.startsWith("cloud ")) {
+                bool val = subcmd.endsWith(" on");
+                cloudDebugEnabled = val;
+                networkConfig.cloudDebugEnabled = val;
+                ConfigStore::saveNetworkConfig(networkConfig);
+                Serial.printf("Cloud debug: %s (raw config dumped on next refresh, AES keys redacted)\n",
+                              val ? "on" : "off");
+            }
             else if (subcmd == "status") {
-                Serial.printf("ble=%s  casambi=%s  web=%s  parse=%s  heap=%s\n",
+                Serial.printf("ble=%s  casambi=%s  web=%s  parse=%s  heap=%s  cloud=%s\n",
                               bleDebugEnabled     ? "on" : "off",
                               casambiDebugEnabled ? "on" : "off",
                               webDebugEnabled     ? "on" : "off",
                               parseDebugEnabled   ? "on" : "off",
-                              heapDebugEnabled    ? "on" : "off");
+                              heapDebugEnabled    ? "on" : "off",
+                              cloudDebugEnabled   ? "on" : "off");
             }
             else {
                 Serial.println("Usage: debug on/off/status");
@@ -1606,6 +1621,7 @@ void handleCommand(const String& cmd) {
                 Serial.println("       debug web on/off     - Web API request logging");
                 Serial.println("       debug parse on/off   - Protocol compact output (P06/P07...)");
                 Serial.println("       debug heap on/off    - Heap monitoring");
+                Serial.println("       debug cloud on/off   - Raw cloud config dump (keys redacted)");
             }
         }
         // Scene commands

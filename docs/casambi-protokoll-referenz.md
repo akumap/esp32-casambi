@@ -550,6 +550,10 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
 - `[Δ]` Laufzeit: Der ESP32 arbeitet aus der in LittleFS **gespeicherten**
   Konfiguration; die Cloud wird nur bei Provisionierung/Refresh kontaktiert.
   Zusätzlich harte Struktur-Invarianten (Duplikat-IDs, Limits) beim Parsen.
+- `[+]` **Analyse-Hilfe:** `debug cloud on` gibt beim nächsten `refresh` die rohe
+  Cloud-Antwort auf Serial aus (`_dumpRedactedConfig`), um `modes`/`settings`/
+  `type` je Unit auszuwerten — die AES-Schlüssel (`keyStore.keys[].key`) werden
+  dabei durch `***` ersetzt, sodass kein Schlüsselmaterial geloggt wird.
 
 ### D.2 BLE-Transport & Handshake
 

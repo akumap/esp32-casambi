@@ -116,6 +116,7 @@ struct NetworkConfig {
     bool webDebugEnabled;
     bool parseDebugEnabled;
     bool heapDebugEnabled;
+    bool cloudDebugEnabled;
 
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
@@ -124,7 +125,8 @@ struct NetworkConfig {
                       ntpServer(NTP_SERVER_DEFAULT), casambiPassword(""),
                       bleDebugEnabled(false), casambiDebugEnabled(true),
                       webDebugEnabled(true),
-                      parseDebugEnabled(false), heapDebugEnabled(false) {}
+                      parseDebugEnabled(false), heapDebugEnabled(false),
+                      cloudDebugEnabled(false) {}
 
     // Get the best key (highest role)
     CasambiKey* getBestKey() {
@@ -199,6 +201,7 @@ inline void preserveLocalSettings(const NetworkConfig& local, NetworkConfig& fre
     fresh.webDebugEnabled     = local.webDebugEnabled;
     fresh.parseDebugEnabled   = local.parseDebugEnabled;
     fresh.heapDebugEnabled    = local.heapDebugEnabled;
+    fresh.cloudDebugEnabled   = local.cloudDebugEnabled;
 }
 
 // ============================================================================

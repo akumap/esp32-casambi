@@ -294,5 +294,6 @@ extern bool casambiDebugEnabled;  // Casambi network events: unit states, echo, 
 extern bool webDebugEnabled;      // Web API request logging (defined in main.cpp)
 extern bool parseDebugEnabled;    // Protocol parse compact output (defined in main.cpp)
 extern bool heapDebugEnabled;     // Heap monitoring output (defined in main.cpp)
+extern bool cloudDebugEnabled;    // Raw cloud config dump, AES keys redacted (defined in main.cpp)
 
 #endif // CONFIG_H
