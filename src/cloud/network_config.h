@@ -31,6 +31,25 @@ struct CasambiKey {
 // NETWORK DEVICES
 // ============================================================================
 
+// One controllable channel of a unit, taken verbatim from the cloud fixture
+// definition (GET /fixture/{type}). `typeName` is the raw control type as the
+// cloud names it, lower-cased ("dimmer", "vertical", "temperature", "white",
+// "rgb", "xy", "slider", ...) — the authoritative source for field / reading
+// names all the way into FHEM. offset/length are in BITS; for the common
+// byte-aligned 8-bit control the state-byte index is offset/8. `value` is the
+// current decoded raw value (0 .. 2^length-1); for "temperature" min/max carry
+// the Kelvin bounds so consumers can present Kelvin without extra lookups.
+struct UnitControl {
+    String   typeName;
+    uint8_t  offset;
+    uint8_t  length;
+    uint16_t min;
+    uint16_t max;
+    uint16_t value;
+
+    UnitControl() : typeName(""), offset(0), length(0), min(0), max(0), value(0) {}
+};
+
 struct CasambiUnit {
     uint8_t deviceId;
     uint16_t type;
@@ -39,12 +58,20 @@ struct CasambiUnit {
     String name;
     String firmware;
 
-    // Capabilities (derived from API: modes and settings)
+    // Authoritative capabilities from the cloud fixture (/fixture/{type}).
+    // `controls` drives the generic naming and decoding; the flags below are
+    // derived from it (kept for the send path and backward compatibility).
+    std::vector<UnitControl> controls;
+    uint8_t stateLength;     // state-blob length in bytes (from the fixture)
+    bool hasFixture;         // true once the fixture definition has been applied
+
+    // Capabilities (derived from `controls`, or from the mode-string heuristic
+    // as a fallback when the fixture could not be fetched).
     uint8_t numChannels;     // 1=dimmer only, 2=dimmer+aux, 3=dimmer+vertical+temp
     bool hasCCT;             // Has color temperature control
     bool hasVertical;        // Has vertical light distribution control
-    uint16_t cctMinKelvin;   // Minimum color temperature (from settings)
-    uint16_t cctMaxKelvin;   // Maximum color temperature (from settings)
+    uint16_t cctMinKelvin;   // Minimum color temperature (Kelvin)
+    uint16_t cctMaxKelvin;   // Maximum color temperature (Kelvin)
 
     // Current state (updated from 0x06 packets)
     bool online;
@@ -55,10 +82,20 @@ struct CasambiUnit {
 
     CasambiUnit() : deviceId(0), type(0), uuid(""), address(""),
                     name(""), firmware(""),
+                    controls(), stateLength(0), hasFixture(false),
                     numChannels(1), hasCCT(false), hasVertical(false),
                     cctMinKelvin(0), cctMaxKelvin(0),
                     online(false), on(false), level(0),
                     vertical(127), colorTemp(0) {}
+
+    // The control descriptor for a given cloud type name (case-insensitive),
+    // or nullptr. Lets the decode/API map a state byte to its named control.
+    const UnitControl* controlByType(const char* type) const {
+        for (const auto& c : controls) {
+            if (c.typeName.equalsIgnoreCase(type)) return &c;
+        }
+        return nullptr;
+    }
 };
 
 struct CasambiGroup {

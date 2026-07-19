@@ -126,14 +126,14 @@ private:
     void _fetchFixtures(NetworkConfig& config);
 
     /**
-     * Fetch and parse a single fixture (unit type). Fills the capability
-     * out-params from the fixture `controls`. Returns false (out-params
-     * untouched) on HTTP/JSON failure or a missing `controls` array — the
-     * caller then keeps the heuristic values for that type.
+     * Fetch and parse a single fixture (unit type). Fills `controls` (verbatim
+     * from the fixture, lower-cased type names), `stateLength`, and the
+     * human-readable model/mode. Returns false (out-params untouched) on
+     * HTTP/JSON failure or a missing `controls` array — the caller then keeps
+     * the heuristic capabilities for that type.
      */
-    bool _fetchFixtureControls(uint16_t type, bool& hasVertical, bool& hasCCT,
-                               uint16_t& cctMinKelvin, uint16_t& cctMaxKelvin,
-                               String& model, String& mode);
+    bool _fetchFixtureControls(uint16_t type, std::vector<UnitControl>& controls,
+                               uint8_t& stateLength, String& model, String& mode);
 
     /**
      * Dump the raw cloud config response to Serial for analysis, with every
