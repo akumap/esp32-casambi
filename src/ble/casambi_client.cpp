@@ -1280,7 +1280,9 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
                     }
                 }
             } else {
-                // Fallback (no fixture controls): legacy named fields.
+                // Fallback (no fixture controls): legacy named fields. Tagged so
+                // it is unmistakable that no cloud fixture drives this unit.
+                Serial.print(" [no-fixture/legacy]");
                 Serial.printf(" level=%d", unit->level);
                 if (unit->hasVertical) Serial.printf(" vertical=%d", unit->vertical);
                 if (unit->hasCCT)      Serial.printf(" colorTemp=%d", unit->colorTemp);
