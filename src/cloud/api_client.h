@@ -55,13 +55,7 @@ public:
     bool createSession(const String& networkId, const String& password, String& sessionToken);
 
     /**
-     * Fetch network configuration.
-     * Transactional: parses into a scratch config and commits only the
-     * cloud-owned fields (name, protocol, revision, keys/units/groups/
-     * scenes) to `config` on FULL success. On any failure — HTTP, JSON, or
-     * a structurally broken section (invalid key hex, duplicate ids,
-     * oversized lists, see CLOUD_MAX_*) — `config` is left untouched.
-     * Local settings in `config` are never modified.
+     * Fetch network configuration
      * @param networkId Network ID
      * @param sessionToken Session token
      * @param config Output network configuration
@@ -89,23 +83,29 @@ private:
     void _beginRequest(const String& url);
 
     /**
-     * Parse network configuration JSON. All-or-nothing: a missing optional
-     * section (keyStore on Classic networks, units/scenes/grid on an empty
-     * network) is fine, but any present-but-broken section fails the whole
-     * parse with _lastError set. Never returns true for a partial result.
+     * Parse network configuration JSON
      */
     bool _parseNetworkConfig(const String& json, NetworkConfig& config);
 
-    // Section parsers. Contract: return false ONLY for a structural error
-    // (invalid key material, list over its CLOUD_MAX_* cap) with _lastError
-    // set; a well-formed empty section returns true. Cross-section
-    // invariants (duplicate ids, group references) run afterwards via
-    // cloudval::validateStructure (config_invariants.h, host-tested).
+    /**
+     * Parse keys from JSON
+     */
     bool _parseKeys(const JsonArrayConst& keysArray, NetworkConfig& config);
+
+    /**
+     * Parse units from JSON
+     */
     bool _parseUnits(const JsonArrayConst& unitsArray, NetworkConfig& config);
-    /** Groups: members referencing unknown units are dropped with a warning
-     *  (stale cloud data), duplicates/oversize fail. Requires units parsed. */
+    void _dumpFixtureInfo(uint16_t type); // debug fixture on/off — see config.h
+
+    /**
+     * Parse groups from JSON
+     */
     bool _parseGroups(const JsonObjectConst& gridObj, NetworkConfig& config);
+
+    /**
+     * Parse scenes from JSON
+     */
     bool _parseScenes(const JsonArrayConst& scenesArray, NetworkConfig& config);
 
     /**

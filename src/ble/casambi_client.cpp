@@ -26,15 +26,6 @@ CasambiClient::CasambiClient(NetworkConfig* config)
     memset(_nonce, 0, NONCE_SIZE);
     _mutex    = xSemaphoreCreateMutex();
     _encMutex = xSemaphoreCreateMutex();
-    if (!_mutex || !_encMutex) {
-        // Without these locks every send/disconnect path would race the
-        // notification handlers; a clean restart (the RTC log entry survives
-        // it) beats running unprotected on an already-exhausted heap.
-        EventLog::log(LOG_ERROR, "BLE: mutex creation failed (heap exhausted), restarting");
-        Serial.println("FATAL: BLE mutex creation failed - restarting");
-        delay(250);
-        ESP.restart();
-    }
     g_clientInstance = this;
 }
 
@@ -213,7 +204,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     // Initial link RSSI; refreshed by every health check (~10 s).
     _lastRssi = _bleClient->getRssi();
 
-    Serial.printf("BLE: Ready! (RSSI %d dBm)\n", _lastRssi.load());
+    Serial.printf("BLE: Ready! (RSSI %d dBm)\n", _lastRssi);
     return true;
 }
 
@@ -243,9 +234,7 @@ void CasambiClient::_disconnectLocked(DisconnectReason reason, const char* sourc
     _authChar = nullptr;
 
     // Acquire _encMutex so that any in-flight BLE-task notification handler
-    // finishes before we free the encryption object. Holders keep the mutex
-    // only for a single encrypt/decrypt (milliseconds), so this succeeds in
-    // practice; the timeout is a safety net against a wedged holder.
+    // finishes before we free the encryption object.
     if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         if (_encryption) {
             delete _encryption;
@@ -253,14 +242,9 @@ void CasambiClient::_disconnectLocked(DisconnectReason reason, const char* sourc
         }
         xSemaphoreGive(_encMutex);
     } else {
-        // Timeout: leave _encryption untouched. Deleting it would be a
-        // use-after-free against the holder, and nulling it without the mutex
-        // (the old fallback) both raced the holder's read and leaked the
-        // object. Keeping it is safe: _setState(None) below stops the data
-        // notification paths, senders check isAuthenticated() first, and the
-        // next _performKeyExchange (or the destructor) deletes it under
-        // _encMutex — so the object is reclaimed instead of leaking.
-        EventLog::log(LOG_WARN, "BLE: encMutex busy at disconnect, encryption cleanup deferred");
+        // Timeout: null the pointer so future callbacks see nullptr; object
+        // leaks but the alternative (use-after-free crash) is worse.
+        _encryption = nullptr;
     }
 
     _setState(ConnectionState::None, reason);
@@ -295,16 +279,6 @@ bool CasambiClient::sendKeepalive() {
     if (millis() - _lastNotificationTime < BLE_KEEPALIVE_IDLE_MS) return true;
 
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return false;
-
-    // Re-validate under the lock: between the unlocked pre-check above and
-    // acquiring _mutex, a sender on another task may have detected link loss
-    // and run _disconnectLocked(), nulling _authChar — dereferencing the stale
-    // pointer here would crash. A disconnect already happened then, so just
-    // report failure without triggering another one.
-    if (!isAuthenticated() || !_authChar || !isBLEConnected()) {
-        xSemaphoreGive(_mutex);
-        return false;
-    }
 
     std::string value = _authChar->readValue();
     xSemaphoreGive(_mutex);
@@ -406,6 +380,27 @@ bool CasambiClient::setUnitLevel(uint8_t unitId, uint8_t level) {
     uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
     std::vector<uint8_t> payload = { level };
     bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
+    xSemaphoreGive(_mutex);
+    return ok;
+}
+
+// Sets both channels of a dual-dimmer fixture (e.g. Oligo Grace: dimmer0 =
+// Uplight, dimmer1 = Downlight) in one atomic write via OpCode::SetState.
+// Confirmed against Casambi Cloud's /fixture/:type control layout (two
+// independent 8-bit "dimmer" controls at byte offset 0 and 1) — NOT the
+// generic single-byte "vertical balance" model (OpCode::SetVertical), which
+// this fixture family does not implement.
+// Preserves the last-known color temperature byte so it isn't reset to 0.
+bool CasambiClient::setUnitChannels(uint8_t unitId, uint8_t up, uint8_t down) {
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
+    uint8_t temp = 46; // fallback default (matches this fixture's cloud default)
+    if (CasambiUnit* u = _config->getUnitById(unitId)) {
+        if (u->colorTemp != 0) temp = u->colorTemp;
+    }
+    uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
+    std::vector<uint8_t> payload = { up, down, temp };
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetState), target, payload);
     xSemaphoreGive(_mutex);
     return ok;
 }
@@ -824,7 +819,7 @@ void CasambiClient::_handleNotification(uint8_t* data, size_t len) {
     _totalReceivedPackets++;
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Notification received (%d bytes, total #%u)\n", len, _totalReceivedPackets.load());
+        Serial.printf("BLE: Notification received (%d bytes, total #%u)\n", len, _totalReceivedPackets);
     }
 
     switch (_state) {
@@ -1210,15 +1205,6 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
             continue;
         }
 
-        // Update the state fields as ONE snapshot under g_configMutex: the
-        // async_tcp task serializes them for /api/units and the WebSocket
-        // hello under the same mutex, so it can never observe level/on/
-        // vertical/colorTemp mixed from two different updates. Held only for
-        // the plain field writes — never across the log or the callback below
-        // (the broadcast path takes g_configMutex itself via
-        // getConnectedAddress()/lockedCopy(); re-taking would deadlock).
-        if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-
         // Update basic state
         if (state.hasLevel) {
             unit->on = state.on;
@@ -1250,8 +1236,6 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
                 unit->vertical = state.vertical;
             }
         }
-
-        if (g_configMutex) xSemaphoreGive(g_configMutex);
 
         // Log state change
         if (casambiDebugEnabled) {

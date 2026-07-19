@@ -212,39 +212,6 @@
 // clients cannot stay stale on a missed unit_state.
 #define WS_BROADCAST_QUEUE_DEPTH        64
 
-// Upper bound of unit objects serialized into one WebSocket hello snapshot.
-// Each unit is ~150 B of JSON, so 50 units ≈ 7.5 kB — safely below the
-// ~13 kB largest-free-block floor observed on a fragmented heap (see the
-// /api/log sizing note). Networks beyond the cap get the first 50 units
-// plus "units_truncated": true; clients needing the rest must fetch
-// GET /api/units themselves. Realistic Casambi home networks stay far
-// below this; the cap only guards the heap against the CLOUD_MAX_UNITS
-// worst case (250 units ≈ 37 kB, an impossible single allocation here).
-#define WS_HELLO_MAX_UNITS              50
-
-// Depth of the REST→loop BLE command queue (stores BleCommand values).
-// Control handlers on the async_tcp task only validate and enqueue; the loop
-// task dequeues one command per iteration and performs the BLE operation, so
-// the up-to-1 s BLE mutex wait / GATT write never blocks the async_tcp task.
-// A full queue answers 503 (client retries) — 8 in-flight commands is far
-// beyond what FHEM or a UI produces between two loop iterations (~10 ms).
-#define BLE_CMD_QUEUE_DEPTH             8
-
-// ============================================================================
-// CLOUD CONFIG LIMITS
-// ============================================================================
-
-// Upper bounds for the collections parsed from the cloud network config. A
-// response exceeding them is rejected as a whole (transactional parse): the
-// caps are far above anything a real Casambi network produces (max ~250
-// units per network) and bound the heap a hostile or corrupted response can
-// claim on this small device.
-#define CLOUD_MAX_KEYS            32
-#define CLOUD_MAX_UNITS           250
-#define CLOUD_MAX_GROUPS          128
-#define CLOUD_MAX_SCENES          128
-#define CLOUD_MAX_GROUP_MEMBERS   250
-
 // ============================================================================
 // BLE PACKET CONSTANTS
 // ============================================================================
@@ -294,5 +261,6 @@ extern bool casambiDebugEnabled;  // Casambi network events: unit states, echo, 
 extern bool webDebugEnabled;      // Web API request logging (defined in main.cpp)
 extern bool parseDebugEnabled;    // Protocol parse compact output (defined in main.cpp)
 extern bool heapDebugEnabled;     // Heap monitoring output (defined in main.cpp)
+extern bool fixtureDebugEnabled;  // Cloud fixture-model dump (RAWCFG/FIXTUREINFO) on refresh (defined in main.cpp)
 
 #endif // CONFIG_H

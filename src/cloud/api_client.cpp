@@ -3,9 +3,8 @@
  */
 
 #include "api_client.h"
-#include "config_invariants.h"
 #include <ArduinoJson.h>
-#include <utility>   // std::move for the transactional config commit
+#include "../config.h"
 
 #ifndef CASAMBI_TLS_INSECURE
 // Mozilla root-CA bundle embedded by the arduino-esp32 core. Validating against
@@ -224,23 +223,8 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
 
     Serial.printf("API: Received %d bytes\n", response.length());
 
-    // Transactional parse: build a scratch config first, and on full success
-    // commit only the cloud-owned fields. A structurally broken response can
-    // therefore never leave `config` half-overwritten — important for callers
-    // that pass the LIVE networkConfig (serial setup) — and local settings
-    // (auto-connect, NTP, debug flags, password) are never touched here.
-    NetworkConfig parsed;
-    if (!_parseNetworkConfig(response, parsed)) {
-        return false;
-    }
-    config.networkName     = parsed.networkName;
-    config.protocolVersion = parsed.protocolVersion;
-    config.revision        = parsed.revision;
-    config.keys   = std::move(parsed.keys);
-    config.units  = std::move(parsed.units);
-    config.groups = std::move(parsed.groups);
-    config.scenes = std::move(parsed.scenes);
-    return true;
+    // Parse network configuration
+    return _parseNetworkConfig(response, config);
 }
 
 bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& config) {
@@ -266,85 +250,44 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
     config.protocolVersion = network["protocolVersion"].as<uint8_t>();
     config.revision = network["revision"].as<int>();
 
-    if (config.protocolVersion == 0) {
-        _lastError = "Missing/zero protocolVersion";
-        return false;
-    }
-
     Serial.printf("Parse: Network '%s', protocol v%d, revision %d\n",
                   config.networkName.c_str(), config.protocolVersion, config.revision);
-
-    // Sub-parser contract: a MISSING optional section is fine (Classic
-    // networks have no keyStore; an empty network has no units/scenes/
-    // groups), but a section that is present and structurally broken —
-    // invalid key hex, duplicate ids, oversized lists — fails the WHOLE
-    // parse. A partial configuration must never be committed or persisted:
-    // it would silently drop units/keys and drift from the real network.
-    //
-    // This stays tolerant toward cloud API EVOLUTION: unknown JSON fields
-    // and sections are ignored by construction (only known keys are read),
-    // and stale references are dropped, not fatal. The hard failures above
-    // are internal inconsistencies no API revision produces legitimately —
-    // and failing keeps the previously working config in place, which is
-    // the operationally tolerant outcome.
 
     // Parse keyStore (Evolution networks)
     if (network["keyStore"].is<JsonObjectConst>()) {
         JsonObjectConst keyStore = network["keyStore"];
-        if (!keyStore["keys"].is<JsonArrayConst>()) {
-            _lastError = "keyStore present but has no keys array";
-            Serial.printf("Parse: FAILED - %s\n", _lastError.c_str());
-            return false;
-        }
-        if (!_parseKeys(keyStore["keys"], config)) {
-            Serial.printf("Parse: FAILED keys - %s\n", _lastError.c_str());
-            return false;
+        if (keyStore["keys"].is<JsonArrayConst>()) {
+            JsonArrayConst keys = keyStore["keys"];
+            if (!_parseKeys(keys, config)) {
+                Serial.println("Parse: Warning - Failed to parse keys");
+            }
         }
     } else {
         Serial.println("Parse: No keyStore (Classic network?)");
     }
 
-    // Parse units (before groups — group members are validated against them)
+    // Parse units
     if (network["units"].is<JsonArrayConst>()) {
-        if (!_parseUnits(network["units"], config)) {
-            Serial.printf("Parse: FAILED units - %s\n", _lastError.c_str());
-            return false;
+        JsonArrayConst units = network["units"];
+        if (!_parseUnits(units, config)) {
+            Serial.println("Parse: Warning - Failed to parse units");
         }
-    } else {
-        Serial.println("Parse: No units array (empty network?)");
     }
 
     // Parse scenes
     if (network["scenes"].is<JsonArrayConst>()) {
-        if (!_parseScenes(network["scenes"], config)) {
-            Serial.printf("Parse: FAILED scenes - %s\n", _lastError.c_str());
-            return false;
+        JsonArrayConst scenes = network["scenes"];
+        if (!_parseScenes(scenes, config)) {
+            Serial.println("Parse: Warning - Failed to parse scenes");
         }
     }
 
     // Parse groups (from grid structure)
     if (network["grid"].is<JsonObjectConst>()) {
-        if (!_parseGroups(network["grid"], config)) {
-            Serial.printf("Parse: FAILED groups - %s\n", _lastError.c_str());
-            return false;
+        JsonObjectConst grid = network["grid"];
+        if (!_parseGroups(grid, config)) {
+            Serial.println("Parse: Warning - Failed to parse groups");
         }
-    }
-
-    // Global structural invariants over the fully parsed result (pure,
-    // host-tested — see config_invariants.h): duplicate ids would make the
-    // getXById() lookups ambiguous, limits bound the heap, and the group-
-    // member check re-verifies the stale-reference filter above.
-    uint8_t badId = 0;
-    cloudval::CloudLimits limits = { CLOUD_MAX_KEYS, CLOUD_MAX_UNITS,
-                                     CLOUD_MAX_GROUPS, CLOUD_MAX_SCENES,
-                                     CLOUD_MAX_GROUP_MEMBERS };
-    cloudval::CloudInvariantResult inv =
-        cloudval::validateStructure(config, limits, &badId);
-    if (inv != cloudval::CLOUD_OK) {
-        _lastError = String(cloudval::cloudInvariantName(inv)) +
-                     " (id " + String(badId) + ")";
-        Serial.printf("Parse: FAILED invariants - %s\n", _lastError.c_str());
-        return false;
     }
 
     Serial.printf("Parse: Complete - %d keys, %d units, %d groups, %d scenes\n",
@@ -357,11 +300,6 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
 bool CasambiAPIClient::_parseKeys(const JsonArrayConst& keysArray, NetworkConfig& config) {
     config.keys.clear();
 
-    if (keysArray.size() > CLOUD_MAX_KEYS) {
-        _lastError = "keyStore exceeds " + String(CLOUD_MAX_KEYS) + " keys";
-        return false;
-    }
-
     for (JsonObjectConst keyObj : keysArray) {
         CasambiKey key;
 
@@ -370,40 +308,27 @@ bool CasambiAPIClient::_parseKeys(const JsonArrayConst& keysArray, NetworkConfig
         key.role = keyObj["role"].as<uint8_t>();
         key.name = keyObj["name"].as<String>();
 
-        // Invalid key material is structural corruption, not something to
-        // skip: a silently dropped key would make BLE auth fail later with
-        // no hint at the cause. Fail the whole parse instead. (Duplicate ids
-        // are caught by the post-parse invariant check in _parseNetworkConfig.)
+        // Parse hex key string
         String keyHex = keyObj["key"].as<String>();
         if (!_hexToBytes(keyHex, key.key, AES_KEY_SIZE)) {
-            _lastError = "invalid AES key hex for '" + key.name + "'";
-            return false;
+            Serial.printf("Parse: Invalid key hex for '%s'\n", key.name.c_str());
+            continue;
         }
 
         config.keys.push_back(key);
         Serial.printf("Parse: Key '%s' (id=%d, role=%d)\n", key.name.c_str(), key.id, key.role);
     }
 
-    if (config.keys.empty()) {
-        _lastError = "keyStore present but contains no keys";
-        return false;
-    }
-    return true;
+    return config.keys.size() > 0;
 }
 
 bool CasambiAPIClient::_parseUnits(const JsonArrayConst& unitsArray, NetworkConfig& config) {
     config.units.clear();
 
-    if (unitsArray.size() > CLOUD_MAX_UNITS) {
-        _lastError = "units list exceeds " + String(CLOUD_MAX_UNITS);
-        return false;
-    }
-
     for (JsonObjectConst unitObj : unitsArray) {
         CasambiUnit unit;
 
         unit.deviceId = unitObj["deviceID"].as<uint8_t>();
-
         unit.type = unitObj["type"].as<uint16_t>();
         unit.uuid = unitObj["uuid"].as<String>();
         unit.address = unitObj["address"].as<String>();
@@ -411,6 +336,20 @@ bool CasambiAPIClient::_parseUnits(const JsonArrayConst& unitsArray, NetworkConf
         unit.firmware = unitObj["firmware"].as<String>();
         unit.online = false;
         unit.on = false;
+
+        // Optional diagnostic: dump the raw per-unit cloud JSON plus the
+        // authoritative per-control bit layout from Casambi's public
+        // /fixture/:type endpoint (see docs/fixture-debugging.md). Off by
+        // default — enable with 'debug fixture on' when investigating a
+        // fixture whose capabilities the generic byte-length heuristic below
+        // gets wrong (e.g. dual-dimmer Uplight/Downlight models that report
+        // as "vertical" but aren't).
+        if (fixtureDebugEnabled) {
+            Serial.printf("RAWCFG unit %d (%s) type=%d:\n", unit.deviceId, unit.name.c_str(), unit.type);
+            serializeJsonPretty(unitObj, Serial);
+            Serial.println();
+            _dumpFixtureInfo(unit.type);
+        }
 
         // --- Parse capabilities from modes[0].state ---
         // State string length / 2 = number of control channels
@@ -466,16 +405,14 @@ bool CasambiAPIClient::_parseUnits(const JsonArrayConst& unitsArray, NetworkConf
                       unit.numChannels, caps.c_str());
     }
 
-    // An empty (but well-formed) units array is a valid empty network.
-    return true;
+    return config.units.size() > 0;
 }
 
 bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfig& config) {
     config.groups.clear();
 
-    // A grid without cells simply has no groups — not a structural error.
     if (!gridObj["cells"].is<JsonArrayConst>()) {
-        return true;
+        return false;
     }
 
     JsonArrayConst cells = gridObj["cells"];
@@ -484,40 +421,21 @@ bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfi
         // Type 2 = group
         if (cellObj["type"].as<int>() != 2) continue;
 
-        if (config.groups.size() >= CLOUD_MAX_GROUPS) {
-            _lastError = "groups exceed " + String(CLOUD_MAX_GROUPS);
-            return false;
-        }
-
         CasambiGroup group;
 
         // Use actual groupID from the grid, not sequential
         group.groupId = cellObj["groupID"].as<uint8_t>();
         group.name = cellObj["name"].as<String>();
 
-        // Parse group members. A member referencing a unit that is not in
-        // the units list is stale cloud data — drop the member with a
-        // warning rather than failing the refresh (controlling the rest of
-        // the group still works), but a group so large it breaches the cap
-        // is structural.
+        // Parse group members
         if (cellObj["cells"].is<JsonArrayConst>()) {
             JsonArrayConst subCells = cellObj["cells"];
             for (JsonObjectConst subCell : subCells) {
                 // Type 1 = unit
-                if (subCell["type"].as<int>() != 1) continue;
-
-                if (group.unitIds.size() >= CLOUD_MAX_GROUP_MEMBERS) {
-                    _lastError = "group " + String(group.groupId) +
-                                 " exceeds " + String(CLOUD_MAX_GROUP_MEMBERS) + " members";
-                    return false;
+                if (subCell["type"].as<int>() == 1) {
+                    uint8_t unitId = subCell["unit"].as<uint8_t>();
+                    group.unitIds.push_back(unitId);
                 }
-                uint8_t unitId = subCell["unit"].as<uint8_t>();
-                if (!config.getUnitById(unitId)) {
-                    Serial.printf("Parse: Group [%d] drops unknown unit %d (stale reference)\n",
-                                  group.groupId, unitId);
-                    continue;
-                }
-                group.unitIds.push_back(unitId);
             }
         }
 
@@ -526,16 +444,11 @@ bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfi
                       group.groupId, group.name.c_str(), group.unitIds.size());
     }
 
-    return true;
+    return config.groups.size() > 0;
 }
 
 bool CasambiAPIClient::_parseScenes(const JsonArrayConst& scenesArray, NetworkConfig& config) {
     config.scenes.clear();
-
-    if (scenesArray.size() > CLOUD_MAX_SCENES) {
-        _lastError = "scenes list exceeds " + String(CLOUD_MAX_SCENES);
-        return false;
-    }
 
     for (JsonObjectConst sceneObj : scenesArray) {
         CasambiScene scene;
@@ -547,7 +460,7 @@ bool CasambiAPIClient::_parseScenes(const JsonArrayConst& scenesArray, NetworkCo
         Serial.printf("Parse: Scene [%d] '%s'\n", scene.sceneId, scene.name.c_str());
     }
 
-    return true;
+    return config.scenes.size() > 0;
 }
 
 bool CasambiAPIClient::_hexToBytes(const String& hex, uint8_t* bytes, size_t len) {
@@ -559,4 +472,29 @@ bool CasambiAPIClient::_hexToBytes(const String& hex, uint8_t* bytes, size_t len
     }
 
     return true;
+}
+
+// Fetches the authoritative per-control bit layout for a fixture
+// model from https://api.casambi.com/fixture/:id (no session/auth required -
+// this is public fixture-model metadata, separate from the per-network unit
+// list). This is what casambi-bt uses instead of guessing capabilities from
+// modes[0].state byte length.
+void CasambiAPIClient::_dumpFixtureInfo(uint16_t type) {
+    String url = String(CASAMBI_API_BASE) + "/fixture/" + String(type);
+    Serial.printf("API: GET %s\n", url.c_str());
+
+    _beginRequest(url);
+    _http.setTimeout(API_REQUEST_TIMEOUT_MS);
+
+    int httpCode = _http.GET();
+    if (httpCode != 200) {
+        Serial.printf("FIXTUREINFO type=%d: HTTP %d (failed)\n", type, httpCode);
+        _http.end();
+        return;
+    }
+
+    String response = _http.getString();
+    _http.end();
+
+    Serial.printf("FIXTUREINFO type=%d:\n%s\n", type, response.c_str());
 }

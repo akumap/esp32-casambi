@@ -46,6 +46,9 @@ sub CasambiUnit_Initialize {
     CasambiVertical_Initialize($modules{CasambiVertical} //= {});
     $modules{CasambiVertical}{LOADED} = 1;
 
+    CasambiChannels_Initialize($modules{CasambiChannels} //= {});
+    $modules{CasambiChannels}{LOADED} = 1;
+
     return undef;
 }
 
@@ -219,6 +222,15 @@ sub CasambiUnit_UpdateFromState {
         my $vName = $hash->{NAME} . "_vertical";
         if ($defs{$vName} && ($defs{$vName}->{TYPE} // "") eq "CasambiVertical") {
             CasambiVertical_UpdateFromParent($defs{$vName}, $unit->{vertical}, $on);
+        }
+    }
+
+    # Forward to companion CasambiChannels device (dual-dimmer fixtures, e.g.
+    # Oligo Grace: 'level' = Uplight raw byte, 'vertical' = Downlight raw byte)
+    {
+        my $cName = $hash->{NAME} . "_channels";
+        if ($defs{$cName} && ($defs{$cName}->{TYPE} // "") eq "CasambiChannels") {
+            CasambiChannels_UpdateFromParent($defs{$cName}, $level, $unit->{vertical} // 0, $on);
         }
     }
 }
@@ -463,6 +475,159 @@ sub _CasambiVertical_SetAttrIfChanged {
     my ($name, $attr, $newVal) = @_;
     return if AttrVal($name, $attr, "") eq $newVal;
     CommandAttr(undef, "$name $attr $newVal");
+}
+
+# ============================================================================
+# CasambiChannels — companion device for dual-dimmer fixtures with
+# independent Uplight/Downlight channels (e.g. Oligo Grace).
+#
+# NOT auto-created (unlike CasambiVertical) — these fixtures report
+# hasVertical=true via the generic capability heuristic, but that heuristic
+# is wrong for this fixture family: there is no true "vertical balance"
+# control, just two independent 8-bit dimmer channels (confirmed via
+# Casambi Cloud's /fixture/:type endpoint). Define manually for units that
+# actually need it:
+#
+#   define <name> CasambiChannels <parentUnitName>
+#
+# Both channels are always written together in one atomic BLE operation
+# (OpCode::SetState) since the fixture requires it — the ESP32 firmware's
+# /api/units/:id/channels endpoint takes {"up":.., "down":..} in one call.
+# ============================================================================
+
+sub CasambiChannels_Initialize {
+    my $hash = shift;
+    $hash->{DefFn}    = "CasambiChannels_Define";
+    $hash->{UndefFn}  = "CasambiChannels_Undefine";
+    $hash->{SetFn}    = "CasambiChannels_Set";
+    $hash->{AttrList} = "setList " . $readingFnAttributes;
+    return undef;
+}
+
+sub CasambiChannels_Define {
+    my ($hash, $def) = @_;
+    my @args = split /\s+/, $def;
+    return "Usage: define <name> CasambiChannels <parentUnitName>" if @args < 3;
+
+    my ($name, undef, $parentName) = @args;
+    $hash->{PARENT_NAME}     = $parentName;
+    $hash->{UPDATING_STATUS} = 0;
+
+    _CasambiVertical_SetAttrIfChanged($name, "genericDeviceType", "light");
+    _CasambiVertical_SetAttrIfChanged($name, "setList",
+        "on:noArg off:noArg up:slider,0,1,100 down:slider,0,1,100");
+    _CasambiVertical_SetAttrIfChanged($name, "webCmd", "on:off:up:down");
+    _CasambiVertical_SetAttrIfChanged($name, "homebridgeMapping",
+        "On=state,valueOff=off,cmdOff=off,cmdOn=on");
+
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "state", "initialized");
+    readingsBulkUpdate($hash, "up",    50);
+    readingsBulkUpdate($hash, "down",  50);
+    readingsEndUpdate($hash, 1);
+    return undef;
+}
+
+sub CasambiChannels_Undefine {
+    my ($hash, $name) = @_;
+    RemoveInternalTimer($hash);
+    return undef;
+}
+
+# ============================================================================
+# SetFn — up/down commands (0-100%). Both channels are always sent together,
+# using the last-known reading for whichever channel wasn't just changed.
+# ============================================================================
+
+sub CasambiChannels_Set {
+    my ($hash, $name, $cmd, @args) = @_;
+
+    return undef if $hash->{UPDATING_STATUS};
+
+    if ($cmd eq "?") {
+        return "Unknown argument $cmd, choose one of on:noArg off:noArg up:slider,0,1,100 down:slider,0,1,100";
+    }
+
+    my $parentName = $hash->{PARENT_NAME};
+    my $parentHash = $defs{$parentName};
+    return "Parent unit '$parentName' not found" unless $parentHash;
+
+    my $gwName = $parentHash->{GW_NAME} // return "Parent unit has no GW_NAME";
+    my $unitId = ReadingsVal($parentName, "casambiId", "");
+    return "No casambiId on parent unit yet" unless $unitId;
+
+    my $upPct   = ReadingsVal($name, "up",   50);
+    my $downPct = ReadingsVal($name, "down", 50);
+
+    if ($cmd eq "on") {
+        $upPct   = 50 if $upPct == 0 && $downPct == 0;
+        $downPct = 50 if $upPct == 0 && $downPct == 0;
+        # (if only one side was at 0, leave it there — restores the split)
+
+    } elsif ($cmd eq "off") {
+        $upPct = 0;
+        $downPct = 0;
+
+    } elsif ($cmd eq "up") {
+        $upPct = int($args[0] // 0);
+        $upPct = 0   if $upPct < 0;
+        $upPct = 100 if $upPct > 100;
+
+    } elsif ($cmd eq "down") {
+        $downPct = int($args[0] // 0);
+        $downPct = 0   if $downPct < 0;
+        $downPct = 100 if $downPct > 100;
+
+    } else {
+        return "Unknown command '$cmd', choose one of on:noArg off:noArg up:slider,0,1,100 down:slider,0,1,100";
+    }
+
+    my $upRaw   = int($upPct   * 2.55 + 0.5);
+    my $downRaw = int($downPct * 2.55 + 0.5);
+    $upRaw   = 255 if $upRaw   > 255;
+    $downRaw = 255 if $downRaw > 255;
+
+    _CasambiChannels_Debounce($hash, sub {
+        CasambiGW_SendCommand($gwName, $unitId, "channels", [$upRaw, $downRaw]);
+    });
+
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "up",    $upPct);
+    readingsBulkUpdate($hash, "down",  $downPct);
+    readingsBulkUpdate($hash, "state", ($upPct > 0 || $downPct > 0) ? "on" : "off");
+    readingsEndUpdate($hash, 1);
+
+    return undef;
+}
+
+# ============================================================================
+# UpdateFromParent — called by CasambiUnit_UpdateFromState.
+# upRaw/downRaw: raw 0-255 channel bytes from the ESP32 (level=Uplight,
+# vertical=Downlight for this fixture family).
+# ============================================================================
+
+sub CasambiChannels_UpdateFromParent {
+    my ($hash, $upRaw, $downRaw, $parentOn) = @_;
+
+    local $hash->{UPDATING_STATUS} = 1;
+
+    my $upPct   = int($upRaw   / 2.55 + 0.5);
+    my $downPct = int($downRaw / 2.55 + 0.5);
+    $upPct   = 100 if $upPct   > 100;
+    $downPct = 100 if $downPct > 100;
+
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "up",    $upPct);
+    readingsBulkUpdate($hash, "down",  $downPct);
+    readingsBulkUpdate($hash, "state", ($upPct > 0 || $downPct > 0) ? "on" : "off");
+    readingsEndUpdate($hash, 1);
+}
+
+sub _CasambiChannels_Debounce {
+    my ($hash, $action) = @_;
+    my $key = "debounce_" . $hash->{NAME} . "_channels";
+    RemoveInternalTimer($key);
+    InternalTimer(gettimeofday() + 0.3, $action, $key);
 }
 
 1;

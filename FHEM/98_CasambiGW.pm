@@ -864,7 +864,7 @@ sub CasambiGW_CreateUnit {
     # address comes from the network config / hello message; rejecting anything
     # that is not a plain colon-separated MAC prevents command injection via a
     # crafted address field.
-    if ($mac !~ /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i) {
+    if ($mac !~ /^[0-9a-f]{12}$/i) {
         Log3 $name, 2,
             "$name: refusing to create unit '$raw' — invalid MAC address '$mac'";
         return undef;
@@ -910,6 +910,12 @@ sub CasambiGW_SendCommand {
     } elsif ($cmd eq "vertical") {
         $url  = "http://$ip:$port/api/units/$unitId/vertical";
         $json = "{\"value\":$value}";
+    } elsif ($cmd eq "channels") {
+        # $value is an arrayref [$up, $down] — both channels always sent
+        # together since the Grace fixture requires an atomic write.
+        my ($up, $down) = @$value;
+        $url  = "http://$ip:$port/api/units/$unitId/channels";
+        $json = "{\"up\":$up,\"down\":$down}";
     } else {
         return;
     }
@@ -926,15 +932,12 @@ sub CasambiGW_SendCommand {
                 Log3 $gwName, 2, "$gwName: HTTP error (unit $unitId $cmd): $err";
                 return;
             }
-            # Application-level rejections (503 BLE down / queue full, 401
-            # auth, 404 unknown unit) are not transport errors — without this
-            # check the command vanished silently while the FHEM reading
-            # optimistically showed the new state. Any 2xx is accepted: the
-            # gateway answers 202 (command queued, executed asynchronously on
-            # the ESP32 loop task; the resulting state arrives via the
-            # WebSocket unit_state event), older firmware answered 200.
+            # Application-level rejections (503 BLE down, 401 auth, 404 unknown
+            # unit) are not transport errors — without this check the command
+            # vanished silently while the FHEM reading optimistically showed
+            # the new state.
             my $code = $param->{code} // 0;
-            if ($code < 200 || $code >= 300) {
+            if ($code != 200) {
                 my $hint = $code == 401
                     ? " — check 'set $gwName password' / attr casambiPassword" : "";
                 Log3 $gwName, 3, "$gwName: unit $unitId $cmd rejected: HTTP $code "

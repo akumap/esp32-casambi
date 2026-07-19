@@ -176,6 +176,7 @@ public:
     // reporting success. Packet/origin counters are only advanced on success.
     bool setSceneLevel(uint8_t sceneId, uint8_t level);
     bool setUnitLevel(uint8_t unitId, uint8_t level);
+    bool setUnitChannels(uint8_t unitId, uint8_t up, uint8_t down); // dual-dimmer fixtures (e.g. Oligo Grace Uplight/Downlight)
     bool setGroupLevel(uint8_t groupId, uint8_t level);
     bool setUnitVertical(uint8_t unitId, uint8_t vertical);
     bool setGroupVertical(uint8_t groupId, uint8_t vertical);
@@ -205,19 +206,14 @@ private:
     uint32_t _inPacketCount;
     uint16_t _origin;
 
-    // Connection tracking. Everything below except _connectedAddress and
-    // _connectTime is written on one task and read on another (NimBLE host
-    // task writes the notification counter/timestamp, the loop task polls
-    // them in wait loops, the async_tcp task reads the diagnostics for
-    // /api/status) — atomics make those hand-offs well-defined instead of
-    // relying on delay() forcing a reload.
-    String _connectedAddress;            // guarded by g_configMutex
-    unsigned long _connectTime;          // millis() when connected (loop task only)
-    std::atomic<unsigned long> _lastNotificationTime; // millis() at last notification
-    std::atomic<uint32_t> _totalReceivedPackets;
-    std::atomic<DisconnectReason> _lastDisconnectReason;
-    std::atomic<const char*> _lastDisconnectSource;  // detector of the last disconnect (static string)
-    std::atomic<int> _lastRssi;          // last known link RSSI in dBm (0 = unknown)
+    // Connection tracking
+    String _connectedAddress;
+    unsigned long _connectTime;          // millis() when connected
+    unsigned long _lastNotificationTime; // millis() when last notification received
+    uint32_t _totalReceivedPackets;
+    DisconnectReason _lastDisconnectReason;
+    const char* _lastDisconnectSource;   // detector of the last disconnect (static string)
+    int _lastRssi;                       // last known link RSSI in dBm (0 = unknown)
 
     // Thread safety for concurrent command line + web server access
     SemaphoreHandle_t _mutex;
