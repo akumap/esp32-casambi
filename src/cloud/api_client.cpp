@@ -267,7 +267,8 @@ void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
 
         bool hasVertical = false, hasCCT = false;
         uint16_t cctMin = 0, cctMax = 0;
-        if (!_fetchFixtureControls(unit.type, hasVertical, hasCCT, cctMin, cctMax)) {
+        String model, mode;
+        if (!_fetchFixtureControls(unit.type, hasVertical, hasCCT, cctMin, cctMax, model, mode)) {
             Serial.printf("Fixture: type %u fetch/parse failed - keeping heuristic capabilities\n",
                           unit.type);
             continue;
@@ -277,8 +278,8 @@ void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
         // divergence is visible for verification before it changes behaviour.
         for (CasambiUnit& u : config.units) {
             if (u.type != unit.type) continue;
-            Serial.printf("Fixture: unit %d (type %u) fixture=[vertical=%d cct=%d",
-                          u.deviceId, u.type, hasVertical, hasCCT);
+            Serial.printf("Fixture: unit %d (type %u) '%s' [%s] fixture=[vertical=%d cct=%d",
+                          u.deviceId, u.type, model.c_str(), mode.c_str(), hasVertical, hasCCT);
             if (hasCCT && cctMin && cctMax) Serial.printf(" %u-%uK", cctMin, cctMax);
             Serial.printf("]  heuristic=[vertical=%d cct=%d]\n", u.hasVertical, u.hasCCT);
 
@@ -293,7 +294,8 @@ void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
 }
 
 bool CasambiAPIClient::_fetchFixtureControls(uint16_t type, bool& hasVertical, bool& hasCCT,
-                                             uint16_t& cctMinKelvin, uint16_t& cctMaxKelvin) {
+                                             uint16_t& cctMinKelvin, uint16_t& cctMaxKelvin,
+                                             String& model, String& mode) {
     if (!isWiFiConnected()) {
         _lastError = "WiFi not connected";
         return false;
@@ -332,6 +334,11 @@ bool CasambiAPIClient::_fetchFixtureControls(uint16_t type, bool& hasVertical, b
         Serial.printf("API: Fixture %u has no controls array\n", type);
         return false;
     }
+
+    // Human-readable identity for the verification log (e.g. model "Mito
+    // sospeso", mode "EXT/3ch/Dim,Vertical,TW[NoMix]").
+    model = doc["model"].as<String>();
+    mode  = doc["mode"].as<String>();
 
     // Capabilities follow the presence of the corresponding control. Control
     // type names mirror casambi-bt's UnitControlType (upper-cased).

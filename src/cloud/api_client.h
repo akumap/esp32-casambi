@@ -132,7 +132,8 @@ private:
      * caller then keeps the heuristic values for that type.
      */
     bool _fetchFixtureControls(uint16_t type, bool& hasVertical, bool& hasCCT,
-                               uint16_t& cctMinKelvin, uint16_t& cctMaxKelvin);
+                               uint16_t& cctMinKelvin, uint16_t& cctMaxKelvin,
+                               String& model, String& mode);
 
     /**
      * Dump the raw cloud config response to Serial for analysis, with every

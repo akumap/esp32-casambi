@@ -68,12 +68,16 @@ const char* opcodeName(uint8_t opcode) {
 }
 
 void hexDump(const char* label, const uint8_t* data, size_t len, size_t maxBytes) {
+    // maxBytes == 0 means "no limit": dump the complete packet. Raw BLE packet
+    // dumps use this so a status/network payload is never silently cut off at a
+    // fixed length (only explicit previews pass a positive cap).
+    size_t limit = (maxBytes == 0) ? len : maxBytes;
     Serial.printf("%s (%d bytes): ", label, len);
-    size_t printLen = (len < maxBytes) ? len : maxBytes;
+    size_t printLen = (len < limit) ? len : limit;
     for (size_t i = 0; i < printLen; i++) {
         Serial.printf("%02x ", data[i]);
     }
-    if (len > maxBytes) {
+    if (len > limit) {
         Serial.print("...");
     }
     Serial.println();
