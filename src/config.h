@@ -82,8 +82,11 @@
 // A missing api_version_* field on the wire means version 1.0 (firmware
 // predating this contract). Version mismatches are WARNED about in FHEM but
 // never block operation (fail-operational, see docs/konzept-versionierung.md).
+// 1.1: + POST /api/units/:id/state (generic atomic full-state write) and the
+//      optional `name` field in every `controls` entry (hello, unit_state,
+//      GET /api/units) — compatible extension, older clients ignore both.
 #define FHEM_API_VERSION_MAJOR    1
-#define FHEM_API_VERSION_MINOR    0
+#define FHEM_API_VERSION_MINOR    1
 
 // Minimum Casambi unit firmware version (the numeric part of "Evolution/X.Y")
 #define MIN_UNIT_FIRMWARE_VERSION 48.0f

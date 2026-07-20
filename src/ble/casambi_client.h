@@ -177,6 +177,13 @@ public:
     bool setSceneLevel(uint8_t sceneId, uint8_t level);
     bool setUnitLevel(uint8_t unitId, uint8_t level);
     bool setGroupLevel(uint8_t groupId, uint8_t level);
+    // Full-state write (OpCode::SetState): `state` carries the unit's COMPLETE
+    // state blob (`len` = fixture stateLength, one raw value per control at
+    // its fixture bit position — see state_codec.h). This is the only way to
+    // set several controls atomically (e.g. both dimmers of a dual-dimmer
+    // fixture). Callers MUST encode unchanged controls at their current
+    // values: a zeroed byte resets that control on the fixture.
+    bool setUnitState(uint8_t unitId, const uint8_t* state, uint8_t len);
     bool setUnitVertical(uint8_t unitId, uint8_t vertical);
     bool setGroupVertical(uint8_t groupId, uint8_t vertical);
     bool setUnitTemperature(uint8_t unitId, uint16_t kelvin);

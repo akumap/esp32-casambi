@@ -606,6 +606,29 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
   2 Byte LE + Sättigung). Der äußere Operations-Rahmen ist identisch; diese
   konkreten Nutzlast-Formate baut casambi-bt in seiner höheren Schicht (nicht in
   `_operation.py`) und wurden hier **nicht** gegengeprüft.
+- `[+]` **`SetState` (48) als Schreibpfad — auf Hardware verifiziert** (Oligo
+  Grace, zwei unabhängige 8-Bit-Dimmer + Temperatur-Byte; Erkenntnis aus
+  PR #39). Semantik:
+  - Die Payload ist der **komplette State-Blob** der Unit — dasselbe Layout,
+    das die Fixture-Definition (`/fixture/{type}`, A.6) über die Controls
+    (offset/length) beschreibt und das eingehend in 0x06-Records steht
+    (`stateLength` Bytes).
+  - Ein `SetState`-Write setzt **alle** Controls auf die übertragenen Werte;
+    es gibt keine Teil-Writes. **Nicht mitgeschriebene (genullte) Bytes setzen
+    das jeweilige Control zurück** — beobachtet am Temperatur-Byte, das ohne
+    Erhalt des aktuellen Werts auf 0 fiel. Sender müssen den Blob daher immer
+    aus den aktuellen Control-Werten aufbauen und nur die gewünschten Controls
+    überschreiben.
+  - Nur so lassen sich mehrere Kanäle **atomar** in einem Telegramm ändern
+    (z. B. beide Dimmer einer Uplight/Downlight-Leuchte) — mit `SetLevel`/
+    `SetVertical` ist das nicht möglich, und `SetVertical` implementieren
+    Zwei-Dimmer-Fixtures gar nicht.
+  - Umsetzung: `CasambiClient::setUnitState()` + purer Encoder
+    `src/cloud/state_codec.h` (host-getestet, `test/test_state_codec`);
+    REST-seitig `POST /api/units/:id/state`. Verifiziert sind byte-alignierte
+    8-Bit-Controls; 16-Bit wird little-endian kodiert (analog Hue in
+    `SetColor`), Sub-Byte-Layouts lehnt der Encoder explizit ab statt eine
+    ungetestete Bit-Reihenfolge zu raten.
 
 ### D.5 Eingehende Pakete — die größte Divergenz
 
@@ -660,8 +683,12 @@ bit-entpackt — im aktuellen Bestand kommen sie nicht vor.
 > **generische API** (`controls`-Array je Unit) und **FHEM**-Readings, deren
 > Namen aus den Cloud-Control-Typen stammen. Golden-Vector-Tests
 > (`test/test_packet_parse`) frieren die Occhio-Captures byte-für-byte ein.
-> Offen nur noch: bit-genaues Entpacken von Sub-Byte-Controls (RGB/XY) und
-> generische Set-/Homebridge-Pfade für neue Control-Typen.
+> Ebenfalls umgesetzt: der **generische Schreibpfad** über `SetState` (D.4) —
+> `POST /api/units/:id/state` adressiert Controls per Name und schreibt den
+> kompletten State-Blob atomar; FHEM bedient Mehrkanal-Dimmer (z. B. Oligo
+> Grace Uplight/Downlight) darüber ohne fixture-spezifischen Code. Offen nur
+> noch: bit-genaues Entpacken/Kodieren von Sub-Byte-Controls (RGB/XY) und
+> Homebridge-Mappings für neue Control-Typen.
 
 ---
 

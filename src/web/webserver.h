@@ -41,6 +41,7 @@
 #include <atomic>
 #include "../ble/casambi_client.h"
 #include "../cloud/network_config.h"
+#include "../cloud/state_codec.h"   // MAX_STATE_BYTES for the UnitState command payload
 
 // A broadcast event posted from the BLE notification task. Plain value type
 // by design: the BLE task enqueues a handful of bytes with NO heap
@@ -70,11 +71,16 @@ struct BleCommand {
         UnitVertical, GroupVertical,
         UnitTemperature, UnitColor,
         UnitSlider, GroupSlider,
+        UnitState,
     };
     Type type;
     uint8_t id;         // scene/unit/group id (already validated against config)
     uint8_t a, b, c;    // level/value (a) or r,g,b depending on type
     uint16_t kelvin;    // UnitTemperature only
+    // UnitState only: the fully encoded state blob (see state_codec.h). Fixed
+    // array by design — the queue stays a plain value type with no ownership.
+    uint8_t state[statecodec::MAX_STATE_BYTES];
+    uint8_t stateLen;
 };
 
 class CasambiWebServer {
@@ -268,6 +274,11 @@ private:
     void _handleUnitTemperature(AsyncWebServerRequest* request);
     void _handleUnitSlider(AsyncWebServerRequest* request);
     void _handleUnitVertical(AsyncWebServerRequest* request);
+    // POST /api/units/:id/state — generic full-state write: body maps control
+    // NAMES (see controlName() in network_config.h) to raw values; controls
+    // not named keep their current value. Encoded here (async_tcp task) from a
+    // config snapshot, sent as one atomic SetState via the command queue.
+    void _handleUnitState(AsyncWebServerRequest* request);
 
     // Group control endpoints
     void _handleGroupLevel(AsyncWebServerRequest* request);

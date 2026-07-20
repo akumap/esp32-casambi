@@ -27,16 +27,20 @@ static String lockedCopy(const String& s) {
 
 // Emit a unit's channels as a generic `controls` array so consumers (FHEM)
 // derive reading names from the cloud control types instead of hardcoding
-// vertical/colorTemp. Each entry: { type, value }, and temperature adds the
-// resolved kelvin plus its min/max bounds. Caller must already hold
+// vertical/colorTemp. Each entry: { type, name, value }, and temperature adds
+// the resolved kelvin plus its min/max bounds. `name` is the unique per-unit
+// control name (type + 0-based index when a type repeats, see controlName())
+// that POST /api/units/:id/state addresses. Caller must already hold
 // g_configMutex (control values are written by the BLE task). No-op for units
 // without a fixture definition (older configs) — the legacy fields still ship.
 static void addUnitControls(JsonObject u, const CasambiUnit& unit) {
     if (unit.controls.empty()) return;
     JsonArray arr = u["controls"].to<JsonArray>();
-    for (const auto& c : unit.controls) {
+    for (size_t i = 0; i < unit.controls.size(); i++) {
+        const UnitControl& c = unit.controls[i];
         JsonObject co = arr.add<JsonObject>();
         co["type"]  = c.typeName;
+        co["name"]  = controlName(unit, i);
         co["value"] = c.value;
         if (c.typeName == "temperature" && c.max > c.min) {
             co["kelvin"] = (uint16_t)(c.min + (uint32_t)c.value * (c.max - c.min) / 255);
@@ -513,7 +517,8 @@ static bool isBodyPostEndpoint(const String& path) {
     return (path.indexOf("/api/scenes/") == 0 && path.endsWith("/level")) ||
            (path.indexOf("/api/units/")  == 0 && (path.endsWith("/level") ||
                path.endsWith("/color") || path.endsWith("/temperature") ||
-               path.endsWith("/slider") || path.endsWith("/vertical"))) ||
+               path.endsWith("/slider") || path.endsWith("/vertical") ||
+               path.endsWith("/state"))) ||
            (path.indexOf("/api/groups/") == 0 && (path.endsWith("/level") ||
                path.endsWith("/slider") || path.endsWith("/vertical"))) ||
            (path == "/api/ntp");
@@ -657,6 +662,7 @@ void CasambiWebServer::_setupRoutes() {
                 else if (path.endsWith("/temperature")) _handleUnitTemperature(request);
                 else if (path.endsWith("/slider"))      _handleUnitSlider(request);
                 else if (path.endsWith("/vertical"))    _handleUnitVertical(request);
+                else if (path.endsWith("/state"))       _handleUnitState(request);
             } else if (path.indexOf("/api/groups/") == 0) {
                 if      (path.endsWith("/level"))    _handleGroupLevel(request);
                 else if (path.endsWith("/slider"))   _handleGroupSlider(request);
@@ -747,6 +753,7 @@ void CasambiWebServer::_setupRoutes() {
         html += "<li>POST /api/units/:id/level - Set unit level</li>";
         html += "<li>POST /api/units/:id/color - Set unit color</li>";
         html += "<li>POST /api/units/:id/temperature - Set unit temperature</li>";
+        html += "<li>POST /api/units/:id/state - Set named controls atomically ({\"dimmer0\":255,...})</li>";
         html += "<li>POST /api/groups/:id/level - Set group level</li>";
         html += "</ul></body></html>";
         request->send(200, "text/html", html);
@@ -1399,6 +1406,98 @@ void CasambiWebServer::_handleUnitVertical(AsyncWebServerRequest* request) {
     _enqueueBleCommand(request, cmd);
 }
 
+// Generic full-state write. Body: JSON object mapping control NAMES to raw
+// values, e.g. {"dimmer0":255,"dimmer1":128} — names as reported in the
+// `controls` array of GET /api/units (type + 0-based index when a type
+// repeats). All named controls of the unit are written ATOMICALLY in one
+// SetState telegram; controls not named keep their current value (the encode
+// starts from the unit's live control snapshot — required, because a zeroed
+// byte resets that control on the fixture).
+void CasambiWebServer::_handleUnitState(AsyncWebServerRequest* request) {
+    uint8_t unitId;
+    if (!_checkBle(request)) return;
+    CasambiUnit* unit = _unitFromPath(request, "/state", unitId);
+    if (!unit) return;
+
+    JsonDocument doc;
+    if (!_parseBody(request, doc)) return;
+    JsonObjectConst obj = doc.as<JsonObjectConst>();
+    if (obj.isNull() || obj.size() == 0) {
+        _sendJsonError(request, "Body must be a JSON object of control values, e.g. {\"dimmer0\":255}", 400);
+        return;
+    }
+
+    // Snapshot layout + current control values under g_configMutex (the BLE
+    // task updates the values there). Overrides below apply to this snapshot.
+    statecodec::ControlSpec specs[statecodec::MAX_CONTROLS];
+    String names[statecodec::MAX_CONTROLS];
+    size_t  nControls = 0;
+    uint8_t stateLen  = 0;
+    bool    usable    = false;
+    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    if (unit->hasFixture && unit->stateLength > 0 &&
+        !unit->controls.empty() && unit->controls.size() <= statecodec::MAX_CONTROLS) {
+        usable    = true;
+        stateLen  = unit->stateLength;
+        nControls = unit->controls.size();
+        for (size_t i = 0; i < nControls; i++) {
+            specs[i].offset = unit->controls[i].offset;
+            specs[i].length = unit->controls[i].length;
+            specs[i].value  = unit->controls[i].value;
+            names[i] = controlName(*unit, i);
+        }
+    }
+    if (g_configMutex) xSemaphoreGive(g_configMutex);
+
+    if (!usable) {
+        // No fixture layout (older config, fixture fetch failed) — the state
+        // blob cannot be built safely. 409: the request was well-formed, the
+        // unit just cannot serve it; a cloud refresh usually fixes this.
+        _sendJsonError(request, "Unit has no fixture control layout; full-state write unavailable (refresh the cloud config)", 409);
+        return;
+    }
+
+    // Apply the named overrides (case-insensitive, unknown names rejected).
+    for (JsonPairConst kv : obj) {
+        const String key = kv.key().c_str();
+        int match = -1;
+        for (size_t i = 0; i < nControls; i++) {
+            if (names[i].equalsIgnoreCase(key)) { match = (int)i; break; }
+        }
+        if (match < 0) {
+            _sendJsonError(request, String("Unknown control '") + key +
+                           "' (see the unit's controls in GET /api/units)", 400);
+            return;
+        }
+        const uint16_t maxV = statecodec::maxControlValue(specs[match].length);
+        if (!kv.value().is<uint32_t>() || kv.value().as<uint32_t>() > maxV) {
+            _sendJsonError(request, String("Value for '") + key +
+                           "' must be an integer 0-" + String(maxV), 400);
+            return;
+        }
+        specs[match].value = (uint16_t)kv.value().as<uint32_t>();
+    }
+
+    BleCommand cmd{};
+    cmd.type = BleCommand::Type::UnitState;
+    cmd.id   = unitId;
+    statecodec::EncodeResult res =
+        statecodec::encodeState(specs, nControls, stateLen, cmd.state);
+    if (res != statecodec::ENCODE_OK) {
+        // Layout the firmware cannot encode (e.g. non-byte-aligned control) —
+        // fail explicitly instead of sending a guessed blob to the fixture.
+        _sendJsonError(request, String("Cannot encode state: ") +
+                       statecodec::encodeResultName(res), 409);
+        return;
+    }
+    cmd.stateLen = stateLen;
+
+    WEB_LOG("Web: Unit %d (%s) state write (%u controls, %u bytes) queued from %s\n",
+            unitId, unit->name.c_str(), (unsigned)obj.size(), (unsigned)stateLen,
+            _getClientIP(request).c_str());
+    _enqueueBleCommand(request, cmd);
+}
+
 // ============================================================================
 // Group Control Endpoints
 // ============================================================================
@@ -1508,6 +1607,7 @@ void CasambiWebServer::_executeBleCommand(const BleCommand& cmd) {
         case BleCommand::Type::UnitColor:       ok = _client->setUnitColor(cmd.id, cmd.a, cmd.b, cmd.c); break;
         case BleCommand::Type::UnitSlider:      ok = _client->setUnitSlider(cmd.id, cmd.a); break;
         case BleCommand::Type::GroupSlider:     ok = _client->setGroupSlider(cmd.id, cmd.a); break;
+        case BleCommand::Type::UnitState:       ok = _client->setUnitState(cmd.id, cmd.state, cmd.stateLen); break;
     }
     if (!ok) {
         // The HTTP 202 already went out; the failure surfaces here and via the

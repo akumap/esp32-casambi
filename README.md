@@ -39,7 +39,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 
 ### Tested Casambi Lights
 
-The following Occhio luminaires have been tested with this controller:
+The following luminaires have been tested with this controller:
 
 |Luminaire                |Capabilities                             |Verified          |
 |-------------------------|-----------------------------------------|------------------|
@@ -47,6 +47,7 @@ The following Occhio luminaires have been tested with this controller:
 |Occhio Sento (air)       |Brightness + Vertical                    |✅ Brightness + Vertical|
 |Occhio Luna sospeso (air)|Brightness + Color Temperature           |✅ Brightness + CCT|
 |Occhio air module        |Brightness only                          |✅ Brightness      |
+|Oligo Grace              |2 independent dimmers (Up-/Downlight) + Color Temperature|SetState write verified in PR #39; per-channel path untested on hardware|
 
 The controller should work with any Casambi-enabled luminaire. Capabilities are detected generically from the Casambi cloud configuration — no fixture-specific code is required.
 
@@ -254,7 +255,7 @@ Notes:
 **GET /api/info** — Lightweight discovery endpoint (used by the FHEM module)
 
 ```json
-{ "configured": true, "build": 42, "api_version_major": 1, "api_version_minor": 0 }
+{ "configured": true, "build": 42, "api_version_major": 1, "api_version_minor": 1 }
 ```
 
 Served in both modes: while the device is still in the setup portal it returns
@@ -364,9 +365,9 @@ ESP32 the re-roll almost always lands there. Re-rolls appear in the event log
       "cctMin": 2700,
       "cctMax": 4000,
       "controls": [
-        { "type": "dimmer",      "value": 200 },
-        { "type": "vertical",    "value": 127 },
-        { "type": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
+        { "type": "dimmer",      "name": "dimmer",      "value": 200 },
+        { "type": "vertical",    "name": "vertical",    "value": 127 },
+        { "type": "temperature", "name": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
       ]
     },
     {
@@ -379,7 +380,7 @@ ESP32 the re-roll almost always lands there. Re-rolls appear in the event log
       "level": 255,
       "numChannels": 1,
       "controls": [
-        { "type": "dimmer", "value": 255 }
+        { "type": "dimmer", "name": "dimmer", "value": 255 }
       ]
     }
   ]
@@ -390,6 +391,14 @@ The `controls` array is the canonical, cloud-derived per-channel state: one entr
 per fixture control, named by its control type, with the raw `value` (0–255) and,
 for `temperature`, the resolved `kelvin` plus its `min`/`max` bounds. Consumers
 (e.g. the FHEM integration) should read `controls` to name readings generically.
+
+Each entry also carries a `name` (since API 1.1): the unique per-unit control
+name used for addressing in `POST /api/units/:id/state`. It equals the control
+type, except when a type occurs more than once on a unit — then the controls
+get a 0-based index in fixture order. A dual-dimmer fixture (e.g. Oligo Grace
+Uplight/Downlight) therefore reports
+`{ "type": "dimmer", "name": "dimmer0", ... }` and
+`{ "type": "dimmer", "name": "dimmer1", ... }`.
 
 The legacy `level`, `vertical`, `colorTemp`, `cctMin`, and `cctMax` fields are
 kept for backward compatibility and only appear for units that support them;
@@ -433,7 +442,24 @@ curl -X POST http://<ip>/api/units/1/vertical \
   -H "Content-Type: application/json" -d '{"value": 127}'
 curl -X POST http://<ip>/api/units/2/slider \
   -H "Content-Type: application/json" -d '{"value": 200}'
+
+# Generic atomic full-state write (API >= 1.1): set one or more controls BY
+# NAME (see the "name" field in GET /api/units) in a single BLE telegram.
+# Controls not named keep their current value. This is the only way to change
+# several channels atomically — e.g. both dimmers of a dual-dimmer fixture:
+curl -X POST http://<ip>/api/units/9/state \
+  -H "Content-Type: application/json" -d '{"dimmer0": 255, "dimmer1": 128}'
 ```
+
+`/api/units/:id/state` requires the unit's fixture control layout (fetched
+from the Casambi cloud on setup/refresh and persisted); it answers `409` when
+no layout is known (run `set <gw> refreshCasambi` / serial `refresh` once) and
+`400` for unknown control names or out-of-range values. Values are raw
+(`0 … 2^length-1`, i.e. 0–255 for the usual 8-bit controls). The write is
+atomic: the ESP32 merges the named controls into the unit's current state
+vector and sends one `SetState` telegram — required because the fixture
+resets any control whose byte is missing/zeroed (observed for the colour
+temperature on Oligo Grace).
 
 #### Groups
 
@@ -464,7 +490,7 @@ Casambi password is present yet (run `setup`/`refresh` once via serial first).
 ### Response Format
 
 **Control commands** (scene/unit/group on/off/level/color/temperature/
-vertical/slider) answer `202 Accepted` with `{"success": true, "queued": true}`:
+vertical/slider/state) answer `202 Accepted` with `{"success": true, "queued": true}`:
 the command is validated, queued and then executed on the ESP32's loop task so
 BLE operations never stall the HTTP/WebSocket server. The resulting state
 change arrives as a WebSocket `unit_state` event; a command that later fails
@@ -587,7 +613,7 @@ capability flags used by the FHEM integration for device identification:
   "type": "hello",
   "build": 1,
   "api_version_major": 1,
-  "api_version_minor": 0,
+  "api_version_minor": 1,
   "casambi_protocol_version": 11,
   "casambi_protocol_min": 10,
   "casambi_protocol_max": 11,
@@ -610,9 +636,9 @@ capability flags used by the FHEM integration for device identification:
       "cctMin": 2700,
       "cctMax": 4000,
       "controls": [
-        { "type": "dimmer",      "value": 200 },
-        { "type": "vertical",    "value": 127 },
-        { "type": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
+        { "type": "dimmer",      "name": "dimmer",      "value": 200 },
+        { "type": "vertical",    "name": "vertical",    "value": 127 },
+        { "type": "temperature", "name": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
       ]
     },
     {
@@ -627,14 +653,15 @@ capability flags used by the FHEM integration for device identification:
       "hasVertical": false,
       "numChannels": 1,
       "controls": [
-        { "type": "dimmer", "value": 255 }
+        { "type": "dimmer", "name": "dimmer", "value": 255 }
       ]
     }
   ]
 }
 ```
 
-The `controls` array (same shape as in `GET /api/units`) is the canonical,
+The `controls` array (same shape as in `GET /api/units`, including the `name`
+used to address controls in `POST /api/units/:id/state`) is the canonical,
 cloud-derived per-channel state that the FHEM integration uses to name readings
 generically. The legacy `vertical`, `colorTemp`, `cctMin`, and `cctMax` fields
 remain for compatibility and appear only for units that support them.
@@ -668,9 +695,9 @@ needing the rest fetch `GET /api/units` themselves.
   "cctMin": 2700,
   "cctMax": 4000,
   "controls": [
-    { "type": "dimmer",      "value": 200 },
-    { "type": "vertical",    "value": 127 },
-    { "type": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
+    { "type": "dimmer",      "name": "dimmer",      "value": 200 },
+    { "type": "vertical",    "name": "vertical",    "value": 127 },
+    { "type": "temperature", "name": "temperature", "value": 58, "kelvin": 2996, "min": 2700, "max": 4000 }
   ]
 }
 ```
@@ -1045,6 +1072,13 @@ here). The version travels in `GET /api/info` and the WebSocket `hello`; a
 missing field means firmware at version `1.0` (predating the contract). Design
 rationale: `docs/konzept-versionierung.md` (issue #29).
 
+**Version history:**
+
+| Version | Change |
+|---|---|
+| 1.0 | Initial versioned interface |
+| 1.1 | `POST /api/units/:id/state` (generic atomic full-state write) and the optional `name` field in every `controls` entry (hello, `unit_state`, `GET /api/units`) — FHEM uses both to drive multi-dimmer fixtures (e.g. Oligo Grace Uplight/Downlight) per channel |
+
 -----
 
 ## FHEM Integration
@@ -1193,6 +1227,8 @@ Casambi reassigns unit IDs.
 | `vertical` | 0–255 light distribution (units with a `vertical` control) |
 | `casambiId` | Current Casambi unit ID (may change after network reconfiguration) |
 | `casambiName` | Unit name as configured in the Casambi network |
+| `channels` | Comma-separated control names on **multi-dimmer units** (e.g. `dimmer0,dimmer1`); absent on single-dimmer units |
+| *(per dimmer channel)* | 0–100 (%) — one reading per dimmer channel of a multi-dimmer unit, named after the control (`dimmer0`, `dimmer1`, …) or its `channelNames` alias. On these units they replace the single `brightness` reading. |
 
 The channel readings are derived generically from the `controls` array the
 gateway sends (see the WebSocket `hello`/`unit_state` messages), so no per-fixture
@@ -1216,12 +1252,37 @@ set Casambi_Mito_sospeso colorTemp 3000      # Kelvin or Mired (<500) accepted
 set Casambi_Mito_sospeso vertical 200
 ```
 
-Analog values (`brightness`, `colorTemp`, `vertical`) are debounced by 300 ms
-to avoid flooding the BLE mesh during slider movement.
+**Multi-dimmer units** (fixtures with two or more independent dimmer controls,
+e.g. Oligo Grace Uplight/Downlight) are driven per channel instead of via the
+single `brightness`: one 0–100 % command per channel, named after the cloud
+control or its `channelNames` alias. All channel writes go through the
+gateway's atomic `POST /api/units/:id/state`, so several channels change in
+one BLE telegram and untouched controls (e.g. the colour temperature) keep
+their values. `on`/`off` act on all channels together — `off` remembers the
+current split, `on` restores it (100 % everywhere when no split is known,
+e.g. after a FHEM restart):
+
+```
+attr Casambi_Grace channelNames dimmer0:up dimmer1:down   # optional aliases
+
+set Casambi_Grace up 80        # Uplight to 80%, Downlight unchanged
+set Casambi_Grace down 30
+set Casambi_Grace off          # both channels off (split remembered)
+set Casambi_Grace on           # restores 80%/30%
+```
+
+Analog values (`brightness`, `colorTemp`, `vertical`, channel dimmers) are
+debounced by 300 ms to avoid flooding the BLE mesh during slider movement.
 
 A feedback-loop guard suppresses outgoing commands while readings are being
 updated from incoming push data, preventing re-triggering when Homebridge or
 other systems react to reading changes.
+
+### User attributes on unit devices
+
+| Attribute | Description |
+|-----------|-------------|
+| `channelNames` | Display aliases for the dimmer channels of a multi-dimmer unit, e.g. `dimmer0:up dimmer1:down`. Renames readings, set commands and WebUI sliders; the ESP32 communication always uses the original control names. Set it before the next gateway reconnect (or trigger one) so `setList`/`webCmd` are regenerated with the aliases. |
 
 ### Managed attributes on unit devices
 
@@ -1254,6 +1315,11 @@ the slider always fills the full width in the Home app.
 
 Vertical light distribution is exposed via a separate `CasambiVertical`
 companion device (not as a second service on the main unit).
+
+Multi-dimmer units map only `On` by default — HomeKit's single Brightness
+characteristic cannot represent independent channels. The per-channel percent
+readings and set commands are ready to be mapped manually via the
+`homebridgeMapping` attribute if desired.
 
 ### CasambiVertical companion device
 
