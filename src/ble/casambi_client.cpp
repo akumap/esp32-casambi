@@ -7,6 +7,7 @@
 
 #include "casambi_client.h"
 #include "packet.h"
+#include "../cloud/state_codec.h"   // MAX_STATE_BYTES bound for setUnitState
 #include "../log/event_log.h"
 #include <NimBLEDevice.h>
 #include <mbedtls/sha256.h>
@@ -406,6 +407,17 @@ bool CasambiClient::setUnitLevel(uint8_t unitId, uint8_t level) {
     uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
     std::vector<uint8_t> payload = { level };
     bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetLevel), target, payload);
+    xSemaphoreGive(_mutex);
+    return ok;
+}
+
+bool CasambiClient::setUnitState(uint8_t unitId, const uint8_t* state, uint8_t len) {
+    if (!state || len == 0 || len > statecodec::MAX_STATE_BYTES) return false;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    if (!isAuthenticated()) { xSemaphoreGive(_mutex); return false; }
+    uint16_t target = encodeTarget(unitId, TARGET_TYPE_UNIT);
+    std::vector<uint8_t> payload(state, state + len);
+    bool ok = _sendOperation(static_cast<uint8_t>(OpCode::SetState), target, payload);
     xSemaphoreGive(_mutex);
     return ok;
 }

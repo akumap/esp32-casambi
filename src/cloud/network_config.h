@@ -98,6 +98,27 @@ struct CasambiUnit {
     }
 };
 
+// Stable, unique name of a unit's control for the generic API: the sole
+// control of a cloud type keeps the plain type name ("temperature"), a type
+// that occurs more than once gets a 0-based index in fixture order ("dimmer0",
+// "dimmer1" — e.g. dual-dimmer Uplight/Downlight fixtures like Oligo Grace).
+// Derived on demand (not stored) so configs persisted by older firmware get
+// names without a migration. Addressing is by this name in
+// POST /api/units/:id/state and in the `controls` arrays sent to clients.
+inline String controlName(const CasambiUnit& unit, size_t index) {
+    if (index >= unit.controls.size()) return String("");
+    const UnitControl& c = unit.controls[index];
+    size_t sameType = 0, ordinal = 0;
+    for (size_t i = 0; i < unit.controls.size(); i++) {
+        if (unit.controls[i].typeName == c.typeName) {
+            if (i < index) ordinal++;
+            sameType++;
+        }
+    }
+    if (sameType <= 1) return c.typeName;
+    return c.typeName + String((unsigned)ordinal);
+}
+
 struct CasambiGroup {
     uint8_t groupId;
     String name;

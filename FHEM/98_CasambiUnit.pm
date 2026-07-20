@@ -29,6 +29,12 @@ package main;
 #   brightness  0-100
 #   colorTemp   Kelvin (>500) or Mired (<500, converted automatically)
 #   vertical    0-255   (only on units with vertical capability)
+#
+# Units whose fixture has two or more dimmer controls (e.g. Oligo Grace
+# Uplight/Downlight) are driven per channel instead: one 0-100% set command
+# per channel (named after the cloud control, e.g. dimmer0/dimmer1, or its
+# channelNames alias), and on/off act on ALL channels atomically via the
+# gateway's /state endpoint ("off" remembers the split, "on" restores it).
 # ============================================================================
 
 sub CasambiUnit_Initialize {
@@ -36,7 +42,7 @@ sub CasambiUnit_Initialize {
     $hash->{DefFn}    = "CasambiUnit_Define";
     $hash->{UndefFn}  = "CasambiUnit_Undefine";
     $hash->{SetFn}    = "CasambiUnit_Set";
-    $hash->{AttrList} = "casambiMac cctMin cctMax setList "
+    $hash->{AttrList} = "casambiMac cctMin cctMax setList channelNames "
                       . $readingFnAttributes;
 
     # CasambiVertical lives in the same file; FHEM only auto-calls the
@@ -103,6 +109,87 @@ sub CasambiUnit_Set {
     my $unitId = ReadingsVal($name, "casambiId", "");
     return "No casambiId assigned yet — waiting for gateway sync" unless $unitId;
 
+    # --- Multi-dimmer units: per-channel commands + atomic on/off -----------
+    # The channel list (control names) is filled by SetCapabilities from the
+    # cloud controls; single-dimmer units have no "channels" reading and skip
+    # this block entirely.
+    my @chNames = split /,/, ReadingsVal($name, "channels", "");
+    if (@chNames >= 2) {
+        my ($alias, $revAlias) = _CasambiUnit_ChannelAliases($name);
+
+        # Per-channel dimmer command — accepts the control name ("dimmer0")
+        # or its channelNames alias ("up"), value in percent.
+        my $ctrl = $revAlias->{lc $cmd} // lc $cmd;
+        if (grep { $_ eq $ctrl } @chNames) {
+            my $pct = int($args[0] // 0);
+            $pct = 0   if $pct < 0;
+            $pct = 100 if $pct > 100;
+            my $raw = int($pct * 2.55 + 0.5);
+            $raw = 255 if $raw > 255;
+            _CasambiUnit_Debounce($hash, "ch_$ctrl", sub {
+                CasambiGW_SendCommand($gwName, $unitId, "state", { $ctrl => $raw });
+            });
+            my $any = $pct > 0 ? 1 : 0;
+            for my $c (@chNames) {
+                next if $c eq $ctrl;
+                $any = 1 if ReadingsVal($name, $alias->{$c} // $c, 0) > 0;
+            }
+            readingsBeginUpdate($hash);
+            readingsBulkUpdate($hash, $alias->{$ctrl} // $ctrl, $pct);
+            readingsBulkUpdate($hash, "state", $any ? "on" : "off");
+            readingsEndUpdate($hash, 1);
+            return undef;
+        }
+
+        if ($cmd eq "on" || $cmd eq "off") {
+            # ALL dimmer channels in one atomic state write. "off" remembers
+            # the current split; "on" keeps lit channels, restores the
+            # remembered split when everything is off, and falls back to 100%
+            # on every channel when no split is known (e.g. after a FHEM
+            # restart — LAST_SPLIT is an internal and does not persist).
+            my %pcts;
+            if ($cmd eq "off") {
+                my %split;
+                for my $c (@chNames) {
+                    my $p = ReadingsVal($name, $alias->{$c} // $c, 0);
+                    $split{$c} = $p if $p > 0;
+                }
+                $hash->{LAST_SPLIT} = {%split} if %split;
+                %pcts = map { $_ => 0 } @chNames;
+            } else {
+                my $anyLit = 0;
+                for my $c (@chNames) {
+                    my $p = ReadingsVal($name, $alias->{$c} // $c, 0);
+                    $pcts{$c} = $p;
+                    $anyLit = 1 if $p > 0;
+                }
+                if (!$anyLit) {
+                    my $split = $hash->{LAST_SPLIT};
+                    if (ref($split) eq 'HASH' && %$split) {
+                        %pcts = map { $_ => $split->{$_} // 0 } @chNames;
+                    } else {
+                        %pcts = map { $_ => 100 } @chNames;
+                    }
+                }
+            }
+            my %send;
+            for my $c (@chNames) {
+                my $raw = int(($pcts{$c} // 0) * 2.55 + 0.5);
+                $raw = 255 if $raw > 255;
+                $send{$c} = $raw;
+            }
+            CasambiGW_SendCommand($gwName, $unitId, "state", \%send);
+            my $any = grep { ($pcts{$_} // 0) > 0 } @chNames;
+            readingsBeginUpdate($hash);
+            readingsBulkUpdate($hash, $alias->{$_} // $_, $pcts{$_} // 0) for @chNames;
+            readingsBulkUpdate($hash, "state", $any ? "on" : "off");
+            readingsEndUpdate($hash, 1);
+            return undef;
+        }
+        # Anything else (colorTemp, vertical, ...) is a single-control command
+        # and falls through to the generic handling below.
+    }
+
     if ($cmd eq "on") {
         # Restore the last non-zero brightness (tracked in LAST_BRIGHTNESS)
         # instead of forcing 100% — matches the Casambi app behaviour and
@@ -164,6 +251,56 @@ sub CasambiUnit_Set {
 }
 
 # ============================================================================
+# Multi-dimmer channels — generic, cloud-derived
+#
+# A unit whose fixture has TWO OR MORE dimmer controls (e.g. Oligo Grace:
+# independent Uplight/Downlight) is driven per channel instead of via the
+# single brightness (which only reaches the first state byte). All channel
+# writes go through the gateway's atomic /state endpoint, so several channels
+# change in ONE BLE telegram and untouched controls keep their values.
+# Everything here is derived from the cloud control list — no fixture-specific
+# code; single-dimmer units keep the classic brightness handling unchanged.
+# ============================================================================
+
+# Return the unit's dimmer channels as [ { name, value }, ... ] — empty for
+# units with fewer than two dimmer controls. Names come from the gateway
+# ("name" per control, API >= 1.1); for older firmware they are derived the
+# same way the ESP32 does it (cloud type + 0-based index on repetition).
+sub _CasambiUnit_DimmerChannels {
+    my ($unit) = @_;
+    return [] unless ref($unit) eq 'HASH' && ref($unit->{controls}) eq 'ARRAY';
+    my @dimmers = grep { ref($_) eq 'HASH' && ($_->{type} // '') eq 'dimmer' }
+                  @{$unit->{controls}};
+    return [] if @dimmers < 2;
+    my @out;
+    my $i = 0;
+    for my $c (@dimmers) {
+        push @out, { name  => lc($c->{name} // ("dimmer" . $i)),
+                     value => $c->{value} // 0 };
+        $i++;
+    }
+    return \@out;
+}
+
+# Parse the channelNames attribute ("<control>:<alias> ...", e.g.
+# "dimmer0:up dimmer1:down"). Returns (fwd, rev): control name -> alias and
+# lowercased alias -> control name. Pure display/command mapping — the wire
+# always speaks the gateway's control names.
+sub _CasambiUnit_ChannelAliases {
+    my ($name) = @_;
+    my (%fwd, %rev);
+    for my $pair (split /\s+/, AttrVal($name, "channelNames", "")) {
+        my ($ctrl, $alias) = split /:/, $pair, 2;
+        next unless defined $alias && $alias ne ""
+                 && $ctrl  =~ /^[a-z0-9_]+$/i
+                 && $alias =~ /^[A-Za-z][A-Za-z0-9_\-]*$/;
+        $fwd{lc $ctrl}  = $alias;
+        $rev{lc $alias} = lc $ctrl;
+    }
+    return (\%fwd, \%rev);
+}
+
+# ============================================================================
 # Debounce helper — delays analog commands by 300 ms to reduce BLE traffic
 # ============================================================================
 
@@ -187,6 +324,16 @@ sub CasambiUnit_UpdateFromState {
     my $bright = int($level / 2.55 + 0.5);
     $bright = 100 if $bright > 100;
 
+    # Multi-dimmer units: "on" means ANY channel lit — the gateway's on/level
+    # fields only reflect the first state byte (first dimmer channel).
+    my $channels = _CasambiUnit_DimmerChannels($unit);
+    my ($chAlias) = _CasambiUnit_ChannelAliases($hash->{NAME});
+    if (@$channels) {
+        my $any = 0;
+        for my $c (@$channels) { $any = 1 if ($c->{value} // 0) > 0; }
+        $on = $any;
+    }
+
     # Remember the last non-zero level for "set on" (restore instead of 100%).
     $hash->{LAST_BRIGHTNESS} = $bright if $bright > 0;
 
@@ -199,10 +346,18 @@ sub CasambiUnit_UpdateFromState {
 
         readingsBeginUpdate($hash);
         readingsBulkUpdate($hash, "state",      $on ? "on" : "off");
-        readingsBulkUpdate($hash, "brightness", $bright);
+        # Multi-dimmer units get one percent reading per channel instead of the
+        # single brightness (which would only mirror the first channel).
+        readingsBulkUpdate($hash, "brightness", $bright) unless @$channels;
         readingsBulkUpdate($hash, "online",     $unit->{online} ? "true" : "false");
         readingsBulkUpdate($hash, "casambiId",  $unit->{id})   if defined $unit->{id};
         readingsBulkUpdate($hash, "casambiName",$unit->{name}) if defined $unit->{name};
+
+        for my $c (@$channels) {
+            my $pct = int(($c->{value} // 0) / 2.55 + 0.5);
+            $pct = 100 if $pct > 100;
+            readingsBulkUpdate($hash, $chAlias->{$c->{name}} // $c->{name}, $pct);
+        }
 
         if (ref($unit->{controls}) eq 'ARRAY') {
             # Generic, cloud-derived channel readings: one reading per fixture
@@ -299,16 +454,35 @@ sub CasambiUnit_SetCapabilities {
         _CasambiUnit_SetAttrIfChanged($name, "cctMax", $cctMax);
     }
 
+    # --- Multi-dimmer channel list (generic, from the cloud controls) ---
+    # Persisted as a reading so SetFn knows the channels right after a FHEM
+    # restart (before the first hello). Display names honour channelNames.
+    my $channels = _CasambiUnit_DimmerChannels($unit);
+    my @disp;
+    if (@$channels) {
+        my ($chAlias) = _CasambiUnit_ChannelAliases($name);
+        @disp = map { $chAlias->{$_->{name}} // $_->{name} } @$channels;
+        my $chList = join(",", map { $_->{name} } @$channels);
+        readingsSingleUpdate($hash, "channels", $chList, 1)
+            if ReadingsVal($name, "channels", "") ne $chList;
+    }
+
     # --- setList (capability-dependent) ---
-    my $setList = "on:noArg off:noArg brightness:slider,0,1,100";
+    # Multi-dimmer units: one percent slider per channel instead of the single
+    # brightness (which would only drive the first channel via SetLevel).
+    my $setList = @$channels
+        ? "on:noArg off:noArg " . join(" ", map { "$_:slider,0,1,100" } @disp)
+        : "on:noArg off:noArg brightness:slider,0,1,100";
     $setList .= " colorTemp:slider,$cctMin,1,$cctMax" if $hasCCT;
     $setList .= " vertical:slider,0,1,255"            if $hasVertical;
     _CasambiUnit_SetAttrIfChanged($name, "setList", $setList);
 
     # --- webCmd ---
-    my $webCmd = "on:off:brightness";
+    my $webCmd = @$channels
+        ? "on:off:" . join(":", @disp)
+        : "on:off:brightness";
     $webCmd .= ":colorTemp" if $hasCCT;
-    $webCmd .= ":vertical"  if $hasVertical;
+    $webCmd .= ":vertical"  if $hasVertical && !@$channels;
     _CasambiUnit_SetAttrIfChanged($name, "webCmd", $webCmd);
 
     # --- genericDeviceType ---
@@ -319,9 +493,15 @@ sub CasambiUnit_SetCapabilities {
     # characteristic; valueOff is the FHEM reading value that means "off".
     # Brightness uses homekit= to name the HomeKit characteristic and cmd=
     # for the FHEM set command.
-    my $hbMap = "On=state,valueOff=off,cmdOff=off,cmdOn=on"
-              . " Brightness=brightness,homekit=Brightness,cmd=brightness"
-              .   ",minValue=0,maxValue=100";
+    my $hbMap = "On=state,valueOff=off,cmdOff=off,cmdOn=on";
+
+    # Multi-dimmer units map only On/Off by default: HomeKit's single
+    # Brightness characteristic cannot represent independent channels. Map
+    # individual channels manually via the homebridgeMapping attribute if
+    # desired (the per-channel percent readings/commands are ready for it).
+    $hbMap .= " Brightness=brightness,homekit=Brightness,cmd=brightness"
+           .    ",minValue=0,maxValue=100"
+        unless @$channels;
 
     if ($hasCCT) {
         # FHEM stores Kelvin; HomeKit expects Mired.
@@ -549,6 +729,17 @@ sub _CasambiVertical_SetAttrIfChanged {
         are treated as Mired and converted automatically (CCT units only)</li>
     <li><b>vertical</b> 0-255 &mdash; vertical light distribution
         (units with vertical capability only)</li>
+    <li><b>&lt;channel&gt;</b> 0-100 &mdash; per-channel dimmer command on
+        units whose fixture has two or more dimmer controls (e.g. Oligo Grace
+        Uplight/Downlight). Channel commands are named after the cloud control
+        (<code>dimmer0</code>, <code>dimmer1</code>, &hellip;) or the alias set
+        via the <b>channelNames</b> attribute. All channel writes are applied
+        atomically by the gateway (<code>POST /api/units/:id/state</code>);
+        <b>on</b>/<b>off</b> then act on all channels together: <em>off</em>
+        remembers the current split, <em>on</em> restores it (falling back to
+        100% on every channel when no split is known). On these units the
+        single <em>brightness</em> command/reading is replaced by the
+        per-channel readings.</li>
   </ul>
   <br>
   <b>Readings</b>
@@ -566,6 +757,22 @@ sub _CasambiVertical_SetAttrIfChanged {
     <li><b>online</b> true|false</li>
     <li><b>casambiId</b> current Casambi unit ID (may change after network re-config)</li>
     <li><b>casambiName</b> unit name as configured in the Casambi network</li>
+    <li><b>channels</b> comma-separated control names of a multi-dimmer unit
+        (e.g. <code>dimmer0,dimmer1</code>); absent on single-dimmer units</li>
+    <li><b>&lt;channel&gt;</b> 0-100 % &mdash; one reading per dimmer channel
+        of a multi-dimmer unit, named after the control or its
+        <b>channelNames</b> alias</li>
+  </ul>
+  <br>
+  <b>User attributes</b>
+  <ul>
+    <li><b>channelNames</b> &mdash; display aliases for the dimmer channels of
+        a multi-dimmer unit, e.g.
+        <code>attr &lt;unit&gt; channelNames dimmer0:up dimmer1:down</code>.
+        Renames the readings, set commands and WebUI sliders; the gateway
+        communication always uses the original control names. Set the
+        attribute before the next gateway reconnect (or trigger one) so
+        setList/webCmd are regenerated with the aliases.</li>
   </ul>
   <br>
   <b>Managed attributes</b> (auto-set by CasambiGW, updated on each reconnect)

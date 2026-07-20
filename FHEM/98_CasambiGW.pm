@@ -82,7 +82,7 @@ use constant MIN_FIRMWARE_BUILD  => 1;    # minimum accepted ESP32 build number
 # (predates the contract). Mismatches only warn (apiVersionWarning reading),
 # they never block operation.
 use constant API_VERSION_MAJOR   => 1;    # keep in sync with src/config.h
-use constant API_VERSION_MINOR   => 0;    # keep in sync with src/config.h
+use constant API_VERSION_MINOR   => 1;    # keep in sync with src/config.h
 use constant INFO_POLL_SETUP     => 15;   # seconds between /api/info polls while the ESP is in setup mode
 use constant INFO_POLL_OFFLINE   => 30;   # seconds between /api/info polls while the ESP is unreachable
 
@@ -1032,6 +1032,24 @@ sub CasambiGW_SendCommand {
     } elsif ($cmd eq "vertical") {
         $url  = "http://$ip:$port/api/units/$unitId/vertical";
         $json = "{\"value\":$value}";
+    } elsif ($cmd eq "state") {
+        # Generic atomic full-state write (API >= 1.1): $value is a hashref
+        # { <controlName> => <rawValue>, ... }. The ESP32 merges the named
+        # controls into the unit's current state vector and sends ONE SetState
+        # telegram, so several channels (e.g. both dimmers of a dual-dimmer
+        # fixture) change atomically and unnamed controls keep their value.
+        return unless ref($value) eq 'HASH' && %$value;
+        my @parts;
+        for my $ctrl (sort keys %$value) {
+            # Control names come from the ESP's controls list; refuse anything
+            # unexpected instead of interpolating it into JSON.
+            return unless $ctrl =~ /^[a-z0-9_]{1,32}$/;
+            my $raw = $value->{$ctrl};
+            return unless defined $raw && $raw =~ /^\d{1,5}$/ && $raw <= 65535;
+            push @parts, "\"$ctrl\":$raw";
+        }
+        $url  = "http://$ip:$port/api/units/$unitId/state";
+        $json = "{" . join(",", @parts) . "}";
     } else {
         return;
     }
