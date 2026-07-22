@@ -179,6 +179,10 @@ static const char* wifiDisconnectReasonName(uint8_t reason) {
         case WIFI_REASON_ASSOC_FAIL:             return "ASSOC_FAIL";
         case WIFI_REASON_HANDSHAKE_TIMEOUT:      return "HANDSHAKE_TIMEOUT";
         case WIFI_REASON_CONNECTION_FAIL:        return "CONNECTION_FAIL";
+        // 802.11 code without a macro in this IDF version. Shows up right
+        // after a BEACON_TIMEOUT recovery: the fast reconnect offers the
+        // cached PMKID, which the AP lost when its radio restarted.
+        case 49:                                 return "INVALID_PMKID";
         default:                                 return "unknown";
     }
 }
