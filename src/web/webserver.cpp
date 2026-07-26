@@ -3,6 +3,7 @@
  */
 
 #include "webserver.h"
+#include "dashboard.h"      // DASHBOARD_HTML — the status page served at GET /
 #include "../config.h"
 #include "../log/event_log.h"
 #include "../storage/config_store.h"
@@ -732,31 +733,14 @@ void CasambiWebServer::_setupRoutes() {
         body->concat((const char*)data, len);
     });
 
-    // Root endpoint
+    // Root endpoint: the status dashboard (see dashboard.h). Static page, no
+    // auth — it carries no data itself; its JavaScript reads everything from
+    // the authenticated /api/status, /api/units and /ws. Sent through the
+    // (const uint8_t*, len) overload so the page is streamed straight from
+    // flash instead of being copied into a String response.
     _server->on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-        String html = "<!DOCTYPE html><html><head><title>ESP32 Casambi</title></head><body>";
-        html += "<h1>ESP32 Casambi Controller</h1>";
-        html += "<p>API Endpoints:</p><ul>";
-        html += "<li>GET /api/status - Connection status</li>";
-        html += "<li>GET /api/units - List units</li>";
-        html += "<li>GET /api/groups - List groups</li>";
-        html += "<li>GET /api/scenes - List scenes</li>";
-        html += "<li>GET /api/log[?n=50] - Event log (newest first)</li>";
-        html += "<li>DELETE /api/log - Clear event log</li>";
-        html += "<li>GET /api/ntp - NTP server &amp; time status</li>";
-        html += "<li>POST /api/ntp - Set NTP server ({\"server\":\"...\"})</li>";
-        html += "<li>POST /api/scenes/:id/on - Activate scene</li>";
-        html += "<li>POST /api/scenes/:id/off - Deactivate scene</li>";
-        html += "<li>POST /api/scenes/:id/level - Set scene level</li>";
-        html += "<li>POST /api/units/:id/on - Turn unit on</li>";
-        html += "<li>POST /api/units/:id/off - Turn unit off</li>";
-        html += "<li>POST /api/units/:id/level - Set unit level</li>";
-        html += "<li>POST /api/units/:id/color - Set unit color</li>";
-        html += "<li>POST /api/units/:id/temperature - Set unit temperature</li>";
-        html += "<li>POST /api/units/:id/state - Set named controls atomically ({\"dimmer0\":255,...})</li>";
-        html += "<li>POST /api/groups/:id/level - Set group level</li>";
-        html += "</ul></body></html>";
-        request->send(200, "text/html", html);
+        request->send(200, "text/html; charset=utf-8",
+                      (const uint8_t*)DASHBOARD_HTML, DASHBOARD_HTML_LEN);
     });
 }
 

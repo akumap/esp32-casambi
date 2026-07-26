@@ -14,6 +14,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 - ✅ **Browser-Based Setup (no serial needed)** — On first boot the device opens an open Wi-Fi access point with a captive-portal page for Wi-Fi + Casambi provisioning; the serial wizard remains as a fallback
 - ✅ **HTTP REST API** — Control and monitor lights from any home automation system
 - ✅ **WebSocket Push** — Real-time state push to connected clients; no polling required
+- ✅ **Built-in Status Page** — `http://<esp32-ip>/` shows both link states (Casambi/Bluetooth and Wi-Fi/API) plus every unit with its generic control names and live values; responsive for phone and tablet, portrait and landscape
 - ✅ **Real-Time State Tracking** — Receives status broadcasts from the Casambi mesh; current brightness, color temperature, and vertical distribution always up to date, even when lights are controlled via the Casambi app or other controllers
 - ✅ **Complete Protocol Support** — Full Casambi Evolution protocol implementation (ECDH, AES-CTR, CMAC)
 - ✅ **Generic Capability Detection** — Unit capabilities (dimmer, CCT, vertical) automatically derived from cloud API; no hardcoding of fixture types needed
@@ -94,7 +95,7 @@ On first boot (no stored configuration) the device opens an **open Wi-Fi access 
 
 The page shows live progress and any error (wrong password, cloud unreachable), so you can correct it and retry.
 
-After provisioning the controller auto-connects to the Casambi gateway, serves the REST API + WebSocket once Wi-Fi is up, and advertises itself via mDNS as **`casambi-XXXX.local`**.
+After provisioning the controller auto-connects to the Casambi gateway, serves the REST API + WebSocket once Wi-Fi is up, and advertises itself via mDNS as **`casambi-XXXX.local`**. Browsing to **`http://<esp32-ip>/`** then shows the [status page](#web-interface-status-page) with both link states and all device values.
 
 > **Tip:** The Casambi mesh rotates which unit advertises as connectable, so repeating **Scan Casambi gateways** may reveal different devices. Pick one that stays powered. (The ESP connects to a stable network-level gateway endpoint; Casambi handles the mesh internally, so no gateway selection is critical for normal operation.)
 
@@ -193,6 +194,56 @@ list units         # Show all units with ON/OFF state
 list groups        # Show all groups with IDs
 list scenes        # Show all scenes with IDs
 ```
+
+-----
+
+## Web Interface (status page)
+
+Open **`http://<esp32-ip>/`** (or `http://casambi-XXXX.local/`) in any browser —
+the gateway serves a status page for humans. It is read-only: it shows what the
+gateway currently sees, control still happens via the REST API / FHEM.
+
+The page needs no app, no internet access and no build step: it is a single
+self-contained HTML page in the firmware (`src/web/dashboard.h`), and it reads
+its data from the very same interface every other client uses
+(`GET /api/status`, `GET /api/units`, and the `/ws` push channel).
+
+**What it shows**
+
+| Section | Content |
+|---------|---------|
+| **Bluetooth side** | Link state (connected / disconnected, incl. the BLE state machine), Casambi network name, connected gateway unit (MAC + resolved name), link RSSI, link uptime, packets received, last disconnect reason, Casambi protocol version vs. the tested range, unit count |
+| **API side** | Push/polling state of this browser session, Wi-Fi SSID + RSSI, IP address, whether the API requires a token, interface version (`api_version_major.minor`), firmware build |
+| **System** | Device uptime, free heap (+ largest block), reboot count, UTC time + NTP server, dropped pushes / parse counters |
+| **Devices** | One card per Casambi unit: name, unit ID, BLE MAC, reachability (`on` / `off` / `offline`) and **every fixture control with its generic name and current value** — exactly the cloud-derived control names `POST /api/units/:id/state` accepts (`dimmer`, `dimmer0`, `dimmer1`, `vertical`, `temperature`, `white`, …). Dimmers are shown in percent, `temperature` in Kelvin, everything else raw; new control types appear automatically |
+
+State changes arrive live over the WebSocket (`hello`, `unit_state`,
+`connection_state`). If the WebSocket is unavailable — a proxy in between, or
+the client limit `WS_MAX_CLIENTS` is exhausted — the page falls back to polling
+the REST endpoints every 5 s and says so ("API: polling"). While the gateway
+does not answer at all, the last known values stay on screen with a banner, and
+the page reconnects on its own.
+
+An open page counts as **one WebSocket client** against `WS_MAX_CLIENTS`
+(3 by default; beyond that the gateway drops the *oldest* connection, which may
+be FHEM's). To keep that budget free the page closes its WebSocket whenever it
+is not visible — switching tabs or apps releases the slot immediately, and
+returning to the page reconnects and refreshes it.
+
+**Authentication.** When a Casambi password is stored, the page asks for it
+once. The API token is derived **in the browser** —
+`SHA-256("casambi-api:" + password)`, the same derivation the FHEM module uses
+(see [Authentication](#authentication)) — and kept in `localStorage`; the
+password itself never goes on the wire. *Forget password* at the bottom of the
+page clears it again. Gateways without a stored password (open API) show the
+page right away.
+
+> The page is delivered over plain HTTP like the rest of the API — treat the
+> controller as a trusted-LAN device (see [Security](#security)).
+
+**Layout.** The page adapts to phones and tablets in both portrait and
+landscape (single column up to a 320 px-wide screen, multi-column from tablet
+width on) and follows the system light/dark preference.
 
 -----
 
@@ -891,6 +942,7 @@ esp32-casambi/
 │   │   └── config_store.*    # LittleFS persistence (config + debug flags)
 │   └── web/
 │       ├── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
+│       ├── dashboard.h       # Status page served at GET / (self-contained HTML)
 │       └── setup_portal.*    # First-boot SoftAP + captive portal provisioning
 ├── FHEM/
 │   ├── 98_CasambiGW.pm       # FHEM gateway module (WebSocket connection, unit sync)
