@@ -14,7 +14,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 - ✅ **Browser-Based Setup (no serial needed)** — On first boot the device opens an open Wi-Fi access point with a captive-portal page for Wi-Fi + Casambi provisioning; the serial wizard remains as a fallback
 - ✅ **HTTP REST API** — Control and monitor lights from any home automation system
 - ✅ **WebSocket Push** — Real-time state push to connected clients; no polling required
-- ✅ **Built-in Status Page** — `http://<esp32-ip>/` shows both link states (Casambi/Bluetooth and Wi-Fi/API) plus every unit with its generic control names and live values; responsive for phone and tablet, portrait and landscape
+- ✅ **Built-in Web Interface** — `http://<esp32-ip>/` shows both link states (Casambi/Bluetooth and Wi-Fi/API) plus every unit with its generic control names and live values, and controls them: on/off, a slider per control, and a warm→cold Kelvin slider for colour temperature; responsive for phone and tablet, portrait and landscape
 - ✅ **Real-Time State Tracking** — Receives status broadcasts from the Casambi mesh; current brightness, color temperature, and vertical distribution always up to date, even when lights are controlled via the Casambi app or other controllers
 - ✅ **Complete Protocol Support** — Full Casambi Evolution protocol implementation (ECDH, AES-CTR, CMAC)
 - ✅ **Generic Capability Detection** — Unit capabilities (dimmer, CCT, vertical) automatically derived from cloud API; no hardcoding of fixture types needed
@@ -95,7 +95,7 @@ On first boot (no stored configuration) the device opens an **open Wi-Fi access 
 
 The page shows live progress and any error (wrong password, cloud unreachable), so you can correct it and retry.
 
-After provisioning the controller auto-connects to the Casambi gateway, serves the REST API + WebSocket once Wi-Fi is up, and advertises itself via mDNS as **`casambi-XXXX.local`**. Browsing to **`http://<esp32-ip>/`** then shows the [status page](#web-interface-status-page) with both link states and all device values.
+After provisioning the controller auto-connects to the Casambi gateway, serves the REST API + WebSocket once Wi-Fi is up, and advertises itself via mDNS as **`casambi-XXXX.local`**. Browsing to **`http://<esp32-ip>/`** then opens the [web interface](#web-interface-status--control-page) with both link states, all device values and direct control.
 
 > **Tip:** The Casambi mesh rotates which unit advertises as connectable, so repeating **Scan Casambi gateways** may reveal different devices. Pick one that stays powered. (The ESP connects to a stable network-level gateway endpoint; Casambi handles the mesh internally, so no gateway selection is critical for normal operation.)
 
@@ -197,16 +197,17 @@ list scenes        # Show all scenes with IDs
 
 -----
 
-## Web Interface (status page)
+## Web Interface (status & control page)
 
 Open **`http://<esp32-ip>/`** (or `http://casambi-XXXX.local/`) in any browser —
-the gateway serves a status page for humans. It is read-only: it shows what the
-gateway currently sees, control still happens via the REST API / FHEM.
+the gateway serves a page for humans: it shows what the gateway currently sees
+and lets you switch and dim the lights right there, no app and no FHEM needed.
 
-The page needs no app, no internet access and no build step: it is a single
-self-contained HTML page in the firmware (`src/web/dashboard.h`), and it reads
-its data from the very same interface every other client uses
-(`GET /api/status`, `GET /api/units`, and the `/ws` push channel).
+The page needs no internet access and no build step: it is a single
+self-contained HTML page in the firmware (`src/web/dashboard.h`), and it uses
+the very same interface every other client uses (`GET /api/status`,
+`GET /api/units`, the `POST /api/units/…` control routes, and the `/ws` push
+channel).
 
 **What it shows**
 
@@ -216,6 +217,39 @@ its data from the very same interface every other client uses
 | **API side** | Push/polling state of this browser session, Wi-Fi SSID + RSSI, IP address, whether the API requires a token, interface version (`api_version_major.minor`), firmware build |
 | **System** | Device uptime, free heap (+ largest block), reboot count, UTC time + NTP server, dropped pushes / parse counters |
 | **Devices** | One card per Casambi unit: name, unit ID, BLE MAC, reachability (`on` / `off` / `offline`) and **every fixture control with its generic name and current value** — exactly the cloud-derived control names `POST /api/units/:id/state` accepts (`dimmer`, `dimmer0`, `dimmer1`, `vertical`, `temperature`, `white`, …). Dimmers are shown in percent, `temperature` in Kelvin, everything else raw; new control types appear automatically |
+
+**What you can control**
+
+- **On/off** — the `on` / `off` pill on each card is a button. On single-dimmer
+  fixtures it posts to `/on` and `/off` (level 255 / 0). On **multi-dimmer**
+  fixtures it writes *all* channels in one atomic `/state` telegram, and `off`
+  remembers the current split so the next `on` restores it (same behaviour as
+  the FHEM module).
+- **Sliders with a knob** — one per writable control, draggable with mouse,
+  finger or the arrow keys. A vertical swipe that starts on a slider still
+  scrolls the page.
+- **Colour temperature** — its own slider running from the fixture's own
+  minimum to its maximum Kelvin (`min`/`max` of the `temperature` control),
+  in 50 K steps, which is the resolution of the Casambi temperature operation.
+  The track carries a **warm → cold gradient** (light orange to light blue), so
+  the knob position reads as a colour.
+- Every widget writes through the documented endpoint for its control type —
+  `/level`, `/vertical`, `/slider`, `/temperature`, or the generic `/state` for
+  multi-dimmer channels and types like `white`. **Unknown control types stay
+  display-only**: their value range is not part of the interface, so a slider
+  would be guesswork.
+
+While the Bluetooth link is down every widget is disabled (the control
+endpoints answer `503` anyway) and the section note says so. A rejected write —
+`503` because the command queue is full, `409` for a unit without a fixture
+layout — is shown as a short message at the bottom of the screen.
+
+Because the gateway only *queues* a command (`202 Accepted`) and reports the
+result later as a `unit_state` push, the page keeps the value you just set on
+screen until the device echoes it back (or for ~2.5 s), so the knobs never jump
+while a value is in flight. Dragging is throttled to one write per 250 ms — the
+newest value wins and the value you release on is always sent — which keeps the
+`BLE_CMD_QUEUE_DEPTH`-deep command queue from overflowing.
 
 State changes arrive live over the WebSocket (`hello`, `unit_state`,
 `connection_state`). If the WebSocket is unavailable — a proxy in between, or
@@ -942,7 +976,7 @@ esp32-casambi/
 │   │   └── config_store.*    # LittleFS persistence (config + debug flags)
 │   └── web/
 │       ├── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
-│       ├── dashboard.h       # Status page served at GET / (self-contained HTML)
+│       ├── dashboard.h       # Status & control page at GET / (self-contained HTML)
 │       └── setup_portal.*    # First-boot SoftAP + captive portal provisioning
 ├── FHEM/
 │   ├── 98_CasambiGW.pm       # FHEM gateway module (WebSocket connection, unit sync)

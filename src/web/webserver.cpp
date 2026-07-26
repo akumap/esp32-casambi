@@ -733,11 +733,12 @@ void CasambiWebServer::_setupRoutes() {
         body->concat((const char*)data, len);
     });
 
-    // Root endpoint: the status dashboard (see dashboard.h). Static page, no
-    // auth — it carries no data itself; its JavaScript reads everything from
-    // the authenticated /api/status, /api/units and /ws. Sent through the
-    // (const uint8_t*, len) overload so the page is streamed straight from
-    // flash instead of being copied into a String response.
+    // Root endpoint: the status & control dashboard (see dashboard.h). Static
+    // page, no auth — it carries no data itself, and every read (/api/status,
+    // /api/units, /ws) and every write (the POST control routes) its
+    // JavaScript performs goes through the authenticated endpoints. Sent
+    // through the (const uint8_t*, len) overload so the page is streamed
+    // straight from flash instead of being copied into a String response.
     _server->on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
         request->send(200, "text/html; charset=utf-8",
                       (const uint8_t*)DASHBOARD_HTML, DASHBOARD_HTML_LEN);

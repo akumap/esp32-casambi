@@ -1,34 +1,59 @@
 /**
- * Status Dashboard - the browser page served at GET /
+ * Status & Control Dashboard - the browser page served at GET /
  *
  * A single self-contained page (HTML + CSS + JS, no external resources — the
- * gateway has no internet access and must work on a plain LAN): it shows the
+ * gateway has no internet access and must work on a plain LAN). It shows the
  * two link states of the gateway (Bluetooth side = Casambi mesh, API side =
  * Wi-Fi/REST/WebSocket) plus every unit with its generic, cloud-derived
- * control names and current values.
+ * control names and current values, and it CONTROLS those units: the on/off
+ * pill is a button, every writable control gets a slider, and `temperature`
+ * gets a Kelvin slider spanning the fixture's own min..max with a warm→cold
+ * gradient track.
+ *
+ * Which endpoint a widget writes is derived from the control type, mirroring
+ * what the FHEM module does:
+ *   dimmer (single)   -> POST /api/units/:id/level        {"level":0-255}
+ *   dimmer (multiple) -> POST /api/units/:id/state        {"dimmer0":0-255}
+ *   vertical, slider  -> POST /api/units/:id/vertical|slider {"value":0-255}
+ *   white, others     -> POST /api/units/:id/state        {"<name>":raw}
+ *   temperature       -> POST /api/units/:id/temperature  {"kelvin":min..max}
+ *   on/off            -> POST /api/units/:id/on|off, or one atomic /state
+ *                        write over all channels on multi-dimmer fixtures
+ * Unknown control types stay display-only: their value range is not part of
+ * the interface, so a slider would be guesswork.
  *
  * The page itself is static and served unauthenticated; ALL data it displays
- * comes from the authenticated endpoints (GET /api/status, GET /api/units and
- * the /ws push channel), so it exposes nothing that a client without the API
- * token could not already see. When a Casambi password is stored, the page
- * asks for it once and derives the API token the same way the FHEM module
- * does — SHA-256("casambi-api:" + password), computed in the browser (a small
- * JS implementation, because window.crypto.subtle is unavailable over plain
+ * and every write it performs go through the authenticated endpoints
+ * (GET /api/status, GET /api/units, the POST control routes and the /ws push
+ * channel), so it exposes nothing and can do nothing that a client without the
+ * API token could not. When a Casambi password is stored, the page asks for it
+ * once and derives the API token the same way the FHEM module does —
+ * SHA-256("casambi-api:" + password), computed in the browser (a small JS
+ * implementation, because window.crypto.subtle is unavailable over plain
  * http://) and kept in localStorage. The password never goes on the wire.
+ *
+ * Two properties of the gateway shape the control logic:
+ *   - The BLE command queue is BLE_CMD_QUEUE_DEPTH deep and the loop task
+ *     executes ONE command per pass, so a dragged slider is throttled to one
+ *     write per 250 ms (newest value wins, the released value always ships).
+ *   - A write is only queued (202); the resulting state arrives later as a
+ *     unit_state push. The value the user set therefore stays on screen for a
+ *     grace period until the device echoes it, so knobs never jump around.
  *
  * The page consumes the /api/* + /ws interface exactly as documented; it adds
  * no endpoint, message type or field of its own, so it is NOT covered by the
  * VERSIONING CONTRACT at FHEM_API_VERSION_MAJOR in config.h. It does have to
- * FOLLOW that interface though: when a field it reads is renamed or removed,
- * update the JavaScript below in the same commit.
+ * FOLLOW that interface though: when a field it reads or an endpoint it writes
+ * is renamed or removed, update the JavaScript below in the same commit.
  *
  * Served with the (const uint8_t*, len) response overload, which streams
  * straight from flash (AsyncProgmemResponse) — the plain const char* overload
- * would copy the whole page into a String and need a ~23 kB contiguous heap
+ * would copy the whole page into a String and need a ~36 kB contiguous heap
  * block on every request.
  *
  * To work on the page: copy the raw string into a .html file and open it
- * against a gateway (or a mock serving /api/status, /api/units and /ws).
+ * against a gateway (or a mock serving /api/status, /api/units, the control
+ * routes and /ws).
  */
 
 #ifndef DASHBOARD_H
@@ -100,11 +125,43 @@ main{max-width:1240px;margin:0 auto;padding:clamp(12px,2.6vw,24px) clamp(12px,3v
 .bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:2px}
 .bar i{display:block;height:100%;background:var(--ok);border-radius:2px}
 .empty{color:var(--mut);font-size:.9rem;padding:6px 0}
+/* ---------- controls: on/off pill button + sliders ---------- */
+button.tgl{width:auto;margin:0;min-height:38px;padding:7px 14px;font-size:.8rem;
+ font-weight:600;background:var(--card);color:inherit}
+button.tgl:disabled{cursor:default;opacity:.55}
+/* touch-action:pan-y keeps vertical page scrolling working when a swipe starts
+   on a slider, while the horizontal gesture still moves the knob. */
+.rng{-webkit-appearance:none;appearance:none;display:block;width:100%;height:32px;
+ margin:0;padding:0;border:0;background:transparent;cursor:pointer;touch-action:pan-y}
+.rng:focus-visible{outline:2px solid #2f6fbb;outline-offset:1px;border-radius:6px}
+.rng::-webkit-slider-runnable-track{height:8px;border-radius:4px;
+ background:linear-gradient(90deg,var(--ok) 0 calc(var(--p,0)*1%),var(--line) calc(var(--p,0)*1%) 100%)}
+.rng::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;margin-top:-7px;
+ border-radius:50%;background:var(--card);border:1px solid var(--mut);
+ box-shadow:0 1px 3px rgba(16,24,32,.35)}
+.rng::-moz-range-track{height:8px;border-radius:4px;background:var(--line)}
+.rng::-moz-range-progress{height:8px;border-radius:4px;background:var(--ok)}
+.rng::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--card);
+ border:1px solid var(--mut);box-shadow:0 1px 3px rgba(16,24,32,.35)}
+/* Colour temperature: the track itself carries the warm→cold scale, so the
+   knob position reads as a colour, and no fill is drawn over it. */
+.rng.temp::-webkit-slider-runnable-track{background:linear-gradient(90deg,
+ #ffab52,#ffd6a1,#f4f1ea,#d3e5ff,#a5caff)}
+.rng.temp::-moz-range-track{background:linear-gradient(90deg,
+ #ffab52,#ffd6a1,#f4f1ea,#d3e5ff,#a5caff)}
+.rng.temp::-moz-range-progress{background:transparent}
+.rng:disabled{cursor:default;opacity:.45}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom));
+ z-index:5;max-width:min(92vw,460px);padding:10px 14px;border-radius:10px;font-size:.88rem;
+ color:#fff;background:#33404e;box-shadow:0 4px 16px rgba(16,24,32,.35)}
+#toast.err{background:var(--bad)}
 /* ---------- auth / banner ---------- */
 #auth{max-width:420px;margin:8vh auto 0}
 #auth p{margin:0 0 12px;color:var(--mut);font-size:.9rem}
 label{display:block;font-size:.85rem;color:var(--mut);margin-bottom:4px}
-input{width:100%;padding:10px 12px;font-size:1rem;color:var(--fg);background:var(--bg);
+/* Scoped to the auth card on purpose — a global input rule would also frame
+   the range sliders in the device cards. */
+#auth input{width:100%;padding:10px 12px;font-size:1rem;color:var(--fg);background:var(--bg);
  border:1px solid var(--line);border-radius:9px}
 button{margin-top:12px;width:100%;padding:11px 14px;font-size:1rem;font-weight:600;color:#fff;
  background:#2f6fbb;border:0;border-radius:9px;cursor:pointer;min-height:44px}
@@ -175,6 +232,7 @@ footer{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-conte
     </footer>
   </div>
 </main>
+<div id="toast" class="hide"></div>
 
 <script>
 "use strict";
@@ -334,6 +392,7 @@ function mergeUnit(u){
   const next=Object.assign(prev,u);
   next.id=id;
   units.set(id,next);
+  clearEchoed(next);   // device confirmed a value the user set → stop holding it
 }
 
 /* ----------------------------------------------------------------- polling */
@@ -387,6 +446,156 @@ document.addEventListener("visibilitychange",()=>{
   }
 });
 
+/* ----------------------------------------------------------------- control */
+// Writes go to the documented control endpoints; the resulting state comes
+// back asynchronously as a unit_state push (or with the next poll), never in
+// the HTTP response — the gateway only queues the BLE command (202).
+const GRACE_MS=2500;   // how long a value the user set survives on screen
+const SEND_MS=250;     // minimum spacing between two writes of one control
+
+const overrides=new Map();   // "unit:control" -> {v,until} (user value in flight)
+const splits=new Map();      // unit -> per-channel values remembered across "off"
+const sends=new Map();       // "unit:control" -> throttle state
+let dragging=null, renderDeferred=false, expiryTimer=null, toastTimer=null;
+
+// Control is pointless without the BLE link (the endpoints answer 503) or
+// without a reachable gateway — the widgets are disabled instead of failing.
+function ctlEnabled(){ return bleConnected() && (httpOk||wsUp); }
+
+function override(id,name){
+  const k=id+":"+name, o=overrides.get(k);
+  if(!o) return null;
+  if(o.until<=Date.now()){ overrides.delete(k); return null; }
+  return o.v;
+}
+function setOverride(id,name,v){
+  overrides.set(id+":"+name,{v:v,until:Date.now()+GRACE_MS});
+  if(expiryTimer) clearTimeout(expiryTimer);
+  expiryTimer=setTimeout(()=>{ expiryTimer=null; queueRender(); },GRACE_MS+100);
+}
+// Drop the override once the device reports (nearly) the value we asked for.
+// Temperature needs a wide tolerance: the operation carries kelvin/50 and the
+// unit reports its state as a 0-255 raw value, so the echo is quantised twice.
+function clearEchoed(u){
+  const hit=(name,dev,tol)=>{
+    const o=overrides.get(u.id+":"+name);
+    if(o&&dev!=null&&Math.abs(dev-o.v)<=tol) overrides.delete(u.id+":"+name);
+  };
+  if(Array.isArray(u.controls)){
+    u.controls.forEach(c=>{
+      const name=c.name||c.type;
+      if(c.type==="temperature") hit(name,c.kelvin,60);
+      else                       hit(name,c.value,2);
+    });
+  }
+  hit("level",u.level,2);
+  hit("vertical",u.vertical,2);
+  if(u.colorTemp!=null&&u.cctMin!=null&&u.cctMax>u.cctMin)
+    hit("temperature",Math.round(u.cctMin+u.colorTemp*(u.cctMax-u.cctMin)/255),60);
+}
+
+function unitOn(u,dims){
+  if(dims&&dims.length) return dims.some(c=>c.val>0);
+  return !!u.on||u.level>0;
+}
+
+function toast(msg,isErr){
+  const t=$("toast");
+  t.textContent=msg;
+  t.className=isErr?"err":"";
+  if(toastTimer) clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>{ t.className="hide"; },4500);
+}
+
+async function post(path,body){
+  const h={};
+  if(token) h["X-API-Key"]=token;
+  const opts={method:"POST",headers:h};
+  if(body){ h["Content-Type"]="application/json"; opts.body=JSON.stringify(body); }
+  const r=await fetch(path,opts);
+  if(r.status===401){ needAuth(); throw new AuthError("unauthorized"); }
+  if(!r.ok){
+    let m="HTTP "+r.status;
+    try{ const j=await r.json(); if(j&&j.error) m=j.error; }catch(e){}
+    throw new Error(m);
+  }
+  httpOk=true;
+  return true;
+}
+// Fire-and-report: a rejected write (503 BLE down / queue full, 409 without a
+// fixture layout) surfaces as a toast instead of a silent no-op.
+function write(path,body){
+  return post(path,body).catch(e=>{ if(!(e instanceof AuthError)) toast(e.message,true); });
+}
+
+function sendControl(id,name,kind,v){
+  if(kind==="temperature") return write("/api/units/"+id+"/temperature",{kelvin:v});
+  if(kind==="level")       return write("/api/units/"+id+"/level",{level:v});
+  if(kind==="vertical")    return write("/api/units/"+id+"/vertical",{value:v});
+  if(kind==="slider")      return write("/api/units/"+id+"/slider",{value:v});
+  const b={}; b[name]=v;              // "state": named control, atomic write
+  return write("/api/units/"+id+"/state",b);
+}
+
+// Dragging a slider must not turn into one request per pixel: the BLE command
+// queue is 8 deep and one command is executed per loop pass. At most one write
+// per SEND_MS goes out, the newest value wins, and the value the finger stops
+// at is always sent (final).
+function throttleSend(key,v,final,fn){
+  let s=sends.get(key);
+  if(!s){ s={t:0,timer:null,v:v}; sends.set(key,s); }
+  s.v=v;
+  const wait=SEND_MS-(Date.now()-s.t);
+  if(final||wait<=0){
+    if(s.timer){ clearTimeout(s.timer); s.timer=null; }
+    s.t=Date.now();
+    fn(s.v);
+  }else if(!s.timer){
+    s.timer=setTimeout(()=>{ s.timer=null; s.t=Date.now(); fn(s.v); },wait);
+  }
+}
+
+function onSlide(el,final){
+  const id=+el.dataset.u, name=el.dataset.c, v=+el.value;
+  const lo=+el.min, span=(+el.max)-lo;
+  // Update this widget in place — a full re-render would rip the element the
+  // finger is currently on out of the DOM (see the dragging guard in render).
+  el.style.setProperty("--p",span>0?Math.round((v-lo)*100/span):0);
+  const t=ctrlText(el.dataset.fmt,v,el.dataset.sub||"");
+  const vEl=el.parentNode.querySelector(".v");
+  if(vEl) vEl.innerHTML=t[0]+(t[1]?'<small>'+t[1]+'</small>':'');
+  setOverride(id,name,v);
+  throttleSend(id+":"+name,v,final,x=>sendControl(id,name,el.dataset.kind,x));
+}
+
+function onToggle(btn){
+  const id=+btn.dataset.u, u=units.get(id);
+  if(!u) return;
+  const dims=controlSpecs(u).filter(c=>c.dimmer);
+  const on=unitOn(u,dims);
+  if(dims.length>1){
+    // Multi-dimmer fixtures: all channels in ONE atomic state write (the
+    // level endpoint only reaches the first channel). "off" remembers the
+    // current split so the next "on" restores it, like the FHEM module.
+    const body={};
+    if(on){
+      splits.set(id,dims.map(c=>c.val));
+      dims.forEach(c=>{ body[c.name]=0; });
+    }else{
+      const s=splits.get(id);
+      dims.forEach((c,i)=>{ body[c.name]=(s&&s[i]>0)?s[i]:255; });
+    }
+    dims.forEach(c=>setOverride(id,c.name,body[c.name]));
+    write("/api/units/"+id+"/state",body);
+  }else{
+    // /on and /off are level writes (255 / 0) — mirror that locally so the
+    // card reacts immediately instead of waiting for the mesh echo.
+    if(dims.length===1) setOverride(id,dims[0].name,on?0:255);
+    write("/api/units/"+id+"/"+(on?"off":"on"));
+  }
+  queueRender();
+}
+
 /* ------------------------------------------------------------------ render */
 function queueRender(){
   if(renderQueued) return;
@@ -400,6 +609,9 @@ function bleConnected(){
 }
 
 function render(){
+  // Never rebuild the cards while a knob is under the finger — the element
+  // would be replaced mid-gesture. The render runs when the drag ends.
+  if(dragging){ renderDeferred=true; return; }
   const s=status||{}, h=hello||{};
   const net=s.network_name||h.network||"";
   $("sub").textContent=net;
@@ -470,7 +682,8 @@ function render(){
     (a.name||"").localeCompare(b.name||"",undefined,{sensitivity:"base"})||a.id-b.id);
   $("devCount").textContent=units.size?(online+" / "+units.size+" online"):"none";
   $("devNote").textContent=!units.size?""
-    :(bt?"":"Values are the last known state — the Bluetooth link is down.");
+    :bt?"Tap on/off, drag a slider to set a value."
+       :"Values are the last known state — the Bluetooth link is down, so control is unavailable.";
   $("units").innerHTML=list.length?list.map(unitCard).join("")
     :'<div class="card empty">No devices in the gateway configuration.</div>';
 
@@ -483,53 +696,109 @@ function render(){
   $("stamp").textContent="Updated "+new Date().toLocaleTimeString();
 }
 
-// One card per Casambi unit: name, reachability, and every fixture control
-// with its generic (cloud-derived) name and current value.
+// One card per Casambi unit: name, reachability, the on/off toggle and one
+// slider per controllable fixture control.
 function unitCard(u){
-  const on=!!u.on||u.level>0;
-  const pill=!u.online?'<span class="pill bad">offline</span>'
-            :on?'<span class="pill ok">on</span>':'<span class="pill">off</span>';
-  let body=controlRows(u);
-  if(!body) body='<div class="empty">No control data yet.</div>';
+  const specs=controlSpecs(u);
+  const dims=specs.filter(c=>c.dimmer);
+  const on=unitOn(u,dims);
+  const pill='<button class="pill tgl'+(!u.online?" bad":on?" ok":"")+'" data-u="'+u.id+
+      '" aria-pressed="'+(on?"true":"false")+'"'+(ctlEnabled()?"":" disabled")+'>'+
+      (!u.online?"offline":on?"on":"off")+'</button>';
+  const body=specs.length?specs.map(c=>ctrlHtml(u,c)).join("")
+                        :'<div class="empty">No control data yet.</div>';
   return '<article class="card unit'+(u.online?"":" off")+'">'+
     '<div class="uhead"><h3>'+esc(u.name||("Unit "+u.id))+
     '<span class="id">ID '+esc(u.id)+(u.address?" · "+esc(u.address):"")+'</span></h3>'+
     pill+'</div><div class="ctrls">'+body+'</div></article>';
 }
 
-// Prefer the generic `controls` array (name + raw value straight from the
-// cloud fixture); fall back to the legacy level/vertical/colorTemp fields for
-// units whose fixture definition is unavailable.
-function controlRows(u){
+// Describe one control for both display and control:
+//   name  – the generic control name the API addresses (dimmer0, temperature, …)
+//   kind  – which endpoint writes it, null for read-only
+//   fmt   – how the current value is rendered ("pct" | "raw" | "kelvin")
+//   min/max/step/val – slider geometry in the unit the endpoint expects
+// Prefers the generic `controls` array (names + raw values straight from the
+// cloud fixture) and falls back to the legacy level/vertical/colorTemp fields
+// for units whose fixture definition is unavailable.
+function controlSpecs(u){
   const out=[];
+  const push=s=>{
+    // A value the user just set stays on screen until the device echoes it
+    // back (or the grace period ends), so the knob does not jump around.
+    const ov=override(u.id,s.name);
+    if(ov!=null) s.val=ov;
+    out.push(s);
+  };
   if(Array.isArray(u.controls)&&u.controls.length){
+    const nDim=u.controls.filter(c=>c.type==="dimmer").length;
     u.controls.forEach(c=>{
       const name=c.name||c.type||"control";
       const v=c.value!=null?c.value:0;
-      if(c.type==="temperature"&&c.kelvin!=null){
-        out.push([name,esc(c.kelvin)+" K","raw "+esc(v)+
-          (c.min!=null?" · "+esc(c.min)+"–"+esc(c.max)+" K":"")]);
+      if(c.type==="temperature"){
+        // Kelvin bounds come from the fixture; 50 K is the on-air resolution
+        // of the Casambi temperature operation (one byte, kelvin/50).
+        const ok=c.kelvin!=null&&c.min!=null&&c.max>c.min;
+        push({name:name,label:name,kind:ok?"temperature":null,fmt:"kelvin",
+              min:c.min,max:c.max,step:50,val:ok?c.kelvin:v,
+              sub:ok?esc(c.min)+"–"+esc(c.max)+" K":""});
       }else if(c.type==="dimmer"){
-        out.push([name,esc(pct(v))+" %","raw "+esc(v),v]);
+        // One dimmer → the plain level endpoint; several → an atomic
+        // per-channel state write, which is the only way to address them.
+        push({name:name,label:name,kind:nDim>1?"state":"level",fmt:"pct",
+              min:0,max:255,step:1,val:v,dimmer:true});
       }else if(SCALED.has(c.type)){
-        out.push([name,esc(v),esc(pct(v))+" %",v]);
+        push({name:name,label:name,kind:c.type==="white"?"state":c.type,fmt:"raw",
+              min:0,max:255,step:1,val:v});
       }else{
-        out.push([name,esc(v)]);
+        // Unknown control type: shown, but not written — its value range is
+        // not part of the interface, so a slider would be guesswork.
+        push({name:name,label:name,kind:null,fmt:"plain",val:v});
       }
     });
   }else{
-    out.push(["level",esc(pct(u.level||0))+" %","raw "+esc(u.level||0),u.level||0]);
-    if(u.vertical!=null) out.push(["vertical",esc(u.vertical),esc(pct(u.vertical))+" %",u.vertical]);
+    push({name:"level",label:"level",kind:"level",fmt:"pct",
+          min:0,max:255,step:1,val:u.level||0,dimmer:true});
+    if(u.vertical!=null)
+      push({name:"vertical",label:"vertical",kind:"vertical",fmt:"raw",
+            min:0,max:255,step:1,val:u.vertical});
     if(u.colorTemp!=null){
-      const k=(u.cctMin!=null&&u.cctMax>u.cctMin)
-        ?Math.round(u.cctMin+u.colorTemp*(u.cctMax-u.cctMin)/255):null;
-      out.push(["temperature",k!=null?esc(k)+" K":esc(u.colorTemp),"raw "+esc(u.colorTemp)]);
+      const ok=u.cctMin!=null&&u.cctMax>u.cctMin;
+      push({name:"temperature",label:"temperature",kind:ok?"temperature":null,fmt:ok?"kelvin":"plain",
+            min:u.cctMin,max:u.cctMax,step:50,
+            val:ok?Math.round(u.cctMin+u.colorTemp*(u.cctMax-u.cctMin)/255):u.colorTemp,
+            sub:ok?esc(u.cctMin)+"–"+esc(u.cctMax)+" K":""});
     }
   }
-  return out.map(r=>
-    '<div class="row"><span class="k">'+esc(r[0])+'</span><span class="v">'+r[1]+
-    (r[2]?'<small>'+r[2]+'</small>':'')+'</span></div>'+
-    (r[3]!=null?'<div class="bar"><i style="width:'+pct(r[3])+'%"></i></div>':'')).join("");
+  return out;
+}
+
+// Value + hint text for a control, also used to refresh the labels live while
+// a slider is being dragged.
+function ctrlText(fmt,v,sub){
+  if(fmt==="kelvin") return [esc(v)+" K",sub||""];
+  if(fmt==="pct")    return [esc(pct(v))+" %","raw "+esc(v)];
+  if(fmt==="raw")    return [esc(v),esc(pct(v))+" %"];
+  return [esc(v),sub||""];
+}
+
+function ctrlHtml(u,c){
+  const t=ctrlText(c.fmt,c.val,c.sub);
+  let h='<div class="ctrl"><div class="row"><span class="k">'+esc(c.label)+
+    '</span><span class="v">'+t[0]+(t[1]?'<small>'+t[1]+'</small>':'')+'</span></div>';
+  if(c.kind){
+    const span=c.max-c.min;
+    const fill=span>0?Math.round((c.val-c.min)*100/span):0;
+    h+='<input class="rng'+(c.kind==="temperature"?" temp":"")+'" type="range"'+
+       ' min="'+c.min+'" max="'+c.max+'" step="'+c.step+'" value="'+c.val+'"'+
+       ' style="--p:'+fill+'" data-u="'+u.id+'" data-c="'+esc(c.name)+'"'+
+       ' data-kind="'+c.kind+'" data-fmt="'+c.fmt+'"'+
+       (c.sub?' data-sub="'+esc(c.sub)+'"':'')+
+       (ctlEnabled()?"":" disabled")+' aria-label="'+esc(c.label)+'">';
+  }else if(c.fmt==="pct"||c.fmt==="raw"){
+    h+='<div class="bar"><i style="width:'+pct(c.val)+'%"></i></div>';
+  }
+  return h+'</div>';
 }
 
 /* -------------------------------------------------------------------- auth */
@@ -580,6 +849,31 @@ $("authForm").addEventListener("submit",async e=>{
 });
 
 $("forget").addEventListener("click",()=>{ needAuth(); });
+
+/* Device interaction. Delegated on the container, because every render
+   replaces the cards' markup — per-element listeners would be lost. */
+const UNITS=$("units");
+UNITS.addEventListener("pointerdown",e=>{
+  const el=e.target.closest(".rng");
+  if(el&&!el.disabled) dragging=el;
+},{passive:true});
+function endDrag(){
+  if(!dragging) return;
+  dragging=null;
+  if(renderDeferred){ renderDeferred=false; queueRender(); }
+}
+addEventListener("pointerup",endDrag);
+addEventListener("pointercancel",endDrag);
+UNITS.addEventListener("input",e=>{
+  const el=e.target.closest(".rng"); if(el) onSlide(el,false);
+});
+// change = the value the user settled on (drag released, or keyboard/tap)
+UNITS.addEventListener("change",e=>{
+  const el=e.target.closest(".rng"); if(el) onSlide(el,true);
+});
+UNITS.addEventListener("click",e=>{
+  const b=e.target.closest("button.tgl"); if(b&&!b.disabled) onToggle(b);
+});
 
 start();
 setInterval(()=>{ if(!document.hidden) tick(); },POLL_MS);
