@@ -46,9 +46,14 @@
  * FOLLOW that interface though: when a field it reads or an endpoint it writes
  * is renamed or removed, update the JavaScript below in the same commit.
  *
+ * The three diagnostics cards (Bluetooth side / API side / System) start
+ * COLLAPSED — the devices are what people open the page for. The status line in
+ * the header is their disclosure control (role=button + chevron), and the
+ * choice is remembered in localStorage.
+ *
  * Served with the (const uint8_t*, len) response overload, which streams
  * straight from flash (AsyncProgmemResponse) — the plain const char* overload
- * would copy the whole page into a String and need a ~36 kB contiguous heap
+ * would copy the whole page into a String and need a ~38 kB contiguous heap
  * block on every request.
  *
  * To work on the page: copy the raw string into a .html file and open it
@@ -77,11 +82,16 @@ body{margin:0;background:var(--bg);color:var(--fg);
  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
 a{color:inherit}
 /* ---------- header ---------- */
-header{position:sticky;top:0;z-index:3;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;
- justify-content:space-between;padding:10px clamp(12px,3vw,28px);
+header{position:sticky;top:0;z-index:3;padding:10px clamp(12px,3vw,28px);
  background:color-mix(in srgb,var(--card) 88%,transparent);backdrop-filter:blur(10px);
  border-bottom:1px solid var(--line)}
 @supports not (background:color-mix(in srgb,red,blue)){header{background:var(--card)}}
+/* The status line doubles as the disclosure control for the detail cards. */
+.sline{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;justify-content:space-between;
+ cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none}
+.sline:focus-visible{outline:2px solid #2f6fbb;outline-offset:4px;border-radius:8px}
+.chev{width:19px;height:19px;flex:none;color:var(--mut);transition:transform .18s ease}
+.sline[aria-expanded="true"] .chev{transform:rotate(180deg)}
 .brand{display:flex;align-items:baseline;gap:8px;min-width:0}
 h1{margin:0;font-size:clamp(1.02rem,1.6vw + .6rem,1.3rem);font-weight:650;letter-spacing:-.01em;
  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -105,6 +115,7 @@ main{max-width:1240px;margin:0 auto;padding:clamp(12px,2.6vw,24px) clamp(12px,3v
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}
 .card h2{margin:0 0 10px;font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
 .sec{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;margin:24px 0 10px}
+#details.hide+.sec{margin-top:0}   /* details collapsed: no gap above "Devices" */
 .sec h2{margin:0;font-size:1.02rem;font-weight:650}
 .sec .note{color:var(--mut);font-size:.85rem}
 /* ---------- key/value rows ---------- */
@@ -180,10 +191,18 @@ footer{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-conte
 </style></head><body>
 
 <header>
-  <div class="brand"><h1 id="title">Casambi Gateway</h1><span id="sub"></span></div>
-  <div class="pills">
-    <span class="pill" id="pBt">Bluetooth</span>
-    <span class="pill" id="pApi">API</span>
+  <!-- The whole status line is the disclosure control for the three detail
+       cards below (role=button on a div, so the <h1> stays a heading). -->
+  <div class="sline" id="statusbar" role="button" tabindex="0" aria-expanded="false"
+       aria-controls="details" title="Show connection and system details">
+    <div class="brand"><h1 id="title">Casambi Gateway</h1><span id="sub"></span></div>
+    <div class="pills">
+      <span class="pill" id="pBt">Bluetooth</span>
+      <span class="pill" id="pApi">API</span>
+      <svg class="chev" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path
+        d="M4.5 7.5 10 13l5.5-5.5" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
   </div>
 </header>
 
@@ -204,7 +223,9 @@ footer{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-conte
   <div id="content" class="hide">
     <div id="banner" class="hide"></div>
 
-    <div class="grid">
+    <!-- Collapsed by default: the devices are what people come for. Toggled by
+         the status line in the header (see #statusbar). -->
+    <div class="grid hide" id="details">
       <section class="card">
         <h2>Bluetooth side</h2>
         <div id="btRows"></div>
@@ -849,6 +870,26 @@ $("authForm").addEventListener("submit",async e=>{
 });
 
 $("forget").addEventListener("click",()=>{ needAuth(); });
+
+/* Detail cards: hidden by default, revealed by the status line. The choice is
+   remembered so someone who watches the diagnostics does not re-open them on
+   every load. */
+const DETAILS_KEY="casambiDetailsOpen";
+function showDetails(open){
+  $("details").classList.toggle("hide",!open);
+  const bar=$("statusbar");
+  bar.setAttribute("aria-expanded",open?"true":"false");
+  bar.title=open?"Hide connection and system details"
+                :"Show connection and system details";
+  try{ localStorage.setItem(DETAILS_KEY,open?"1":"0"); }catch(e){}
+}
+$("statusbar").addEventListener("click",()=>{
+  showDetails($("details").classList.contains("hide"));
+});
+$("statusbar").addEventListener("keydown",e=>{
+  if(e.key==="Enter"||e.key===" "){ e.preventDefault(); $("statusbar").click(); }
+});
+showDetails(localStorage.getItem(DETAILS_KEY)==="1");
 
 /* Device interaction. Delegated on the container, because every render
    replaces the cards' markup — per-element listeners would be lost. */

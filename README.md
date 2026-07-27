@@ -48,7 +48,7 @@ The following luminaires have been tested with this controller:
 |Occhio Sento (air)       |Brightness + Vertical                    |✅ Brightness + Vertical|
 |Occhio Luna sospeso (air)|Brightness + Color Temperature           |✅ Brightness + CCT|
 |Occhio air module        |Brightness only                          |✅ Brightness      |
-|Oligo Grace              |2 independent dimmers (Up-/Downlight) + Color Temperature|SetState write verified in PR #39; per-channel path untested on hardware|
+|Oligo Grace              |2 independent dimmers (Up-/Downlight) + Color Temperature|⚠️ Partially tested — SetState write verified in PR #39; per-channel dimming, and the web interface's per-channel sliders and atomic on/off, untested on hardware|
 
 The controller should work with any Casambi-enabled luminaire. Capabilities are detected generically from the Casambi cloud configuration — no fixture-specific code is required.
 
@@ -210,6 +210,12 @@ the very same interface every other client uses (`GET /api/status`,
 channel).
 
 **What it shows**
+
+The **status line** at the top always shows the two link states as pills
+(`Bluetooth: connected`, `API: live`). The three detail cards behind it are
+**collapsed by default** so the devices are on screen right away — tap the
+status line (the chevron on the right shows the state) to fold them out; the
+choice is remembered on that device.
 
 | Section | Content |
 |---------|---------|
@@ -883,6 +889,7 @@ is caught immediately rather than silently failing BLE authentication.
 - **Motor control** (`uslider`, `gslider`): Not extensively tested. May not work on all devices. Use scenes for reliable motor control.
 - **RGB color control** (`ucolor`): Implemented but not tested with RGB-capable Casambi fixtures.
 - **0x09 Mesh Topology Parser**: Experimental — reverse-engineered from two captures. The structure is interpreted as `[0x80+nodeId][metric][quality]` triplets. Node IDs map to units, groups, or scenes; metric/quality bytes are not fully understood. May misclassify nodes under different network configurations.
+- **Multi-dimmer fixtures** (two or more `dimmer` controls, e.g. **Oligo Grace** Up-/Downlight): the per-channel path is implemented and verified against a mock gateway — `POST /api/units/:id/state`, the FHEM per-channel readings/commands, and the web interface's per-channel sliders plus the atomic on/off that remembers the channel split — but **not yet tested on hardware**. Single-channel control (`brightness`, `temperature`) works on these fixtures as on any other.
 - **Classic networks** (non-Evolution): The code has a fallback path for networks without encryption keys, but this has not been tested.
 
 ### Protocol Notes
