@@ -14,6 +14,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 - ✅ **Browser-Based Setup (no serial needed)** — On first boot the device opens an open Wi-Fi access point with a captive-portal page for Wi-Fi + Casambi provisioning; the serial wizard remains as a fallback
 - ✅ **HTTP REST API** — Control and monitor lights from any home automation system
 - ✅ **WebSocket Push** — Real-time state push to connected clients; no polling required
+- ✅ **Built-in Web Interface** — `http://<esp32-ip>/` shows both link states (Casambi/Bluetooth and Wi-Fi/API) plus every unit with its generic control names and live values, and controls them: on/off, a slider per control, and a warm→cold Kelvin slider for colour temperature; responsive for phone and tablet, portrait and landscape
 - ✅ **Real-Time State Tracking** — Receives status broadcasts from the Casambi mesh; current brightness, color temperature, and vertical distribution always up to date, even when lights are controlled via the Casambi app or other controllers
 - ✅ **Complete Protocol Support** — Full Casambi Evolution protocol implementation (ECDH, AES-CTR, CMAC)
 - ✅ **Generic Capability Detection** — Unit capabilities (dimmer, CCT, vertical) automatically derived from cloud API; no hardcoding of fixture types needed
@@ -47,7 +48,7 @@ The following luminaires have been tested with this controller:
 |Occhio Sento (air)       |Brightness + Vertical                    |✅ Brightness + Vertical|
 |Occhio Luna sospeso (air)|Brightness + Color Temperature           |✅ Brightness + CCT|
 |Occhio air module        |Brightness only                          |✅ Brightness      |
-|Oligo Grace              |2 independent dimmers (Up-/Downlight) + Color Temperature|SetState write verified in PR #39; per-channel path untested on hardware|
+|Oligo Grace              |2 independent dimmers (Up-/Downlight) + Color Temperature|⚠️ Partially tested — SetState write verified in PR #39; per-channel dimming, and the web interface's per-channel sliders and atomic on/off, untested on hardware|
 
 The controller should work with any Casambi-enabled luminaire. Capabilities are detected generically from the Casambi cloud configuration — no fixture-specific code is required.
 
@@ -94,7 +95,7 @@ On first boot (no stored configuration) the device opens an **open Wi-Fi access 
 
 The page shows live progress and any error (wrong password, cloud unreachable), so you can correct it and retry.
 
-After provisioning the controller auto-connects to the Casambi gateway, serves the REST API + WebSocket once Wi-Fi is up, and advertises itself via mDNS as **`casambi-XXXX.local`**.
+After provisioning the controller auto-connects to the Casambi gateway, serves the REST API + WebSocket once Wi-Fi is up, and advertises itself via mDNS as **`casambi-XXXX.local`**. Browsing to **`http://<esp32-ip>/`** then opens the [web interface](#web-interface-status--control-page) with both link states, all device values and direct control.
 
 > **Tip:** The Casambi mesh rotates which unit advertises as connectable, so repeating **Scan Casambi gateways** may reveal different devices. Pick one that stays powered. (The ESP connects to a stable network-level gateway endpoint; Casambi handles the mesh internally, so no gateway selection is critical for normal operation.)
 
@@ -193,6 +194,96 @@ list units         # Show all units with ON/OFF state
 list groups        # Show all groups with IDs
 list scenes        # Show all scenes with IDs
 ```
+
+-----
+
+## Web Interface (status & control page)
+
+Open **`http://<esp32-ip>/`** (or `http://casambi-XXXX.local/`) in any browser —
+the gateway serves a page for humans: it shows what the gateway currently sees
+and lets you switch and dim the lights right there, no app and no FHEM needed.
+
+The page needs no internet access and no build step: it is a single
+self-contained HTML page in the firmware (`src/web/dashboard.h`), and it uses
+the very same interface every other client uses (`GET /api/status`,
+`GET /api/units`, the `POST /api/units/…` control routes, and the `/ws` push
+channel).
+
+**What it shows**
+
+The **status line** at the top always shows the two link states as pills
+(`Bluetooth: connected`, `API: live`). The three detail cards behind it are
+**collapsed by default** so the devices are on screen right away — tap the
+status line (the chevron on the right shows the state) to fold them out; the
+choice is remembered on that device.
+
+| Section | Content |
+|---------|---------|
+| **Bluetooth side** | Link state (connected / disconnected, incl. the BLE state machine), Casambi network name, connected gateway unit (MAC + resolved name), link RSSI, link uptime, packets received, last disconnect reason, Casambi protocol version vs. the tested range, unit count |
+| **API side** | Push/polling state of this browser session, Wi-Fi SSID + RSSI, IP address, whether the API requires a token, interface version (`api_version_major.minor`), firmware build |
+| **System** | Device uptime, free heap (+ largest block), reboot count, UTC time + NTP server, dropped pushes / parse counters |
+| **Devices** | One card per Casambi unit: name, unit ID, BLE MAC, reachability (`on` / `off` / `offline`) and **every fixture control with its generic name and current value** — exactly the cloud-derived control names `POST /api/units/:id/state` accepts (`dimmer`, `dimmer0`, `dimmer1`, `vertical`, `temperature`, `white`, …). Dimmers are shown in percent, `temperature` in Kelvin, everything else raw; new control types appear automatically |
+
+**What you can control**
+
+- **On/off** — the `on` / `off` pill on each card is a button. On single-dimmer
+  fixtures it posts to `/on` and `/off` (level 255 / 0). On **multi-dimmer**
+  fixtures it writes *all* channels in one atomic `/state` telegram, and `off`
+  remembers the current split so the next `on` restores it (same behaviour as
+  the FHEM module).
+- **Sliders with a knob** — one per writable control, draggable with mouse,
+  finger or the arrow keys. A vertical swipe that starts on a slider still
+  scrolls the page.
+- **Colour temperature** — its own slider running from the fixture's own
+  minimum to its maximum Kelvin (`min`/`max` of the `temperature` control),
+  in 50 K steps, which is the resolution of the Casambi temperature operation.
+  The track carries a **warm → cold gradient** (light orange to light blue), so
+  the knob position reads as a colour.
+- Every widget writes through the documented endpoint for its control type —
+  `/level`, `/vertical`, `/slider`, `/temperature`, or the generic `/state` for
+  multi-dimmer channels and types like `white`. **Unknown control types stay
+  display-only**: their value range is not part of the interface, so a slider
+  would be guesswork.
+
+While the Bluetooth link is down every widget is disabled (the control
+endpoints answer `503` anyway) and the section note says so. A rejected write —
+`503` because the command queue is full, `409` for a unit without a fixture
+layout — is shown as a short message at the bottom of the screen.
+
+Because the gateway only *queues* a command (`202 Accepted`) and reports the
+result later as a `unit_state` push, the page keeps the value you just set on
+screen until the device echoes it back (or for ~2.5 s), so the knobs never jump
+while a value is in flight. Dragging is throttled to one write per 250 ms — the
+newest value wins and the value you release on is always sent — which keeps the
+`BLE_CMD_QUEUE_DEPTH`-deep command queue from overflowing.
+
+State changes arrive live over the WebSocket (`hello`, `unit_state`,
+`connection_state`). If the WebSocket is unavailable — a proxy in between, or
+the client limit `WS_MAX_CLIENTS` is exhausted — the page falls back to polling
+the REST endpoints every 5 s and says so ("API: polling"). While the gateway
+does not answer at all, the last known values stay on screen with a banner, and
+the page reconnects on its own.
+
+An open page counts as **one WebSocket client** against `WS_MAX_CLIENTS`
+(3 by default; beyond that the gateway drops the *oldest* connection, which may
+be FHEM's). To keep that budget free the page closes its WebSocket whenever it
+is not visible — switching tabs or apps releases the slot immediately, and
+returning to the page reconnects and refreshes it.
+
+**Authentication.** When a Casambi password is stored, the page asks for it
+once. The API token is derived **in the browser** —
+`SHA-256("casambi-api:" + password)`, the same derivation the FHEM module uses
+(see [Authentication](#authentication)) — and kept in `localStorage`; the
+password itself never goes on the wire. *Forget password* at the bottom of the
+page clears it again. Gateways without a stored password (open API) show the
+page right away.
+
+> The page is delivered over plain HTTP like the rest of the API — treat the
+> controller as a trusted-LAN device (see [Security](#security)).
+
+**Layout.** The page adapts to phones and tablets in both portrait and
+landscape (single column up to a 320 px-wide screen, multi-column from tablet
+width on) and follows the system light/dark preference.
 
 -----
 
@@ -798,6 +889,7 @@ is caught immediately rather than silently failing BLE authentication.
 - **Motor control** (`uslider`, `gslider`): Not extensively tested. May not work on all devices. Use scenes for reliable motor control.
 - **RGB color control** (`ucolor`): Implemented but not tested with RGB-capable Casambi fixtures.
 - **0x09 Mesh Topology Parser**: Experimental — reverse-engineered from two captures. The structure is interpreted as `[0x80+nodeId][metric][quality]` triplets. Node IDs map to units, groups, or scenes; metric/quality bytes are not fully understood. May misclassify nodes under different network configurations.
+- **Multi-dimmer fixtures** (two or more `dimmer` controls, e.g. **Oligo Grace** Up-/Downlight): the per-channel path is implemented and verified against a mock gateway — `POST /api/units/:id/state`, the FHEM per-channel readings/commands, and the web interface's per-channel sliders plus the atomic on/off that remembers the channel split — but **not yet tested on hardware**. Single-channel control (`brightness`, `temperature`) works on these fixtures as on any other.
 - **Classic networks** (non-Evolution): The code has a fallback path for networks without encryption keys, but this has not been tested.
 
 ### Protocol Notes
@@ -891,6 +983,7 @@ esp32-casambi/
 │   │   └── config_store.*    # LittleFS persistence (config + debug flags)
 │   └── web/
 │       ├── webserver.*       # HTTP REST API + WebSocket push (ESPAsyncWebServer)
+│       ├── dashboard.h       # Status & control page at GET / (self-contained HTML)
 │       └── setup_portal.*    # First-boot SoftAP + captive portal provisioning
 ├── FHEM/
 │   ├── 98_CasambiGW.pm       # FHEM gateway module (WebSocket connection, unit sync)

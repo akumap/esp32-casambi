@@ -5,6 +5,10 @@
  * like FHEM. WebSocket at /ws delivers real-time push events so clients
  * no longer need to poll.
  *
+ * GET / serves the human-facing status & control dashboard (dashboard.h): a
+ * static page that reads AND writes the same /api/* + /ws interface from the
+ * browser — it is a CLIENT of the interface below, not part of it.
+ *
  * WebSocket protocol (server → client, JSON):
  *   {"type":"hello","network":"My Home","ble_connected":true,
  *     "units":[{"id":1,"name":"...","online":true,
