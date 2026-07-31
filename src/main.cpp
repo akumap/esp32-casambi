@@ -2172,6 +2172,15 @@ void runSetupWizard() {
     // Persist the network password so `refresh` can reuse it later
     networkConfig.casambiPassword = password;
 
+    // Auto-connect target: the MAC of the unit picked in step 1. Without this
+    // the wizard left autoConnectAddress empty, so the device came up with a
+    // perfectly valid config and then never attempted a single connect — and
+    // said nothing about it, because every "connect failed" trace sits behind
+    // an attempt that never happened (issue #42). The web setup portal has
+    // always stored it here, see setup_portal.cpp.
+    networkConfig.autoConnectAddress = scannedDevices[selectedIndex].address;
+    networkConfig.autoConnectEnabled = true;
+
     // Step 5: Save configuration
     Serial.println("\nStep 5: Saving configuration");
     Serial.println("--- Saving to flash ---");
@@ -2195,6 +2204,7 @@ void runSetupWizard() {
     Serial.printf("Units: %d\n", networkConfig.units.size());
     Serial.printf("Groups: %d\n", networkConfig.groups.size());
     Serial.printf("Scenes: %d\n", networkConfig.scenes.size());
+    Serial.printf("Auto-connect: %s\n", networkConfig.autoConnectAddress.c_str());
     Serial.println("\nRestarting to enter operation mode...");
     delay(2000);
     ESP.restart();
