@@ -16,6 +16,7 @@
 #include "cloud/api_client.h"
 #include "storage/config_store.h"
 #include "ble/casambi_client.h"
+#include "ble/casambi_scan.h"
 #include "ble/packet.h"
 #include "crypto/encryption.h"
 #include "web/webserver.h"
@@ -55,6 +56,11 @@ struct ScannedDevice {
     String address;
     String name;
     int rssi;
+    // Advertised address type. The reconnect path always connects as "public",
+    // so a device listed here as "random" can be discovered but never reached.
+    uint8_t addrType;
+
+    ScannedDevice() : rssi(0), addrType(0) {}
 };
 std::vector<ScannedDevice> scannedDevices;
 
@@ -71,6 +77,16 @@ static bool bleReconnectEnabled = true;  // Can be disabled via command
 // millis() when the BLE link was lost (0 = not currently lost). Set by the
 // connection-state callback, cleared by the reconnect success log.
 static unsigned long bleLostAt = 0;
+
+// Throttle for the "why is nobody reconnecting" trace below. A gateway that is
+// disconnected because auto-connect is off (or has no stored MAC) used to
+// produce NO output whatsoever — the most confusing failure mode of all, since
+// it looks exactly like a firmware that is trying and silently failing.
+static unsigned long lastBLEIdleNotice = 0;
+static const unsigned long BLE_IDLE_NOTICE_INTERVAL_MS = 60000;
+// Ensures the reason for a permanently idle BLE stack reaches the persistent
+// event log once per boot, not just the serial console nobody was attached to.
+static bool bleIdleReasonLogged = false;
 
 // WiFi monitoring state
 static unsigned long lastWiFiCheck = 0;
@@ -93,6 +109,7 @@ void checkAndReconnectBLE();
 void checkAndReconnectWiFi();
 void monitorHeap();
 void printStatus();
+void printBLEDiagnostics();
 void checkCasambiVersions(const NetworkConfig& cfg);
 void syncTime();
 void startMDNS();
@@ -386,6 +403,13 @@ void setup() {
 
             // Initialize BLE first (before WiFi for proper coexistence)
             NimBLEDevice::init(DEVICE_NAME);
+            // Confirm the stack actually came up, and with which identity — a
+            // controller that failed to start is otherwise only noticeable
+            // through connect attempts that all fail for no stated reason.
+            Serial.printf("BLE: stack initialized, own address %s, target gateway %s\n",
+                          NimBLEDevice::getAddress().toString().c_str(),
+                          networkConfig.autoConnectAddress.length()
+                              ? networkConfig.autoConnectAddress.c_str() : "(none configured)");
 
             // Initialize BLE client
             casambiClient = new CasambiClient(&networkConfig);
@@ -395,8 +419,11 @@ void setup() {
                 [](ConnectionState newState, DisconnectReason reason) {
                     if (newState == ConnectionState::None &&
                         reason != DisconnectReason::UserRequested) {
-                        Serial.printf("*** BLE connection lost (reason: %d) - will auto-reconnect ***\n",
-                                      static_cast<int>(reason));
+                        Serial.printf("*** BLE connection lost (reason=%d/%s, source=%s, phase=%s) "
+                                      "- will auto-reconnect ***\n",
+                                      static_cast<int>(reason), disconnectReasonName(reason),
+                                      casambiClient->getLastDisconnectSource(),
+                                      casambiClient->getLastConnectPhase());
                         // Auth/key-exchange failures are errors; a plain link
                         // loss is a warning. Include which detector fired and
                         // the last known link RSSI so drops can be attributed
@@ -404,9 +431,10 @@ void setup() {
                         bool authIssue = (reason == DisconnectReason::AuthFailed ||
                                           reason == DisconnectReason::KeyExchangeFailed);
                         EventLog::log(authIssue ? LOG_ERROR : LOG_WARN,
-                                      "BLE connection lost (reason=%d/%s, rssi=%d)",
-                                      static_cast<int>(reason),
+                                      "BLE connection lost (reason=%s, src=%s, phase=%s, rssi=%d)",
+                                      disconnectReasonName(reason),
                                       casambiClient->getLastDisconnectSource(),
+                                      casambiClient->getLastConnectPhase(),
                                       casambiClient->getLastRssi());
                         if (bleLostAt == 0) bleLostAt = millis();
                         bleReconnectInterval = BLE_RECONNECT_INTERVAL_MS;
@@ -629,22 +657,56 @@ void loop() {
 // BLE AUTO-RECONNECT
 // ============================================================================
 
+// Explain, at most once a minute, why the link is down and nothing is being
+// done about it. `reason` is a static string.
+static void noteBLEIdle(const char* reason, const char* remedy) {
+    unsigned long now = millis();
+    if (lastBLEIdleNotice != 0 && now - lastBLEIdleNotice < BLE_IDLE_NOTICE_INTERVAL_MS) return;
+    lastBLEIdleNotice = now;
+
+    Serial.printf("BLE: not connected and NOT attempting to reconnect - %s (%s)\n", reason, remedy);
+    if (!bleIdleReasonLogged) {
+        bleIdleReasonLogged = true;
+        EventLog::log(LOG_WARN, "BLE idle, no reconnect: %s", reason);
+    }
+}
+
 void checkAndReconnectBLE() {
-    if (!casambiClient || !bleReconnectEnabled) return;
-    if (casambiClient->isAuthenticated()) return;  // Already connected
+    if (!casambiClient) return;
+
+    if (casambiClient->isAuthenticated()) {
+        // Link is up: re-arm the notice so a later outage explains itself again.
+        lastBLEIdleNotice = 0;
+        return;
+    }
+
+    if (!bleReconnectEnabled) {
+        noteBLEIdle("auto-reconnect is disabled", "enable with 'reconnect on'");
+        return;
+    }
 
     // Only reconnect if we have an auto-connect address
-    if (!networkConfig.autoConnectEnabled || networkConfig.autoConnectAddress.length() == 0) return;
+    if (!networkConfig.autoConnectEnabled) {
+        noteBLEIdle("auto-connect is disabled", "enable with 'autoconnect on'");
+        return;
+    }
+    if (networkConfig.autoConnectAddress.length() == 0) {
+        noteBLEIdle("no gateway MAC stored",
+                    "run 'scan' then 'connect <n>', or 'autoconnect set <mac>'");
+        return;
+    }
 
     unsigned long now = millis();
     if (now - lastBLEReconnectAttempt < bleReconnectInterval) return;
 
     lastBLEReconnectAttempt = now;
 
-    Serial.printf("BLE: Auto-reconnect attempt #%d to %s (backoff: %lu ms)...\n",
+    Serial.printf("BLE: Auto-reconnect attempt #%d to %s (backoff: %lu ms, offline %lus, heap=%u)...\n",
                   consecutiveReconnectFailures + 1,
                   networkConfig.autoConnectAddress.c_str(),
-                  bleReconnectInterval);
+                  bleReconnectInterval,
+                  bleLostAt ? (millis() - bleLostAt) / 1000 : 0,
+                  ESP.getFreeHeap());
 
     if (casambiClient->connect(networkConfig.autoConnectAddress)) {
         Serial.println("BLE: Reconnect successful!");
@@ -685,15 +747,32 @@ void checkAndReconnectBLE() {
         static uint8_t internalFailureStreak = 0;
         internalFailureStreak = internalFailure ? internalFailureStreak + 1 : 0;
 
-        Serial.printf("BLE: Reconnect failed (%d, %s). Next attempt in %lu ms\n",
+        // The phase says where it broke, the rc says why the radio said no.
+        // "peer unreachable" alone sent people hunting for range problems when
+        // the real fault was one phase further in (see issue #42).
+        Serial.printf("BLE: Reconnect failed (#%d, %s, phase=%s, reason=%d/%s, rc=%d). "
+                      "Next attempt in %lu ms\n",
                       consecutiveReconnectFailures,
                       internalFailure ? "internal error" : "peer unreachable",
+                      casambiClient->getLastConnectPhase(),
+                      static_cast<int>(lastReason), disconnectReasonName(lastReason),
+                      casambiClient->getLastConnectError(),
                       bleReconnectInterval);
+
+        // First failure of an outage goes to the persistent log as well: the
+        // serial console is usually not attached when a link dies at night.
+        if (consecutiveReconnectFailures == 1) {
+            EventLog::log(LOG_WARN, "BLE connect failed: phase=%s reason=%s rc=%d",
+                          casambiClient->getLastConnectPhase(),
+                          disconnectReasonName(lastReason),
+                          casambiClient->getLastConnectError());
+        }
 
         if (internalFailureStreak >= MAX_RECONNECT_FAILURES) {
             Serial.println("*** Too many internal BLE failures! Restarting ESP32 ***");
-            EventLog::log(LOG_CRITICAL, "Restart: %d internal BLE failures (reason=%d)",
-                          internalFailureStreak, static_cast<int>(lastReason));
+            EventLog::log(LOG_CRITICAL, "Restart: %d internal BLE failures (phase=%s, reason=%s)",
+                          internalFailureStreak, casambiClient->getLastConnectPhase(),
+                          disconnectReasonName(lastReason));
             delay(1000);
             ESP.restart();
         }
@@ -863,9 +942,23 @@ void printStatus() {
         }
 
         if (casambiClient->getLastDisconnectReason() != DisconnectReason::None) {
-            Serial.printf("  Last disconnect: reason=%d/%s\n",
+            Serial.printf("  Last disconnect: reason=%d/%s, source=%s\n",
                           static_cast<int>(casambiClient->getLastDisconnectReason()),
+                          disconnectReasonName(casambiClient->getLastDisconnectReason()),
                           casambiClient->getLastDisconnectSource());
+        }
+        if (!casambiClient->isAuthenticated()) {
+            // Where the last attempt broke is the single most useful number
+            // when the link never comes up ("link" = never reached the peer,
+            // anything else = we talked to it and the handshake failed).
+            Serial.printf("  Last connect phase: %s (rc=%d)\n",
+                          casambiClient->getLastConnectPhase(),
+                          casambiClient->getLastConnectError());
+            Serial.printf("  Auto-connect: %s, MAC: %s\n",
+                          networkConfig.autoConnectEnabled ? "enabled" : "disabled",
+                          networkConfig.autoConnectAddress.length()
+                              ? networkConfig.autoConnectAddress.c_str() : "(none)");
+            Serial.println("  Run 'blediag' for a full BLE diagnostic report");
         }
     } else {
         Serial.println("BLE: Setup mode - no client");
@@ -888,6 +981,125 @@ void printStatus() {
     Serial.printf("Uptime: %lu seconds\n", millis() / 1000);
     Serial.printf("Reconnect failures: %d/%d\n", consecutiveReconnectFailures, MAX_RECONNECT_FAILURES);
     Serial.printf("Auto-reconnect: %s\n", bleReconnectEnabled ? "enabled" : "disabled");
+    Serial.println();
+}
+
+// ============================================================================
+// BLE DIAGNOSTIC REPORT
+// ============================================================================
+
+// One command that answers "why is BLE not connecting?" in a form that can be
+// pasted into a bug report: config, client state, the phase the last attempt
+// died in, and a live picture of what is actually advertising nearby. Written
+// for issue #42, where a device was discovered by setup but never connected
+// and the existing traces said nothing at all.
+void printBLEDiagnostics() {
+    Serial.println("\n=== BLE Diagnostics ===");
+    Serial.printf("Firmware build: %d, uptime: %lus, heap: free=%u min=%u largest=%u\n",
+                  FIRMWARE_BUILD, millis() / 1000,
+                  ESP.getFreeHeap(), minFreeHeap, ESP.getMaxAllocHeap());
+    Serial.printf("Chip: %s rev %d, %d core(s)\n",
+                  ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores());
+
+    // --- Configuration -----------------------------------------------------
+    Serial.println("\n-- Configuration --");
+    Serial.printf("Network: '%s' (uuid=%s)\n",
+                  networkConfig.networkName.c_str(), networkConfig.networkUuid.c_str());
+    Serial.printf("Protocol version: %d (minimum %d)\n",
+                  networkConfig.protocolVersion, MIN_PROTOCOL_VERSION);
+    Serial.printf("Units: %d, groups: %d, scenes: %d\n",
+                  (int)networkConfig.units.size(), (int)networkConfig.groups.size(),
+                  (int)networkConfig.scenes.size());
+    Serial.printf("Keys: %d\n", (int)networkConfig.keys.size());
+    for (const auto& k : networkConfig.keys) {
+        // Metadata only — never the key material itself.
+        Serial.printf("  key id=%d type=%d role=%d name='%s'\n",
+                      k.id, k.type, k.role, k.name.c_str());
+    }
+    if (networkConfig.keys.empty()) {
+        Serial.println("  *** No keys: the gateway will connect but never authenticate "
+                       "(re-run 'setup' or 'refresh') ***");
+    }
+    Serial.printf("Auto-connect: %s, MAC: %s\n",
+                  networkConfig.autoConnectEnabled ? "enabled" : "disabled",
+                  networkConfig.autoConnectAddress.length()
+                      ? networkConfig.autoConnectAddress.c_str() : "(none)");
+    Serial.printf("Auto-reconnect: %s, failures: %d, next backoff: %lu ms\n",
+                  bleReconnectEnabled ? "enabled" : "disabled",
+                  consecutiveReconnectFailures, bleReconnectInterval);
+    Serial.printf("Debug flags: ble=%s casambi=%s\n",
+                  bleDebugEnabled ? "on" : "off", casambiDebugEnabled ? "on" : "off");
+
+    // --- Client state ------------------------------------------------------
+    Serial.println("\n-- Link --");
+    if (!casambiClient) {
+        Serial.println("No BLE client (setup mode)");
+        Serial.println();
+        return;
+    }
+
+    Serial.printf("State: %d (%s)\n", static_cast<int>(casambiClient->getState()),
+                  casambiClient->isAuthenticated() ? "authenticated"
+                      : (casambiClient->getState() == ConnectionState::None ? "disconnected"
+                                                                            : "connecting"));
+    Serial.printf("Last connect phase: %s (NimBLE rc=%d)\n",
+                  casambiClient->getLastConnectPhase(), casambiClient->getLastConnectError());
+    Serial.printf("Last disconnect: reason=%d/%s, source=%s\n",
+                  static_cast<int>(casambiClient->getLastDisconnectReason()),
+                  disconnectReasonName(casambiClient->getLastDisconnectReason()),
+                  casambiClient->getLastDisconnectSource());
+    Serial.printf("Gateway: %s, rssi=%d dBm (accept threshold %d dBm)\n",
+                  casambiClient->getConnectedAddress().length()
+                      ? casambiClient->getConnectedAddress().c_str() : "(never connected)",
+                  casambiClient->getLastRssi(), BLE_MIN_CONNECT_RSSI);
+    Serial.printf("Packets received: %u, link uptime: %lus, offline for: %lus\n",
+                  casambiClient->getReceivedPacketCount(),
+                  casambiClient->getConnectionUptime() / 1000,
+                  bleLostAt ? (millis() - bleLostAt) / 1000 : 0);
+
+    // --- What is actually out there ----------------------------------------
+    Serial.println("\n-- Advertisement probe --");
+    if (casambiClient->isAuthenticated()) {
+        // Scanning while connected can disturb a healthy link for no benefit.
+        Serial.println("Link is up - skipping the scan.");
+        Serial.println();
+        return;
+    }
+
+    Serial.println("Scanning 5 s for Casambi advertisers...");
+    std::vector<CasambiScanResult> seen;
+    CasambiScan::run(5, seen);
+    esp_task_wdt_reset();
+
+    if (seen.empty()) {
+        Serial.println("NO Casambi device is advertising.");
+        Serial.println("  - are the lights powered on and in range?");
+        Serial.println("  - is a phone with the Casambi app (or another gateway) already connected?");
+        Serial.println("    a Casambi unit accepts only ONE central at a time");
+        Serial.println();
+        return;
+    }
+
+    bool targetSeen = false;
+    Serial.printf("Found %d advertiser(s):\n", (int)seen.size());
+    for (const auto& r : seen) {
+        bool isTarget = networkConfig.autoConnectAddress.length() &&
+                        r.mac.equalsIgnoreCase(networkConfig.autoConnectAddress);
+        targetSeen = targetSeen || isTarget;
+        Serial.printf("  %s type=%s rssi=%d name='%s'%s\n",
+                      r.mac.c_str(), CasambiScan::addrTypeName(r.addrType), r.rssi,
+                      r.name.c_str(), isTarget ? "  <-- configured gateway" : "");
+        if (r.mfgData.length()) Serial.printf("      mfg: %s\n", r.mfgData.c_str());
+        if (r.svcData.length()) Serial.printf("      svc: %s\n", r.svcData.c_str());
+    }
+
+    if (networkConfig.autoConnectAddress.length() && !targetSeen) {
+        Serial.printf("\n*** Configured MAC %s is NOT among them ***\n",
+                      networkConfig.autoConnectAddress.c_str());
+        Serial.println("Every unit of a network advertises its own address, so a stored MAC");
+        Serial.println("disappears when that particular unit is switched off. Fix with:");
+        Serial.println("  scan, then connect <n>   (stores the MAC of a unit that is present)");
+    }
     Serial.println();
 }
 
@@ -939,6 +1151,7 @@ class ScanCallbacks : public NimBLEScanCallbacks {
                 dev.address = advertisedDevice->getAddress().toString().c_str();
                 dev.name = advertisedDevice->haveName() ? advertisedDevice->getName().c_str() : "Unknown";
                 dev.rssi = advertisedDevice->getRSSI();
+                dev.addrType = advertisedDevice->getAddress().getType();
 
                 // Check if already in list
                 bool found = false;
@@ -951,11 +1164,12 @@ class ScanCallbacks : public NimBLEScanCallbacks {
 
                 if (!found) {
                     scannedDevices.push_back(dev);
-                    Serial.printf("[%d] %s (%s) RSSI: %d\n",
+                    Serial.printf("[%d] %s (%s) RSSI: %d, addr type: %s\n",
                         scannedDevices.size() - 1,
                         dev.name.c_str(),
                         dev.address.c_str(),
-                        dev.rssi);
+                        dev.rssi,
+                        CasambiScan::addrTypeName(dev.addrType));
                 }
             }
         }
@@ -1210,6 +1424,7 @@ void handleCommand(const String& cmd) {
             Serial.println("\n=== Commands ===");
             Serial.println("help          - Show this help");
             Serial.println("status        - Show detailed status");
+            Serial.println("blediag       - BLE troubleshooting report (config, last connect phase, scan)");
             Serial.println("refresh       - Refresh config from Casambi cloud");
             Serial.println("clearconfig   - Clear configuration (factory reset)");
             Serial.println("restart       - Restart ESP32");
@@ -1276,6 +1491,9 @@ void handleCommand(const String& cmd) {
         }
         else if (cmd == "status") {
             printStatus();
+        }
+        else if (cmd == "blediag") {
+            printBLEDiagnostics();
         }
         else if (cmd == "restart") {
             Serial.println("Restarting...");
@@ -1845,11 +2063,12 @@ void runSetupWizard() {
 
     Serial.printf("\nFound %d Casambi network(s):\n\n", scannedDevices.size());
     for (size_t i = 0; i < scannedDevices.size(); i++) {
-        Serial.printf("[%d] %s (%s) RSSI: %d\n",
+        Serial.printf("[%d] %s (%s) RSSI: %d, addr type: %s\n",
             i,
             scannedDevices[i].name.c_str(),
             scannedDevices[i].address.c_str(),
-            scannedDevices[i].rssi);
+            scannedDevices[i].rssi,
+            CasambiScan::addrTypeName(scannedDevices[i].addrType));
     }
 
     Serial.println("\nSelect network (enter number):");
@@ -2028,6 +2247,10 @@ void connectToDevice(int index) {
             Serial.printf("Saved MAC address for auto-connect: %s\n", dev.address.c_str());
         }
     } else {
-        Serial.println("Connection failed");
+        Serial.printf("Connection failed (phase=%s, reason=%s, rc=%d) - "
+                      "run 'blediag' for details\n",
+                      casambiClient->getLastConnectPhase(),
+                      disconnectReasonName(casambiClient->getLastDisconnectReason()),
+                      casambiClient->getLastConnectError());
     }
 }

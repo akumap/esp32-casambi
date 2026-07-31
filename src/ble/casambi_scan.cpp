@@ -40,6 +40,7 @@ public:
         r.uuid.toLowerCase();
         r.name = dev->haveName() ? String(dev->getName().c_str()) : String("");
         r.rssi = dev->getRSSI();
+        r.addrType = dev->getAddress().getType();
         if (dev->haveManufacturerData()) r.mfgData = toHex(dev->getManufacturerData());
         if (dev->haveServiceData())      r.svcData = toHex(dev->getServiceData());
 
@@ -48,6 +49,16 @@ public:
 };
 
 } // namespace
+
+const char* CasambiScan::addrTypeName(uint8_t type) {
+    switch (type) {
+        case BLE_ADDR_PUBLIC:    return "public";
+        case BLE_ADDR_RANDOM:    return "random";
+        case BLE_ADDR_PUBLIC_ID: return "public-id";
+        case BLE_ADDR_RANDOM_ID: return "random-id";
+        default:                 return "unknown";
+    }
+}
 
 void CasambiScan::run(uint32_t seconds, std::vector<CasambiScanResult>& out) {
     out.clear();
