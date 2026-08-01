@@ -3,10 +3,11 @@
 Status: **Konzept / Entscheidungsvorlage** — noch keine Implementierung.
 **Entscheidung des Auftraggebers: Die Hardware bleibt der M5Stack ATOM Lite
 (ESP32-PICO-D4, 4 MB Flash, kein PSRAM), und ein zweites Gerät kommt nicht in
-Frage.** Damit entfallen alle in diesem Dokument untersuchten Wege zu einer
-Matter-Bridge — die Begründung steht in 4.1/5.7, die Konsequenzen in 14.
+Frage.** Ob darauf eine Matter-Bridge möglich ist, ist **offen und knapp**: Die
+Rechnung mit der korrigierten Heap-Basislinie (~90 KB statt der aus der README
+übernommenen 56 KB) und die zwei noch fehlenden Messungen stehen in 14.
 Abschnitt 15 bewertet die Nachfrage nach IFTTT und nennt die Schnittstellen-
-erweiterung, die auf dieser Hardware tatsächlich trägt.
+erweiterung, die ohne neue Hardware trägt.
 Issue: [#44](https://github.com/akumap/esp32-casambi/issues/44)
 Branch: `claude/matter-bridge-no-config-zmie1w`
 
@@ -58,11 +59,12 @@ Protokoll-Adapter: Matter-Cluster ⇄ vorhandenes Unit-Modell + Kommando-Queue.
 
 ### 2.2 Speicherlage heute
 
-`/api/status` meldet im Normalbetrieb ca. **56 KB freien Heap**, der Tiefstand
-(`min_free_heap`) liegt bei ca. **31 KB** (README, Abschnitt „Status &
-Discovery"). Unter 20 KB startet die Firmware sich selbst neu
-(`HEAP_CRITICAL_THRESHOLD`, `config.h:204`). Das ist der Kern der
-Machbarkeitsfrage in Abschnitt 4.
+Im Normalbetrieb sind **~90 KB Heap frei** (Messung des Maintainers). Die in der
+README als Beispiel gezeigten 56 KB frei / 31 KB Tiefstand sind **kein
+Betriebswert**, sondern illustratives JSON bzw. Werte aus den Überlasttests —
+siehe die Korrektur in 14.1. Unter 20 KB startet die Firmware sich selbst neu
+(`HEAP_CRITICAL_THRESHOLD`, `config.h:204`). Diese Basislinie ist der Kern der
+Machbarkeitsfrage in Abschnitt 4 und 14.2.
 
 ### 2.3 Toolchain
 
@@ -605,27 +607,98 @@ Beide offenen Hardwarefragen sind inzwischen beantwortet:
 | Zweites Gerät (Option B, Companion)? | **nein** |
 | Boardwechsel auf ESP32-S3 mit PSRAM (Option A)? | **nein**, es bleibt beim ATOM Lite (ESP32-PICO-D4, 4 MB Flash, kein PSRAM) |
 
-Damit ist der Sachstand eindeutig: **Auf dieser Hardware ist keine
-Matter-Bridge realisierbar.** Es liegt nicht an fehlender Optimierung —
-Abschnitt 5 hat alle bekannten Hebel durchgerechnet:
+### 14.1 Korrektur der Ausgangszahl
 
-- Konfiguration (5.2) und Zuschnitt auf Leuchten (5.6) bringen zusammen
-  ~80–110 KB, erfordern aber den IDF-Build und reichen ohne PSRAM nicht;
-- der entscheidende Hebel (5.3, Matter-BSS ins externe RAM) setzt PSRAM voraus,
-  das der PICO-D4 nicht hat;
-- dazu kommt die Flash-Grenze: ~1,5 MB CHIP-Code neben der bestehenden Firmware
-  passen nicht in 4 MB (4.2);
-- eine Eigenimplementierung (5.5/Option D) ist nicht verhältnismäßig.
+Die in 2.2 genannten 56 KB freier Heap / 31 KB Tiefstand stammen aus dem
+**Beispiel-JSON der README**, nicht von einem laufenden Gerät. Der Maintainer
+misst im Normalbetrieb **~90 KB frei**; die niedrigen Werte entstanden unter den
+Lasttests (`scripts/stress_test.py`, Profile `medium`/`heavy`).
 
-**Konsequenz für Issue #44:** Das Ziel „Casambi-Geräte erscheinen als
-Matter-Geräte" ist mit unveränderter Hardware und ohne Zusatzgerät nicht
-erreichbar. Das Issue sollte entweder zurückgestellt werden (bis ein
-Hardwarewechsel ansteht) oder mit dieser Begründung geschlossen werden.
-Die verbleibenden Wege zu Google Home & Co. laufen zwingend über ein Gerät im
-Netz, das Matter bzw. die Ökosystem-Anbindung übernimmt — dazu Abschnitt 15.
+Das ist eine relevante Korrektur, und sie geht in die richtige Richtung:
 
-Dieses Dokument bleibt als Analyse bestehen: Sollte die Hardwarefrage später neu
-bewertet werden, ist der Weg samt Zahlen, Stufenplan und Gates hier beschrieben.
+- Für eine Machbarkeitsaussage zählt der **Dauerbetrieb** unter dem realistischen
+  Profil (eine FHEM-WebSocket-Verbindung), nicht der Tiefstand eines
+  Überlasttests. Der Test ist dafür gebaut, den Bruchpunkt zu finden.
+- Der **Footprint der Lasttests lässt sich nicht „einschränken"**, denn er liegt
+  nicht auf dem ESP: `stress_test.py` läuft auf dem PC, im Firmware-Image ist
+  kein Testcode. Was der Test auf dem Gerät verbraucht hat, sind **echte
+  Verbindungen** (AsyncTCP-Puffer, WebSocket-Zustand). „Weniger Testabdruck"
+  hieße also: weniger gleichzeitige Clients zulassen — eine echte
+  Funktionseinschränkung, kein Aufräumen.
+- In den eigenen Puffern ist ohnehin kaum Luft: `WS_MAX_CLIENTS` steht bereits
+  auf **3**, die Broadcast-Queue kostet ~0,5 KB (64 × 8 B), die Kommando-Queue
+  ~0,25 KB. Nennenswert wären nur der AsyncTCP-Taskstack (16 KB Standard) und
+  NimBLE-Feintuning — zusammen grob **10–20 KB**.
+
+### 14.2 Was fehlt — die Rechnung mit der korrigierten Zahl
+
+| Posten | Größenordnung |
+|---|---|
+| **Verfügbar** heute (Dauerbetrieb) | ~90 KB Heap |
+| + eigenes Trimmen (AsyncTCP-Stack, NimBLE) | +10…20 KB |
+| + esp-matter-Optimierungen (5.2), **auf ESP32 abgewertet** | +30…50 KB |
+| **Summe verfügbar (Bestfall)** | **~130–160 KB** |
+| **Bedarf:** statischer Matter-Anteil (DRAM) | ~100…150 KB (geschätzt) |
+| **Bedarf:** CHIP zur Laufzeit (Sessions, Subscriptions, mDNS, CASE-Krypto) | ~40…60 KB |
+| **Summe Bedarf** | **~140–210 KB** |
+
+Zwei Einschränkungen zur Ehrlichkeit dieser Tabelle:
+
+- Espressifs Messwerte (195 KB „Used D/IRAM", 36 KB freier Heap beim Boot)
+  stammen vom **ESP32-C3** mit einheitlichem SRAM. Der klassische ESP32 trennt
+  DRAM und IRAM — die Zahlen sind **nicht 1:1 übertragbar**, die Schätzung des
+  statischen DRAM-Anteils ist genau das: eine Schätzung.
+- Mehrere der wirksamsten Optimierungen aus 5.2 sind **IRAM→Flash-Verlagerungen**
+  (BLE-Controller, FreeRTOS, Ringbuf, SPI-Flash-ROM). Auf dem C3 landet das
+  direkt im nutzbaren Heap; auf dem ESP32 wird dabei **IRAM** frei, das nur
+  eingeschränkt (32-bit-aligned) als Heap taugt. Deshalb oben die Abwertung von
+  ~70–90 KB auf ~30–50 KB.
+
+**Ergebnis:** Bedarf und Angebot liegen im Bestfall etwa gleichauf, im
+wahrscheinlicheren Fall fehlen **~30–70 KB** — plus Reserve gegen
+Fragmentierung, die ein Gerät mit dauerhaftem BLE und Webserver über Wochen
+ansammelt. Dazu kommt eine harte Architekturgrenze: Auf dem klassischen ESP32
+ist die **statisch allozierbare DRAM-Menge auf 160 KB begrenzt** (dokumentierte
+IDF-Limitierung); Matters statischer Anteil müsste sich diesen Deckel mit dem
+teilen, was die Firmware heute schon statisch belegt.
+
+### 14.3 Flash — die zweite, unabhängige Grenze
+
+Sie ist unabhängig davon, wie gut der Heap aussieht: Der ATOM Lite hat **4 MB**,
+`huge_app.csv` gibt der App **3 MB**. Allein CHIPs Licht-Beispiel wiegt 1,48 MB;
+dazu die bestehende Firmware (NimBLE, AsyncWebServer, mbedTLS, LittleFS) und der
+Bridge-Code. Das landet grob bei **2,6–2,9 MB in einer 3-MB-Partition** — auf
+dem Papier möglich, ohne jede Reserve, ohne OTA, und esp-matter möchte
+zusätzlich einen größeren NVS.
+
+### 14.4 Ehrliche Einordnung und die zwei Messungen, die fehlen
+
+Mein früheres „auf dieser Hardware nicht realisierbar" war mit der
+56-KB-Ausgangszahl formuliert und ist damit **zu apodiktisch**. Korrekt ist:
+
+> Machbarkeit **nicht widerlegt, aber auch nicht belegt**. Beide bindenden
+> Grenzen — DRAM und Flash — liegen im Bereich „knapp", und keine davon ist
+> bisher **gemessen**.
+
+Zwei Messungen entscheiden die Frage; die erste kostet Minuten:
+
+1. **Flash und statischer RAM heute** — `pio run -e devkit-v4` gibt am Ende
+   RAM- und Flash-Nutzung aus. Ist die App schon nahe 1,5 MB, ist die Sache mit
+   CHIPs 1,48 MB in 3 MB erledigt, ohne dass über Heap geredet werden muss.
+2. **Realistische Heap-Basislinie** — `/api/status` nach ≥ 24 h Dauerbetrieb
+   unter dem Profil `realistic`: `free_heap`, `min_free_heap` und vor allem
+   **`largest_block`**. Für Matters Initialisierung zählt der größte
+   zusammenhängende Block, nicht die Summe.
+
+Erst danach lohnt der eigentliche Test: ein Core-3.x-Build mit *Arduino als
+IDF-Komponente*, der `esp_matter` nur **linkt und bootet** — er liefert den
+statischen DRAM-Anteil und den freien Heap auf **dieser** Hardware und
+entscheidet die Frage endgültig. Das ist der teure Schritt (Tage bis Wochen,
+4.4), und er sollte erst nach Messung 1 und 2 begonnen werden.
+
+**Konsequenz für Issue #44:** zurückstellen, bis Messung 1 und 2 vorliegen —
+nicht schließen. Bis dahin ist Abschnitt 15 der Weg, der ohne neue Hardware
+Nutzen bringt.
 
 ## 15. Nachgefragt: IFTTT — und was auf dieser Hardware wirklich trägt
 
@@ -690,7 +763,8 @@ Hardwaregrenze, keine Frage der Schnittstellengestaltung.
    über einen Umweg.
 3. Unabhängig davon: **ausgehende Ereignis-Webhooks** als kleines, nützliches
    Feature für lokale Automatisierung.
-4. Issue #44 zurückstellen oder mit der Begründung aus Abschnitt 14 schließen.
+4. Issue #44 zurückstellen, bis die beiden Messungen aus 14.4 vorliegen — nicht
+   schließen.
 
 ## Quellen
 
