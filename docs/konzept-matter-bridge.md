@@ -273,7 +273,9 @@ Das ist der Beleg, dass Matter selbst nicht schwer ist — schwer ist *CHIP*.
 
 Zwei Nutzungsarten, eine sinnvoll, eine nicht:
 
-- **Sinnvoll — Companion-Gerät (neu, Option B in Abschnitt 6):** ein zweiter,
+- **Technisch tragfähig, hier aber ausgeschlossen — Companion-Gerät
+  (Option B in Abschnitt 6; der Auftraggeber will kein zweites Gerät
+  einrichten, siehe Abschnitt 14):** ein zweiter,
   billiger ESP32 mit **Standard-Tasmota** plus einem Berry-Skript, das unsere
   REST-Endpunkte und den WebSocket-Push auf virtuelle Matter-Endpoints
   abbildet. Keine Firmware-Änderung hier, kein Core-3.x-Zwang, kein PC/Server
@@ -292,27 +294,84 @@ Eigenheiten der Ökosysteme. Das sind Mannmonate, und Fehler liegen genau dort,
 wo man sie am schlechtesten debuggt. Tasmota hat es gemacht — und braucht dafür
 eine eigene Sprachumgebung und jahrelange Pflege.
 
-### 5.6 Fazit der Speicherbetrachtung
+### 5.6 Hilft es, dass Casambi nur Leuchten kennt?
+
+Naheliegender Gedanke: Wir brauchen kein Thermostat, keine Türschlösser, keine
+Kameras — nur Dimmer, Farbtemperatur, vereinzelt RGB. Müsste ein derart
+zugeschnittener Matter-Knoten nicht viel kleiner sein?
+
+**Bei CHIP: nein, nur am Rand.** Espressif hat genau diese Optimierung gemessen
+(„ungenutzte Cluster ausschließen"): **−37 KB Flash, −3,7 KB D/IRAM,
++3,9 KB freier Heap**. Flash spart es spürbar, RAM praktisch nicht.
+
+Der Grund: Der Speicher geht nicht ins *Datenmodell*, sondern in die
+**Protokollmaschinerie**, und die ist für eine einzelne Lampe identisch mit der
+für ein Smart Home voller Geräte. Jeder Matter-Knoten muss mitbringen:
+
+- **MRP** (Message Reliability Protocol) über UDP/IPv6 — Retransmits, Acks, Backoff;
+- **TLV**-Kodierung und den Message-Layer;
+- **PASE**-Commissioning mit **SPAKE2+** auf P-256;
+- **CASE**-Sitzungsaufbau (Sigma1/2/3) inklusive X.509-Operationszertifikaten,
+  NOC/ICAC/RCAC-Kettenprüfung, ECDH und Signaturen;
+- **Attestation** (DAC/PAI/CD, CSR-Request) — auch mit Testzertifikaten;
+- das **Interaction Model** mit Read/Write/Invoke **und Subscriptions** inklusive
+  Report-Engine samt Min-/Max-Intervall-Timern (Ökosysteme abonnieren, sie pollen nicht);
+- **Access Control** (ACL-Durchsetzung je Fabric), Fabric-Tabelle, Session-Store;
+- **DNS-SD**-Werbung in zwei Betriebsarten;
+- die Pflicht-Cluster Basic Information, Descriptor, General/Network Commissioning,
+  Operational Credentials, Administrator Commissioning, General Diagnostics.
+
+Erst danach kommen On/Off, Level Control und Color Control — der Teil, den unser
+enges Gerätespektrum überhaupt berührt.
+
+**Was tatsächlich mit dem Zuschnitt skaliert** (und deshalb trotzdem
+mitgenommen werden sollte):
+
+| Stellschraube | Ersparnis | Anmerkung |
+|---|---|---|
+| ungenutzte Cluster ausschließen | ~3,9 KB Heap, 37 KB Flash | gemessen (s. o.) |
+| Endpoint-Slots exakt dimensionieren | ~550 B je Slot | 8 statt 16 Slots ≈ 4,4 KB |
+| Color Control weglassen (Phase 1 nur Dimmer) | einige hundert Byte je Endpoint | der fetteste Licht-Cluster |
+| max. Fabrics senken (Default 5 → 2–3) | einige KB | Zertifikate + ACL-Einträge je Fabric |
+| Subscriptions/Sessions/Exchanges begrenzen | einige KB | Puffer je offener Subscription |
+
+In Summe **~10–20 KB** — willkommen, aber es ist nicht die Größenordnung, die
+über den WROOM-32 entscheidet. Die Untergrenze setzt CHIP, nicht der
+Gerätekatalog.
+
+**Wo der Zuschnitt wirklich zählt:** wenn man CHIP *ersetzt*. Tasmotas 209 KB
+gegenüber ~1,5 MB (5.4) zeigen das Potenzial. Aber Vorsicht bei der
+Schlussfolgerung: Diese Ersparnis stammt aus der schlankeren *Umsetzung der
+Maschinerie*, nicht daraus, dass nur Lampen unterstützt werden. Von einer
+Eigenimplementierung entfielen auf „es sind nur Leuchten" grob 15 % der
+Arbeit — die verbleibenden 85 % (SPAKE2+, CASE, MRP, TLV, IM mit
+Subscriptions, ACL) sind unabhängig vom Gerätespektrum zu leisten. Bewertung
+unverändert 5.5: nicht verhältnismäßig.
+
+### 5.7 Fazit der Speicherbetrachtung
 
 | Weg | zusätzlicher Speicherbedarf hier | Hardware | Aufwand |
 |---|---|---|---|
 | CHIP/esp-matter, Standardkonfig | passt nicht | — | — |
 | CHIP/esp-matter + 5.2 (IDF-Build) | grenzwertig ohne PSRAM | S3/C6 | hoch |
-| CHIP/esp-matter + 5.2 + PSRAM (5.3) | komfortabel | S3 N16R8 (oder WROVER) | hoch |
-| Tasmota-Companion (5.4) | **null** in dieser Firmware | zweiter ESP32 (~5 €) | gering |
+| CHIP/esp-matter + 5.2 + 5.3 + 5.6 | komfortabel | S3 mit PSRAM | hoch |
+| eigene Subset-Implementierung (5.5) | vermutlich ausreichend | vorhandene Hardware | sehr hoch, Monate, riskanteste Fehlerklasse |
+| Tasmota-Companion (5.4) | **null** in dieser Firmware | zweiter ESP32 | gering — **aber zweites Gerät, vom Auftraggeber ausgeschlossen** |
 
 ## 6. Optionen im Überblick
 
 | # | Ansatz | Aufwand | Hardware | „ohne Konfiguration" | Bewertung |
 |---|---|---|---|---|---|
-| **A** | Matter-Bridge **in dieser Firmware**, eigenes Environment, IDF+Arduino-as-Component, PSRAM-Target | hoch (Core-3-Migration + IDF-Build + Bridge) | ESP32-S3 mit PSRAM | ja (QR im Dashboard) | **Zielbild** — ein Gerät, keine Zusatzinfrastruktur |
-| **B** | **Tasmota-Companion**: zweiter ESP32 mit Standard-Tasmota + Berry-Skript auf unser REST/WS-API | gering (Skript, kein Firmware-Risiko) | zweiter ESP32 (~5 €) | fast (Tasmota-Grundeinrichtung + Skript) | **Sofort gangbar**, kein PC nötig — beste Nutzen/Aufwand-Relation kurzfristig |
-| **C** | Externe Bridge-Software (Matterbridge / Home-Assistant-Matter-Hub) auf vorhandenem Server | gering | Dauerläufer-Host | nein | sinnvoll nur, wenn ohnehin ein Server läuft |
+| **A** | Matter-Bridge **in dieser Firmware**, eigenes Environment, IDF+Arduino-as-Component, PSRAM-Target | hoch (Core-3-Migration + IDF-Build + Bridge) | **ein** Gerät — ESP32-S3 mit PSRAM statt des bisherigen Boards | ja (QR im Dashboard) | **Empfohlen** — einziger Weg, der „ein Gerät, ohne Konfiguration" wirklich erfüllt |
+| **B** | **Tasmota-Companion**: zweiter ESP32 mit Standard-Tasmota + Berry-Skript auf unser REST/WS-API | gering (Skript, kein Firmware-Risiko) | zwei Geräte | nein (Flashen, WLAN, Token, Skript) | **ausgeschlossen** — der Auftraggeber will kein zweites Gerät einrichten. Bleibt nur als Rückfallebene dokumentiert, falls A am Gate scheitert |
+| **C** | Externe Bridge-Software (Matterbridge / Home-Assistant-Matter-Hub) auf vorhandenem Server | gering | Dauerläufer-Host | nein | Randnotiz für HA-Nutzer, die den Host ohnehin betreiben |
+| **D** | Eigene Subset-Implementierung von Matter in dieser Firmware, ohne CHIP (5.5, 5.6) | sehr hoch (Monate) | vorhandenes Board | ja | **nicht verhältnismäßig** — der Zuschnitt auf Leuchten spart nur ~15 % der Arbeit |
 
-**Empfehlung:** B zuerst dokumentieren (schafft sofort Nutzen und liefert
-nebenbei Praxiswissen über das Verhalten der Ökosysteme mit IP-Commissioning),
-A als Zielbild mit dem Gate aus Abschnitt 11. C nur als Randnotiz für
-HA-Nutzer.
+**Empfehlung:** A. Wichtig zur Einordnung: A bedeutet **kein zweites Gerät**,
+sondern **ein anderes Board für dasselbe Gerät** — die komplette Firmware
+inklusive Casambi-BLE, REST-API und Matter läuft auf einem einzigen ESP32-S3
+mit PSRAM. Der Einrichtungsaufwand für den Nutzer bleibt der von heute, plus
+QR-Code scannen.
 
 ## 7. Zielarchitektur (Option A)
 
@@ -488,17 +547,20 @@ FHEM-Modul; beides nicht Voraussetzung für Stufe 1–3.
 
 | Stufe | Inhalt | Abschluss-/Abbruchkriterium |
 |---|---|---|
-| **0** | README: Casambi über eine **externe** Bridge am bestehenden REST-API (Option C, für HA-Nutzer) | kostet nichts, hilft sofort |
-| **1** | **Option B**: Berry-Skript für Standard-Tasmota, das REST + WebSocket auf virtuelle Matter-Endpoints abbildet; Mapping nach 7.2, Limit ~8 Endpoints | Lampen in mindestens einem Ökosystem schaltbar; liefert zugleich die Praxisantwort auf die IP-Commissioning-Frage aus 4.3 |
-| **2 — Spike für Option A (zeitbegrenzt)** | Core-3.x + **IDF-mit-Arduino-als-Komponente**, Optimierungssatz aus 5.2, PSRAM-BSS-Verlagerung nach 5.3; Minimal-Matter (2 Endpoints) **gleichzeitig** mit NimBLE-Casambi und Webserver | **Gate:** ≥ 60 KB freier Heap im Betrieb, `min_free_heap` ≥ 30 KB über 24 h, Casambi-Link stabil (insbesondere mit BLE-Code im Flash, 5.2), mDNS-Konflikt geklärt. **Sonst:** Option A verwerfen, bei B bleiben |
-| **3** | Bridge-Kern: `command_queue` herauslösen, Aggregator + Bridged Nodes aus `NetworkConfig`, Zustands-/Kommandopfad, Endpoint-Map | Alle Units bis `MATTER_MAX_BRIDGED_UNITS` schaltbar/dimmbar, Zustand folgt Änderungen aus der Casambi-App |
-| **4** | Zero-Config-UX: QR + Zahlencode im Dashboard, `/api/matter`, Reset, Serial-Kommando | Neues Gerät ohne Doku-Lektüre koppelbar (außer Google-Console-Schritt) |
-| **5** | CCT/RGB/vertical/mehrkanalige Fixtures, optional Gruppen/Szenen | Mapping-Tabelle 7.2 vollständig |
-| **6** | README, FHEM-Hinweise, CI-Environment für den Matter-Build | CI baut den Matter-Build mit |
+| **0** | Beschaffung/Auswahl eines S3-Boards mit PSRAM; Core-3.x-Migration als eigenes Issue starten (4.4) | Firmware baut unverändert auf Core 3.x, `devkit-v4` bleibt grün |
+| **1 — Spike (zeitbegrenzt)** | **IDF-mit-Arduino-als-Komponente**, Optimierungssatz aus 5.2, PSRAM-BSS-Verlagerung nach 5.3, Zuschnitt nach 5.6; Minimal-Matter (2 Endpoints) **gleichzeitig** mit NimBLE-Casambi und Webserver | **Gate:** ≥ 60 KB freier Heap im Betrieb, `min_free_heap` ≥ 30 KB über 24 h, Casambi-Link stabil (insbesondere mit BLE-Code im Flash, 5.2), mDNS-Konflikt geklärt. **Sonst:** Rückfallebene Option B/C, Entscheidung beim Auftraggeber |
+| **2** | Bridge-Kern: `command_queue` herauslösen, Aggregator + Bridged Nodes aus `NetworkConfig`, Zustands-/Kommandopfad, Endpoint-Map | Alle Units bis `MATTER_MAX_BRIDGED_UNITS` schaltbar/dimmbar, Zustand folgt Änderungen aus der Casambi-App |
+| **3** | Zero-Config-UX: QR + Zahlencode im Dashboard, `/api/matter`, Reset, Serial-Kommando | Neues Gerät ohne Doku-Lektüre koppelbar (außer Google-Console-Schritt) |
+| **4** | CCT/RGB/vertical/mehrkanalige Fixtures, optional Gruppen/Szenen | Mapping-Tabelle 7.2 vollständig |
+| **5** | README, FHEM-Hinweise, CI-Environment für den Matter-Build | CI baut den Matter-Build mit |
 
-Die Core-3.x-Migration (4.4) wird als **eigenes Issue** geführt und ist formal
-Voraussetzung für Stufe 2. Stufe 1 ist davon **unabhängig** — das ist ihr
-Hauptvorteil.
+Die Core-3.x-Migration (4.4) ist formal Voraussetzung für Stufe 1 und wird als
+**eigenes Issue** geführt — sie betrifft die gesamte bestehende Firmware und
+darf nicht im Matter-Branch versteckt werden.
+
+Stufe 1 ist bewusst der erste inhaltliche Schritt: Sie kostet wenig, beantwortet
+aber die einzige Frage, an der das ganze Vorhaben hängt — passt Matter neben
+dauerhaftem BLE-Central und AsyncTCP auf **ein** Board?
 
 ## 12. Tests und Abnahme
 
@@ -517,11 +579,11 @@ geänderter Unit-Liste ohne Vertauschen der Zuordnungen.
 
 | Risiko / Frage | Auswirkung | Umgang |
 |---|---|---|
-| RAM reicht auch mit 5.2 + PSRAM nicht | Option A tot | Gate in Stufe 2; Option B bleibt als Rückfallebene bestehen |
+| RAM reicht auch mit 5.2 + PSRAM nicht | Option A tot, und die Ein-Geräte-Vorgabe ist nicht erfüllbar | Gate in Stufe 1 — früh und billig; danach Entscheidung zwischen Rückfallebene (B/C) und Verzicht |
 | BLE-Controller-Code im Flash (5.2) verschlechtert die Casambi-Verbindung | Kernfunktion leidet | im Spike als eigenes Messkriterium führen, notfalls Option abwählen und Heap anders holen |
 | IDF-mit-Arduino-als-Komponente | zweiter Build-Pfad neben PlatformIO-Arduino | strikt auf das Matter-Environment begrenzen; `devkit-v4` bleibt wie er ist |
 | PSRAM auf klassischem ESP32 (WROVER) | Cache-Workaround kostet Performance, kein DMA | S3 bevorzugen |
-| On-network-Commissioning wird von Google Home schlecht unterstützt | Hauptzielökosystem fällt aus | Stufe 1 beantwortet das früh und billig; Tasmota-Praxis spricht dafür (4.3) |
+| On-network-Commissioning wird von Google Home schlecht unterstützt | Hauptzielökosystem fällt aus | im Stufe-1-Spike gegen die realen Apps prüfen, bevor der Bridge-Kern gebaut wird; Tasmota-Praxis spricht dafür (4.3) |
 | CHIP-mDNS kollidiert mit vorhandenem Responder | Gerät unauffindbar | Plattform-mDNS konfigurieren (4.5) |
 | Core-3.x-Migration bringt Regressionen im bestehenden Stack (#18-Stabilität, TLS-Heap) | trifft auch Nicht-Matter-Nutzer | eigenes Issue, eigener Merge, Matter hinter Feature-Flag |
 | Endpoint-Limit < Netzgröße | große Netze nur teilweise gebrückt | dokumentiertes, deterministisches Limit + sichtbare Meldung (4.6) |
@@ -530,15 +592,18 @@ geänderter Unit-Liste ohne Vertauschen der Zuordnungen.
 
 ## 14. Was jetzt zu entscheiden ist
 
-1. **Reihenfolge:** Erst Option B (Tasmota-Companion, Stufe 1) als schneller,
-   risikoarmer Nutzen — oder direkt auf Option A zielen?
-2. **Hardware für Option A:** Ist ein **ESP32-S3 mit PSRAM** (≥ 8 MB Flash) als
-   zusätzliches Matter-Target akzeptabel? Ohne PSRAM oder mit dem WROOM-32 ist A
-   nach heutigem Stand nicht sinnvoll.
-3. **Build-Weg für Option A:** Bereitschaft, das Matter-Environment als
-   *ESP-IDF mit Arduino als Komponente* zu bauen? Ohne das sind die Hebel aus
-   5.2 nicht erreichbar.
-4. **Toolchain:** Core-3.x-Migration als eigenes Issue starten?
+Der Auftraggeber hat Option B (zweites Gerät) ausgeschlossen; damit bleibt A der
+einzige Weg zum Ziel. Offen sind:
+
+1. **Hardware:** Bereitschaft, den Gateway auf ein **ESP32-S3-Board mit PSRAM**
+   (≥ 8 MB Flash) umzuziehen? Das ist **kein zweites Gerät**, sondern ein
+   Boardwechsel für dasselbe. Auf dem WROOM-32 — und auch auf einem S3 *ohne*
+   PSRAM — ist A nach heutigem Stand nicht sinnvoll.
+2. **Build-Weg:** Bereitschaft, das Matter-Environment als *ESP-IDF mit Arduino
+   als Komponente* zu bauen? Ohne das sind die Hebel aus 5.2 nicht erreichbar.
+3. **Toolchain:** Core-3.x-Migration als eigenes Issue starten (Stufe 0)?
+4. **Rückfallebene:** Falls das Gate in Stufe 1 reißt — Option B/C doch
+   dokumentieren, oder Issue #44 dann schließen?
 
 ## Quellen
 
