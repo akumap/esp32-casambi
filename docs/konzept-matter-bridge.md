@@ -19,11 +19,21 @@ Das REST/WebSocket-API und FHEM bleiben unverändert nutzbar; Matter ist ein
 **zweiter, gleichberechtigter Konsument** derselben internen Schnittstellen —
 kein Ersatz und kein Umbau des bestehenden Pfades.
 
-**Ergebnis dieses Konzepts vorweg:** Der Nutzen ist klar, der Weg ist gangbar —
-aber **nicht auf der heutigen Zielhardware** (ESP32-WROOM-32, 320 KB DRAM) und
-**nicht mit der heutigen Toolchain** (Arduino Core 2.x). Beides ist mit Zahlen
-in Abschnitt 4 belegt. Empfohlen wird ein gestufter Weg mit einem
-zeitbegrenzten Spike als Entscheidungstor (Abschnitt 10).
+**Ergebnis dieses Konzepts vorweg:**
+
+1. Mit dem **Standard-Stack** (`esp_matter`/CHIP in Standardkonfiguration, Arduino
+   als Framework) passt Matter **nicht** neben die bestehende Firmware — nicht auf
+   dem ESP32-WROOM-32. Belegt mit Espressifs eigenen Messwerten in Abschnitt 4.1.
+2. Es gibt aber **erhebliche Speicherhebel** (Abschnitt 5): Espressif dokumentiert
+   in Summe ~85–100 KB zusätzlichen freien Heap allein aus Konfiguration, dazu die
+   Verlagerung der Matter-BSS-Segmente in **PSRAM**. Damit wird der On-Device-Weg
+   realistisch — der Preis ist ein **PSRAM-Board** und ein Build als
+   *ESP-IDF mit Arduino als Komponente*.
+3. Es gibt eine **deutlich leichtere Matter-Implementierung** als CHIP: Tasmotas
+   Berry-Umsetzung (~209 KB Flash, minimaler RAM-Bedarf, IP-Commissioning,
+   Bridge-Modus). Sie lässt sich nicht als Bibliothek herauslösen, taugt aber als
+   **Companion-Gerät** — der schnellste Weg zu Google Home ohne jedes Risiko für
+   diese Firmware.
 
 ## 2. Ausgangslage (Ist-Zustand)
 
@@ -83,10 +93,10 @@ Endpoint-Slot**, Standardwert 16 Slots.
 
 ## 4. Randbedingungen — die harten Grenzen
 
-### 4.1 RAM: der eigentliche Showstopper auf dem ESP32-WROOM-32
+### 4.1 RAM: warum der Standard-Stack auf dem WROOM-32 nicht passt
 
 Espressifs eigene Messwerte für das **Licht-Beispiel** (nur Matter, sonst
-nichts) auf einem ESP32-C3, Standardkonfiguration:
+nichts) auf einem ESP32-C3, **Standardkonfiguration**:
 
 | Größe | Wert |
 |---|---|
@@ -104,17 +114,13 @@ dauerhaft. Für diese Firmware gilt also eher die „Boot"-Zeile: ~36 KB frei be
 einer Anwendung, die *nur* Matter macht. Unsere Firmware braucht daneben
 gleichzeitig NimBLE als Central, WiFi-STA, AsyncTCP/AsyncWebServer mit
 WebSocket-Clients, LittleFS und den Event-Log — und hat damit heute schon nur
-56 KB frei.
+56 KB frei (2.2).
 
-**Fazit:** Matter + Casambi-BLE + Webserver passen auf einem klassischen ESP32
-mit 320 KB DRAM **nicht** zusammen. Ein Build für `devkit-v4` ist kein
-realistisches Ziel.
-
-**Konsequenz:** Der Matter-Build braucht ein RAM-stärkeres Target —
-**ESP32-S3** (512 KB SRAM, optional PSRAM) als Primärziel, **ESP32-C6** als
-Alternative. Der bestehende `devkit-v4`-Build bleibt **unverändert und ohne
-Matter**; Matter wird ein eigenes Environment hinter einem Feature-Flag
-(`-DFEATURE_MATTER`), damit die heutige Zielhardware kein Risiko erbt.
+Dominant ist dabei **nicht** der Heap-Bedarf zur Laufzeit, sondern der
+**statische Anteil**: ~195 KB D/IRAM von 320 KB, bevor die erste Zeile eigener
+Code läuft. Genau dort setzen die Hebel in Abschnitt 5 an — deshalb ist die
+Aussage „passt nicht" eine Aussage über die *Standardkonfiguration*, nicht über
+Matter an sich.
 
 ### 4.2 Flash und Partitionen
 
@@ -124,7 +130,7 @@ Matter allein bringt ~1,5 MB Code mit. Zusammen mit der bestehenden Firmware
 **8 MB oder 16 MB Flash** und eigener Partitionstabelle (größerer NVS für
 Fabrics/Attribute). Für die Attestation wird die in `esp_matter` mitgelieferte
 **Test-DAC** verwendet (keine `fctry`-Partition, kein Fertigungsprozess) —
-Konsequenzen dazu in 7.5.
+Konsequenzen dazu in 8.5.
 
 ### 4.3 BLE-Koexistenz: kein BLE-Commissioning
 
@@ -138,15 +144,13 @@ lässt.
 WLAN (die Casambi-Provisionierung erfolgt vorher, siehe
 `konzept-provisionierung.md`) und braucht keine WLAN-Zugangsdaten mehr vom
 Commissioner. Es wirbt also ausschließlich per DNS-SD (`_matterc._udp`) im
-LAN. Das passt inhaltlich perfekt zum Ziel „ohne Konfiguration": Der
-BLE-Commissioning-Pfad existiert nur, um WLAN-Credentials zu übertragen — was
-hier schon erledigt ist.
+LAN.
 
-**Offener Punkt (Spike):** Nicht jedes Ökosystem-App findet on-network-Geräte
-gleich zuverlässig. Muss in Stufe 1 gegen Apple Home, Google Home und Home
-Assistant real geprüft werden. Fallback wäre BLE-Advertising nur bei
-getrennter Casambi-Verbindung — deutlich unangenehmer, deshalb erst, wenn
-IP-only nachweislich scheitert.
+Diese Entscheidung ist **praktisch erprobt**: Tasmota commissioniert seine
+Matter-Geräte ausschließlich über IP/DNS-SD, mit derselben Begründung („BLE
+dient vor allem der WLAN-Übergabe — die ist bei uns schon erledigt"). Das
+senkt das Risiko dieses Punktes deutlich, ersetzt aber nicht die Prüfung
+gegen die konkreten Ökosystem-Apps in Stufe 1.
 
 ### 4.4 Toolchain-Migration auf Arduino Core 3.x
 
@@ -178,25 +182,141 @@ unauffindbar, obwohl es läuft.
 
 `CLOUD_MAX_UNITS` ist 250 (`config.h:298`), CHIPs Bridge-Beispiel bringt
 standardmäßig 16 dynamische Endpoint-Slots mit (≈550 B DRAM je Slot). Ein
-Limit ist also unvermeidbar. Vorschlag: `MATTER_MAX_BRIDGED_UNITS` (Default 16,
-im Spike gegen den gemessenen Heap kalibriert), Auswahl **deterministisch nach
-`deviceId` aufsteigend**, Überzählige werden im Dashboard und im Event-Log
-sichtbar gemeldet — nicht stillschweigend verschluckt.
+Limit ist also unvermeidbar — Tasmota empfiehlt für seinen Bridge-Modus aus
+Performancegründen sogar nur ~8 gebrückte Endpoints. Vorschlag:
+`MATTER_MAX_BRIDGED_UNITS` (Default 16, im Spike gegen den gemessenen Heap
+kalibriert), Auswahl **deterministisch nach `deviceId` aufsteigend**,
+Überzählige werden im Dashboard und im Event-Log sichtbar gemeldet — nicht
+stillschweigend verschluckt.
 
-## 5. Optionen
+## 5. Speicher: Hebel und leichtere Grundlagen
+
+Die Frage „geht es nicht sparsamer?" hat vier belastbare Antworten, in
+steigender Wirkung.
+
+### 5.1 Am eigenen Stack sparen (≈ 10–25 KB, hilfreich, nicht entscheidend)
+
+Begrenzung gleichzeitiger WebSocket-Clients, kleinere AsyncTCP-Queues und
+-Stacks, kleinere Event-Log-Puffer, NimBLE-Feintuning (nur Central-Rolle, eine
+Verbindung), `WS_HELLO_MAX_UNITS` senken. Alles machbar, aber es verschiebt die
+Größenordnung nicht: gegen ~195 KB statisches Matter-BSS sind 20 KB Rundung.
+
+### 5.2 esp-matter konfigurieren (Espressifs eigene Zahlen)
+
+Espressif dokumentiert die folgenden Einsparungen (gemessen an C3/H2,
+Licht-Beispiel):
+
+| Option | Flash | D/IRAM | freier Heap (Boot) | für uns nutzbar? |
+|---|---|---|---|---|
+| `CONFIG_ENABLE_CHIP_SHELL=n` | −55…−67 KB | −0,8…−2,2 KB | +9,9…+10,5 KB | ja |
+| BLE-Controller-Code in Flash (`CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY`) | — | −19,4…−19,9 KB | +19,8…+23,1 KB | ja, aber Latenz-/Durchsatzkosten am BLE — **im Spike gegen die Casambi-Stabilität messen** |
+| FreeRTOS-Funktionen in Flash | — | −9,1…−10,3 KB | +9,1…+9,5 KB | ja (Performance-Trade-off) |
+| SPI-Flash-ROM-Implementierung | — | −9,5…−12,7 KB | +8,3…+12,6 KB | ja |
+| Log-Event-Puffer auf 256 B | — | −5,4 KB | +6,5…+7,0 KB | ja |
+| Endpoint-/Device-Type-Count senken | — | −6,6 KB | +6,0…+6,8 KB | teilweise — wir *brauchen* Endpoints (≈550 B je Slot) |
+| Ringbuf-Funktionen in Flash | — | −4,7 KB | +4,0…+4,6 KB | ja |
+| ungenutzte Cluster ausschließen | −37 KB | −3,7 KB | +3,9 KB | ja |
+| Task-Stacks verkleinern | — | — | +3,3…+3,9 KB | vorsichtig, wir haben eigene Tasks |
+| Newlib-Nano-Formatierung | −47 KB | — | +1,9…+2,4 KB | ja |
+| BLE-Optimierungen (max. Verbindungen, Rollen abschalten) | −23 KB | −1,7…−2,2 KB | +9,8…+19,1 KB | **nur teilweise** — die Central-Rolle ist unsere Casambi-Verbindung und darf nicht weg |
+
+In Summe liegen realistisch **~70–90 KB** zusätzlicher freier Heap drin — die
+36-KB-Zeile aus 4.1 wird damit zu ~110 KB. Das ist die Größenordnung, in der
+unsere Firmware daneben existieren kann.
+
+**Der Haken:** Das sind **IDF-Kconfig-Optionen**. Im PlatformIO-Arduino-Framework
+kommt der Core als *vorkompilierte* Bibliothek mit fixer `sdkconfig` — diese
+Schalter sind dort schlicht nicht erreichbar. Wer sie nutzen will, muss den
+Matter-Build als **ESP-IDF mit Arduino als Komponente** fahren. Das ist ein gut
+dokumentierter, aber deutlich größerer Toolchain-Schritt als die reine
+Core-3.x-Migration aus 4.4 — und er beträfe nur das Matter-Environment, nicht
+den `devkit-v4`-Build.
+
+### 5.3 PSRAM — der größte Einzelhebel
+
+Espressif beschreibt explizit, die **BSS-Segmente von `libCHIP.a` und
+`libesp_matter.a` per Linker-Fragment in externes RAM zu verlagern**
+(`CONFIG_ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY`). Damit verschwindet genau der
+Posten, der in 4.1 dominiert — der statische Anteil — aus dem internen RAM.
+
+Kandidaten:
+
+| Modul | RAM | Bewertung |
+|---|---|---|
+| **ESP32-WROVER** (klassischer ESP32 + 4/8 MB PSRAM) | 320 KB intern + PSRAM | Nächster Verwandter der heutigen Hardware; `platformio.ini` hat die PSRAM-Flags bereits (auskommentiert) vorbereitet. Aber: Cache-Workaround (`-mfix-esp32-psram-cache-issue`) kostet Performance, PSRAM ist nicht DMA-fähig, WLAN-/BLE-Puffer müssen intern bleiben |
+| **ESP32-S3 N16R8** | 512 KB intern + 8 MB PSRAM | Sauberer (Octal-PSRAM, kein Cache-Bug), mehr internes RAM, reichlich Flash — **empfohlenes Matter-Target** |
+| ESP32-C6 (ohne PSRAM) | 512 KB intern | denkbar, aber ohne den Hebel aus 5.3 knapper als S3+PSRAM |
+
+Mit 5.2 + 5.3 zusammen ist der On-Device-Weg nach heutigem Kenntnisstand
+**komfortabel machbar**; das Stufe-1-Gate (Abschnitt 11) bleibt trotzdem
+bestehen, weil unsere Kombination aus dauerhaftem BLE-Central, AsyncTCP und
+Matter in keiner Espressif-Messung vorkommt.
+
+### 5.4 Eine leichtere Implementierung: Tasmotas Berry-Matter
+
+Tasmota hat Matter **komplett neu in Berry implementiert**, statt CHIP zu
+verwenden:
+
+- **~209 KB Flash** statt ~1,5 MB — laut Autor „sehr wenig im Vergleich zu
+  connectedhomeip";
+- **sehr geringer RAM-Bedarf**, weil der Berry-Code als Bytecode *im Flash*
+  liegt („solidified") und nicht ins RAM geladen wird;
+- **IP-Commissioning** über DNS-SD, kein BLE (siehe 4.3);
+- Krypto über BearSSL statt mbedTLS;
+- läuft auf **allen ESP32-Varianten**, in den Standard-`tasmota32`-Builds
+  enthalten;
+- hat einen **Bridge-Modus** mit „virtuellen Endpoints", die per Berry-Code
+  getrieben werden — also frei an eine fremde HTTP-Schnittstelle koppelbar.
+  Empfohlenes Limit: ~8 gebrückte Endpoints.
+
+Das ist der Beleg, dass Matter selbst nicht schwer ist — schwer ist *CHIP*.
+
+Zwei Nutzungsarten, eine sinnvoll, eine nicht:
+
+- **Sinnvoll — Companion-Gerät (neu, Option B in Abschnitt 6):** ein zweiter,
+  billiger ESP32 mit **Standard-Tasmota** plus einem Berry-Skript, das unsere
+  REST-Endpunkte und den WebSocket-Push auf virtuelle Matter-Endpoints
+  abbildet. Keine Firmware-Änderung hier, kein Core-3.x-Zwang, kein PC/Server
+  nötig, Hardwarekosten im einstelligen Euro-Bereich. Der Preis: ein zweites
+  Gerät, ein zweiter Update-Pfad, und das Berry-Skript ist zu pflegen.
+- **Nicht sinnvoll — Herauslösen:** Tasmotas Matter hängt an der Berry-VM und
+  an Tasmota-Infrastruktur. „Nur die Matter-Klassen übernehmen" hieße, Berry
+  und halb Tasmota in diese Firmware zu ziehen. Wer das will, betreibt in
+  Wahrheit Tasmota.
+
+### 5.5 Eigene Minimal-Implementierung — ausdrücklich nicht empfohlen
+
+Reizvoll, aber der Aufwand liegt nicht im Datenmodell, sondern in PASE/SPAKE2+,
+CASE, Sigma-Handshake, TLV, Interaction Model, Subscriptions, DNS-SD und den
+Eigenheiten der Ökosysteme. Das sind Mannmonate, und Fehler liegen genau dort,
+wo man sie am schlechtesten debuggt. Tasmota hat es gemacht — und braucht dafür
+eine eigene Sprachumgebung und jahrelange Pflege.
+
+### 5.6 Fazit der Speicherbetrachtung
+
+| Weg | zusätzlicher Speicherbedarf hier | Hardware | Aufwand |
+|---|---|---|---|
+| CHIP/esp-matter, Standardkonfig | passt nicht | — | — |
+| CHIP/esp-matter + 5.2 (IDF-Build) | grenzwertig ohne PSRAM | S3/C6 | hoch |
+| CHIP/esp-matter + 5.2 + PSRAM (5.3) | komfortabel | S3 N16R8 (oder WROVER) | hoch |
+| Tasmota-Companion (5.4) | **null** in dieser Firmware | zweiter ESP32 (~5 €) | gering |
+
+## 6. Optionen im Überblick
 
 | # | Ansatz | Aufwand | Hardware | „ohne Konfiguration" | Bewertung |
 |---|---|---|---|---|---|
-| **A** | Matter-Bridge **in dieser Firmware**, eigenes Environment für S3/C6 | hoch (Core-3-Migration + Bridge) | neue Platine nötig, `devkit-v4` bleibt ohne Matter | ja (QR im Dashboard) | **Empfohlen** als Zielbild — ein Gerät, keine Zusatzinfrastruktur |
-| **B** | Zweiter MCU als Matter-Companion, spricht das REST/WS-API | mittel | zwei Boards | teilweise (Companion muss ESP finden) | Verschiebt das RAM-Problem sauber, verdoppelt aber Hardware und Update-Pfad |
-| **C** | Externe Bridge-Software (Matterbridge / Home-Assistant-Matter-Hub) auf vorhandenem Server, nutzt das REST/WS-API | gering (Plugin/Adapter, kein Firmware-Risiko) | Dauerläufer-Host nötig | nein (Host + Plugin einrichten) | **Sofort verfügbar**, gute Zwischenlösung — als dokumentierter Weg, nicht als Ersatz für A |
+| **A** | Matter-Bridge **in dieser Firmware**, eigenes Environment, IDF+Arduino-as-Component, PSRAM-Target | hoch (Core-3-Migration + IDF-Build + Bridge) | ESP32-S3 mit PSRAM | ja (QR im Dashboard) | **Zielbild** — ein Gerät, keine Zusatzinfrastruktur |
+| **B** | **Tasmota-Companion**: zweiter ESP32 mit Standard-Tasmota + Berry-Skript auf unser REST/WS-API | gering (Skript, kein Firmware-Risiko) | zweiter ESP32 (~5 €) | fast (Tasmota-Grundeinrichtung + Skript) | **Sofort gangbar**, kein PC nötig — beste Nutzen/Aufwand-Relation kurzfristig |
+| **C** | Externe Bridge-Software (Matterbridge / Home-Assistant-Matter-Hub) auf vorhandenem Server | gering | Dauerläufer-Host | nein | sinnvoll nur, wenn ohnehin ein Server läuft |
 
-**Empfehlung:** A als Zielbild, C sofort dokumentieren, B nur, falls der Spike
-in Stufe 1 auch auf S3 scheitert.
+**Empfehlung:** B zuerst dokumentieren (schafft sofort Nutzen und liefert
+nebenbei Praxiswissen über das Verhalten der Ökosysteme mit IP-Commissioning),
+A als Zielbild mit dem Gate aus Abschnitt 11. C nur als Randnotiz für
+HA-Nutzer.
 
-## 6. Zielarchitektur (Option A)
+## 7. Zielarchitektur (Option A)
 
-### 6.1 Modulschnitt
+### 7.1 Modulschnitt
 
 ```
 src/control/command_queue.h   (neu)  BleCommand + Queue + Executor, aus webserver.* herausgelöst
@@ -212,7 +332,11 @@ loop-Task (`webserver.cpp:149` wandert mit). Damit bleibt die BLE-Serialisierung
 unverändert, und Matter erbt automatisch Backpressure, Fehlerprotokollierung und
 die vorhandenen Sicherheits-/Timeout-Eigenschaften.
 
-### 6.2 Abbildung Casambi → Matter
+Der Schnitt lohnt sich unabhängig von Matter — er ist auch die Voraussetzung
+dafür, dass ein **Companion (Option B)** dieselbe Semantik sieht wie das
+Dashboard.
+
+### 7.2 Abbildung Casambi → Matter
 
 Getrieben von `controls[]` / `controlName()` (`cloud/network_config.h`), also
 **ohne** Fixture-Sonderfälle:
@@ -235,7 +359,10 @@ normalisierter Casambi-Wert existiert bereits (`cloud/state_codec.h`).
 gebrückten Endpoints auf `Reachable=false` gesetzt (Signal an die Ökosysteme,
 statt still veraltete Werte zu zeigen).
 
-### 6.3 Stabile Endpoint-IDs
+Diese Tabelle gilt **auch für Option B** — sie ist die fachliche Abbildung, nicht
+die technische Umsetzung.
+
+### 7.3 Stabile Endpoint-IDs
 
 Ökosysteme hängen Raumzuordnung, Namen und Automationen an der **Endpoint-ID**.
 Wandern IDs nach einem Cloud-Refresh, vertauschen sich beim Nutzer die Lampen.
@@ -247,7 +374,7 @@ Deshalb: `endpoint_map` als kleine LittleFS-Datei
 - verschwundene Units behalten ihren Slot zunächst und werden `Reachable=false`;
   Freigabe nur über einen expliziten Matter-Reset.
 
-### 6.4 Zustandsfluss
+### 7.4 Zustandsfluss
 
 ```
 BLE-Notify-Task → (bestehender UnitStateCallback) → Event-Queue
@@ -259,7 +386,7 @@ Kein `esp_matter`-Aufruf aus dem BLE-Task. Attribut-Updates werden entprellt
 (nur bei tatsächlicher Änderung), damit ein Dimm-Rampen-Broadcast aus dem Mesh
 keine Update-Flut in den Fabrics auslöst.
 
-### 6.5 Kommandofluss
+### 7.5 Kommandofluss
 
 ```
 Matter-Task (CHIP) → command_queue (BleCommand) → loop-Task → CasambiClient
@@ -271,15 +398,15 @@ Deshalb **Coalescing pro Unit** („letzter Wert gewinnt", ~150 ms), umgesetzt i
 `command_queue`, sodass **auch das REST-API davon profitiert**. Mehrkanalige
 Änderungen gehen als ein `setUnitState` (`casambi_client.h:208`) raus.
 
-### 6.6 Verhältnis zu FHEM/WebSocket
+### 7.6 Verhältnis zu FHEM/WebSocket
 
 Da alle Wege durch dieselbe Queue laufen, sieht FHEM jede über Matter ausgelöste
 Änderung ganz normal als `unit_state`-Push — und umgekehrt. Es gibt keinen
 zweiten „Wahrheitsstand" und keine Sonderfälle im FHEM-Modul.
 
-## 7. „Ohne Konfiguration" — konkret
+## 8. „Ohne Konfiguration" — konkret
 
-### 7.1 Pairing-Daten erzeugt das Gerät selbst
+### 8.1 Pairing-Daten erzeugt das Gerät selbst
 
 Discriminator und Setup-Passcode werden **beim ersten Matter-Start einmalig
 zufällig erzeugt** (`esp_random()`), in NVS abgelegt und danach unverändert
@@ -291,7 +418,7 @@ Funkreichweite erratbar und würde das Commissioning-Geheimnis entwerten. Die
 Verbotswerte des Standards (`00000000`, `11111111`, …, `12345678`, `87654321`)
 werden beim Erzeugen ausgeschlossen.
 
-### 7.2 Anzeige
+### 8.2 Anzeige
 
 - **Dashboard** (`/`): Kachel „Matter" mit QR-Code, 11-stelligem Handeingabe-Code
   und Fabric-Status. QR wird clientseitig aus dem Payload-String gerendert
@@ -305,7 +432,7 @@ werden beim Erzeugen ausgeschlossen.
 Der Pairing-Code ist ein **Geheimnis** und wird wie der API-Token behandelt: nur
 über authentifizierte Endpunkte, nie in `/api/info` (das bewusst offen ist).
 
-### 7.3 Commissioning-Fenster
+### 8.3 Commissioning-Fenster
 
 Solange keine Fabric existiert, ist das Fenster automatisch offen (Basic
 Commissioning Mode) — der Nutzer muss nichts drücken. Nach dem ersten Beitritt
@@ -313,13 +440,13 @@ schließt es; für ein zweites Ökosystem (Multi-Admin) gibt es einen Knopf im
 Dashboard bzw. `POST /api/matter/commission-window`, der es befristet wieder
 öffnet.
 
-### 7.4 Reset
+### 8.4 Reset
 
 `POST /api/matter/reset` (und `matter reset` seriell) entfernt alle Fabrics und
 erzeugt neue Pairing-Daten. `clearconfig` löscht zusätzlich die Endpoint-Map,
 damit ein frisch provisioniertes Gerät keine Altzuordnungen erbt.
 
-### 7.5 Wo „ohne Konfiguration" endet — ehrlich benannt
+### 8.5 Wo „ohne Konfiguration" endet — ehrlich benannt
 
 Ohne Matter-Zertifizierung (CSA-Mitgliedschaft, Test-Häuser, VID) läuft das
 Gerät mit einer **Test-VID/PID** (`0xFFF1`/…). Folgen:
@@ -335,10 +462,10 @@ Gerät mit einer **Test-VID/PID** (`0xFFF1`/…). Folgen:
   „nicht zertifiziert"-Warnung, ohne Entwicklerkonto.
 - **Home Assistant** koppelt ohne Einschränkung.
 
-Diese Asymmetrie ist der wichtigste Erwartungspunkt gegenüber dem Issue-Titel
-„… i.e., Google Home".
+Das gilt **unabhängig vom gewählten Weg** — auch ein Tasmota-Companion (Option B)
+ist ein nicht zertifiziertes Matter-Gerät.
 
-## 8. Auswirkungen auf die versionierte Schnittstelle
+## 9. Auswirkungen auf die versionierte Schnittstelle
 
 Neue Endpunkte (`GET /api/matter`, `POST /api/matter/reset`,
 `POST /api/matter/commission-window`) sind rein additiv → `FHEM_API_VERSION_MINOR`
@@ -346,31 +473,34 @@ Neue Endpunkte (`GET /api/matter`, `POST /api/matter/reset`,
 Optional später ein `matter`-Feld in der WebSocket-Hello und ein Reading im
 FHEM-Modul; beides nicht Voraussetzung für Stufe 1–3.
 
-## 9. Sicherheitsbetrachtung
+## 10. Sicherheitsbetrachtung
 
 | Punkt | Bewertung |
 |---|---|
-| Pairing-Passcode | zufällig, persistent, nicht aus öffentlichen Werten ableitbar (7.1) |
+| Pairing-Passcode | zufällig, persistent, nicht aus öffentlichen Werten ableitbar (8.1) |
 | Sichtbarkeit des Codes | nur über authentifizierte API/Dashboard-Sitzung |
 | Angriffsfläche | Matter-Knoten lauscht dauerhaft im LAN — neue Netzwerkoberfläche, die es vorher nicht gab; im Spike mit begrenzter Fabric-Zahl testen |
 | Fabric-Verwaltung | jede gekoppelte Fabric darf alle gebrückten Lampen schalten — dieselbe Vertrauensstufe wie ein API-Token, in der README benennen |
-| Test-Attestation | signalisiert Ökosystemen „nicht zertifiziert" — bewusst akzeptiert (7.5) |
+| Test-Attestation | signalisiert Ökosystemen „nicht zertifiziert" — bewusst akzeptiert (8.5) |
+| Companion (Option B) | braucht einen API-Token dieser Firmware; das Token liegt dann im Klartext auf dem Tasmota-Gerät — bei der Empfehlung mitschreiben |
 
-## 10. Umsetzung in Stufen (mit Abbruchkriterien)
+## 11. Umsetzung in Stufen (mit Abbruchkriterien)
 
 | Stufe | Inhalt | Abschluss-/Abbruchkriterium |
 |---|---|---|
-| **0** | README-Abschnitt: Casambi über eine **externe** Matter-Bridge (Option C) am bestehenden REST-API | Nutzer kann heute Google Home anbinden, ohne dass Firmware geändert wird |
-| **1 — Spike (zeitbegrenzt)** | Core-3.x-Plattform + Environment `matter-s3`; Minimal-Matter (2 Endpoints) **gleichzeitig** mit NimBLE-Casambi-Verbindung und Webserver; IP-only Commissioning gegen Apple Home, Google Home, HA; mDNS-Konflikt prüfen | **Gate:** ≥ 60 KB freier Heap im Betrieb, `min_free_heap` ≥ 30 KB über 24 h, Casambi-Link stabil, mind. ein Ökosystem koppelt on-network. **Sonst:** Option A verwerfen, auf B oder C umschwenken |
-| **2** | Bridge-Kern: `command_queue` herauslösen, Aggregator + Bridged Nodes aus `NetworkConfig`, Zustands- und Kommandopfad, Endpoint-Map | Alle Units bis `MATTER_MAX_BRIDGED_UNITS` schaltbar/dimmbar, Zustand folgt Änderungen aus der Casambi-App |
-| **3** | Zero-Config-UX: QR + Zahlencode im Dashboard, `/api/matter`, Reset, Serial-Kommando | Neues Gerät ist ohne Doku-Lektüre koppelbar (außer Google-Console-Schritt) |
-| **4** | CCT/RGB/vertical/mehrkanalige Fixtures, optional Gruppen/Szenen | Mapping-Tabelle 6.2 vollständig |
-| **5** | README, FHEM-Hinweise, CI-Environment `matter-s3` | CI baut den Matter-Build mit |
+| **0** | README: Casambi über eine **externe** Bridge am bestehenden REST-API (Option C, für HA-Nutzer) | kostet nichts, hilft sofort |
+| **1** | **Option B**: Berry-Skript für Standard-Tasmota, das REST + WebSocket auf virtuelle Matter-Endpoints abbildet; Mapping nach 7.2, Limit ~8 Endpoints | Lampen in mindestens einem Ökosystem schaltbar; liefert zugleich die Praxisantwort auf die IP-Commissioning-Frage aus 4.3 |
+| **2 — Spike für Option A (zeitbegrenzt)** | Core-3.x + **IDF-mit-Arduino-als-Komponente**, Optimierungssatz aus 5.2, PSRAM-BSS-Verlagerung nach 5.3; Minimal-Matter (2 Endpoints) **gleichzeitig** mit NimBLE-Casambi und Webserver | **Gate:** ≥ 60 KB freier Heap im Betrieb, `min_free_heap` ≥ 30 KB über 24 h, Casambi-Link stabil (insbesondere mit BLE-Code im Flash, 5.2), mDNS-Konflikt geklärt. **Sonst:** Option A verwerfen, bei B bleiben |
+| **3** | Bridge-Kern: `command_queue` herauslösen, Aggregator + Bridged Nodes aus `NetworkConfig`, Zustands-/Kommandopfad, Endpoint-Map | Alle Units bis `MATTER_MAX_BRIDGED_UNITS` schaltbar/dimmbar, Zustand folgt Änderungen aus der Casambi-App |
+| **4** | Zero-Config-UX: QR + Zahlencode im Dashboard, `/api/matter`, Reset, Serial-Kommando | Neues Gerät ohne Doku-Lektüre koppelbar (außer Google-Console-Schritt) |
+| **5** | CCT/RGB/vertical/mehrkanalige Fixtures, optional Gruppen/Szenen | Mapping-Tabelle 7.2 vollständig |
+| **6** | README, FHEM-Hinweise, CI-Environment für den Matter-Build | CI baut den Matter-Build mit |
 
-Die Core-3.x-Migration wird als **eigenes Issue** geführt (4.4) und ist formal
-Voraussetzung für Stufe 1.
+Die Core-3.x-Migration (4.4) wird als **eigenes Issue** geführt und ist formal
+Voraussetzung für Stufe 2. Stufe 1 ist davon **unabhängig** — das ist ihr
+Hauptvorteil.
 
-## 11. Tests und Abnahme
+## 12. Tests und Abnahme
 
 **Host-Tests** (`pio test -e native`, Muster wie `test/test_state_codec`):
 Level-Umrechnung `1..254 ⇄ 0..255` inkl. Randwerte, Mireds⇄Kelvin mit Klemmung,
@@ -383,37 +513,51 @@ Passcode-Generator (Verbotsliste).
 bei BLE-Abriss (`Reachable=false`, Erholung); 24-h-Heap-Lauf; Cloud-Refresh mit
 geänderter Unit-Liste ohne Vertauschen der Zuordnungen.
 
-## 12. Risiken und offene Fragen
+## 13. Risiken und offene Fragen
 
 | Risiko / Frage | Auswirkung | Umgang |
 |---|---|---|
-| RAM reicht auch auf S3 nicht | Option A tot | Stufe-1-Gate vor jeder weiteren Investition |
-| On-network-Commissioning wird von Google Home schlecht unterstützt | Hauptzielökosystem fällt aus | im Spike explizit prüfen; Notnagel: BLE-Advertising bei getrenntem Casambi-Link |
+| RAM reicht auch mit 5.2 + PSRAM nicht | Option A tot | Gate in Stufe 2; Option B bleibt als Rückfallebene bestehen |
+| BLE-Controller-Code im Flash (5.2) verschlechtert die Casambi-Verbindung | Kernfunktion leidet | im Spike als eigenes Messkriterium führen, notfalls Option abwählen und Heap anders holen |
+| IDF-mit-Arduino-als-Komponente | zweiter Build-Pfad neben PlatformIO-Arduino | strikt auf das Matter-Environment begrenzen; `devkit-v4` bleibt wie er ist |
+| PSRAM auf klassischem ESP32 (WROVER) | Cache-Workaround kostet Performance, kein DMA | S3 bevorzugen |
+| On-network-Commissioning wird von Google Home schlecht unterstützt | Hauptzielökosystem fällt aus | Stufe 1 beantwortet das früh und billig; Tasmota-Praxis spricht dafür (4.3) |
 | CHIP-mDNS kollidiert mit vorhandenem Responder | Gerät unauffindbar | Plattform-mDNS konfigurieren (4.5) |
 | Core-3.x-Migration bringt Regressionen im bestehenden Stack (#18-Stabilität, TLS-Heap) | trifft auch Nicht-Matter-Nutzer | eigenes Issue, eigener Merge, Matter hinter Feature-Flag |
 | Endpoint-Limit < Netzgröße | große Netze nur teilweise gebrückt | dokumentiertes, deterministisches Limit + sichtbare Meldung (4.6) |
 | Zwei Bauziele (mit/ohne Matter) | Pflegeaufwand, CI-Zeit | Matter strikt in `src/matter/` kapseln, Rest per Flag unberührt |
-| Test-VID/PID vs. Zertifizierung | „nicht zertifiziert"-Hürden je Ökosystem | in README benennen (7.5); Zertifizierung explizit außerhalb des Umfangs |
+| Test-VID/PID vs. Zertifizierung | „nicht zertifiziert"-Hürden je Ökosystem | in README benennen (8.5); Zertifizierung explizit außerhalb des Umfangs |
 
-## 13. Was jetzt zu entscheiden ist
+## 14. Was jetzt zu entscheiden ist
 
-1. **Hardware:** Ist ein ESP32-S3-Board (≥ 8 MB Flash) als *zusätzliches*
-   Matter-Target akzeptabel? Ohne das ist Option A nicht umsetzbar.
-2. **Toolchain:** Core-3.x-Migration als eigenes Issue starten?
-3. **Reichweite Stufe 1:** Spike als reine Machbarkeitsmessung (empfohlen) oder
-   direkt mit Bridge-Kern?
-4. **Zwischenlösung:** Soll Stufe 0 (externe Bridge am REST-API) sofort
-   dokumentiert werden, unabhängig vom Rest?
+1. **Reihenfolge:** Erst Option B (Tasmota-Companion, Stufe 1) als schneller,
+   risikoarmer Nutzen — oder direkt auf Option A zielen?
+2. **Hardware für Option A:** Ist ein **ESP32-S3 mit PSRAM** (≥ 8 MB Flash) als
+   zusätzliches Matter-Target akzeptabel? Ohne PSRAM oder mit dem WROOM-32 ist A
+   nach heutigem Stand nicht sinnvoll.
+3. **Build-Weg für Option A:** Bereitschaft, das Matter-Environment als
+   *ESP-IDF mit Arduino als Komponente* zu bauen? Ohne das sind die Hebel aus
+   5.2 nicht erreichbar.
+4. **Toolchain:** Core-3.x-Migration als eigenes Issue starten?
 
 ## Quellen
 
-- Espressif, *Configuration options to optimize RAM and Flash* (esp-matter),
-  Speicherwerte des Licht-Beispiels:
+- Espressif, *Configuration options to optimize RAM and Flash* (esp-matter) —
+  Speicherwerte des Licht-Beispiels und alle Optimierungsschalter inkl.
+  BSS-Verlagerung nach PSRAM:
   <https://github.com/espressif/esp-matter/blob/main/docs/en/optimizations.rst>
 - Matter-Bridge-Beispiel (Aggregator, dynamische Endpoints):
   <https://project-chip.github.io/connectedhomeip-doc/examples/bridge-app/esp32/README.html>
 - Espressif Developer Portal, *Matter: Bridge for Non-Matter Devices*:
   <https://developer.espressif.com/blog/matter-bridge-for-non-matter-devices/>
+- ESP-IDF, *Support for External RAM* (PSRAM-Nutzung, Einschränkungen):
+  <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/external-ram.html>
+- Tasmota, *Adventures with Matter protocol on Tasmota* (Berry-Implementierung,
+  ~209 KB Flash, IP-Commissioning):
+  <https://github.com/arendst/Tasmota/discussions/17872>
+- Tasmota, *Matter* / *Matter Internals* (Bridge-Modus, virtuelle Endpoints,
+  Endpoint-Empfehlung): <https://tasmota.github.io/docs/Matter/> ·
+  <https://tasmota.github.io/docs/Matter-Internals/>
 - Google Home Developers, Test einer Matter-Integration (Test-VID/PID,
   Developer-Console-Projekt): <https://developers.home.google.com/matter/test>
 - Arduino-Matter-Beispiele (kein Aggregator/Bridge-Beispiel vorhanden):
