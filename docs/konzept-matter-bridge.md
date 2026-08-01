@@ -294,6 +294,26 @@ Zwei Nutzungsarten, eine sinnvoll, eine nicht:
   und halb Tasmota in diese Firmware zu ziehen. Wer das will, betreibt in
   Wahrheit Tasmota.
 
+**Aufwand einer Übernahme (nachgefragt):** Beide denkbaren Wege liegen bei
+Monaten, und einer scheitert schon an der Lizenz.
+
+- *Berry-VM einbetten und Tasmotas Matter-Module darauf laufen lassen:* Die
+  Implementierung umfasst **~140 Berry-Dateien**, die gegen Tasmotas
+  Objektmodell (`tasmota.*`), dessen Timer/Tasker, Persistenz, mDNS, UDP-Sockets
+  und Krypto-Bindings **auf BearSSL** geschrieben sind. Dazu kommt der
+  „Solidify"-Build-Schritt, der Berry-Code als Bytecode ins Flash übersetzt. Man
+  zöge also Berry-VM (~10 KB RAM Grundlast) plus einen erheblichen Teil des
+  Tasmota-Unterbaus mit — oder schriebe eine Kompatibilitätsschicht, die genau
+  diesen Unterbau nachbildet.
+- *Nach C++ portieren:* Das wäre kein Port, sondern eine Neuimplementierung mit
+  Vorlage — inklusive Umstellung der Krypto von BearSSL auf mbedTLS. Danach gibt
+  es **keine Upstream-Updates** mehr: Jeder Fix für eine Ökosystem-Eigenheit
+  müsste von Hand nachgezogen werden.
+- **Lizenz:** Tasmota steht unter **GPLv3**, dieses Projekt unter **MIT**. Eine
+  Übernahme des Codes — auch in übersetzter Form, als abgeleitetes Werk — würde
+  die gesamte Firmware unter GPLv3 zwingen. Das ist eine Projektentscheidung,
+  keine technische.
+
 ### 5.5 Eigene Minimal-Implementierung — ausdrücklich nicht empfohlen
 
 Reizvoll, aber der Aufwand liegt nicht im Datenmodell, sondern in PASE/SPAKE2+,
