@@ -1,6 +1,12 @@
 # Konzept: Matter-Bridge neben dem REST-API (Issue #44)
 
 Status: **Konzept / Entscheidungsvorlage** — noch keine Implementierung.
+**Entscheidung des Auftraggebers: Die Hardware bleibt der M5Stack ATOM Lite
+(ESP32-PICO-D4, 4 MB Flash, kein PSRAM), und ein zweites Gerät kommt nicht in
+Frage.** Damit entfallen alle in diesem Dokument untersuchten Wege zu einer
+Matter-Bridge — die Begründung steht in 4.1/5.7, die Konsequenzen in 14.
+Abschnitt 15 bewertet die Nachfrage nach IFTTT und nennt die Schnittstellen-
+erweiterung, die auf dieser Hardware tatsächlich trägt.
 Issue: [#44](https://github.com/akumap/esp32-casambi/issues/44)
 Branch: `claude/matter-bridge-no-config-zmie1w`
 
@@ -592,18 +598,99 @@ geänderter Unit-Liste ohne Vertauschen der Zuordnungen.
 
 ## 14. Was jetzt zu entscheiden ist
 
-Der Auftraggeber hat Option B (zweites Gerät) ausgeschlossen; damit bleibt A der
-einzige Weg zum Ziel. Offen sind:
+Beide offenen Hardwarefragen sind inzwischen beantwortet:
 
-1. **Hardware:** Bereitschaft, den Gateway auf ein **ESP32-S3-Board mit PSRAM**
-   (≥ 8 MB Flash) umzuziehen? Das ist **kein zweites Gerät**, sondern ein
-   Boardwechsel für dasselbe. Auf dem WROOM-32 — und auch auf einem S3 *ohne*
-   PSRAM — ist A nach heutigem Stand nicht sinnvoll.
-2. **Build-Weg:** Bereitschaft, das Matter-Environment als *ESP-IDF mit Arduino
-   als Komponente* zu bauen? Ohne das sind die Hebel aus 5.2 nicht erreichbar.
-3. **Toolchain:** Core-3.x-Migration als eigenes Issue starten (Stufe 0)?
-4. **Rückfallebene:** Falls das Gate in Stufe 1 reißt — Option B/C doch
-   dokumentieren, oder Issue #44 dann schließen?
+| Frage | Entscheidung |
+|---|---|
+| Zweites Gerät (Option B, Companion)? | **nein** |
+| Boardwechsel auf ESP32-S3 mit PSRAM (Option A)? | **nein**, es bleibt beim ATOM Lite (ESP32-PICO-D4, 4 MB Flash, kein PSRAM) |
+
+Damit ist der Sachstand eindeutig: **Auf dieser Hardware ist keine
+Matter-Bridge realisierbar.** Es liegt nicht an fehlender Optimierung —
+Abschnitt 5 hat alle bekannten Hebel durchgerechnet:
+
+- Konfiguration (5.2) und Zuschnitt auf Leuchten (5.6) bringen zusammen
+  ~80–110 KB, erfordern aber den IDF-Build und reichen ohne PSRAM nicht;
+- der entscheidende Hebel (5.3, Matter-BSS ins externe RAM) setzt PSRAM voraus,
+  das der PICO-D4 nicht hat;
+- dazu kommt die Flash-Grenze: ~1,5 MB CHIP-Code neben der bestehenden Firmware
+  passen nicht in 4 MB (4.2);
+- eine Eigenimplementierung (5.5/Option D) ist nicht verhältnismäßig.
+
+**Konsequenz für Issue #44:** Das Ziel „Casambi-Geräte erscheinen als
+Matter-Geräte" ist mit unveränderter Hardware und ohne Zusatzgerät nicht
+erreichbar. Das Issue sollte entweder zurückgestellt werden (bis ein
+Hardwarewechsel ansteht) oder mit dieser Begründung geschlossen werden.
+Die verbleibenden Wege zu Google Home & Co. laufen zwingend über ein Gerät im
+Netz, das Matter bzw. die Ökosystem-Anbindung übernimmt — dazu Abschnitt 15.
+
+Dieses Dokument bleibt als Analyse bestehen: Sollte die Hardwarefrage später neu
+bewertet werden, ist der Weg samt Zahlen, Stufenplan und Gates hier beschrieben.
+
+## 15. Nachgefragt: IFTTT — und was auf dieser Hardware wirklich trägt
+
+### 15.1 Warum IFTTT das Ziel nicht erreicht
+
+IFTTT ist ein **Cloud-Dienst**. Für unseren Zweck scheitert es an vier Punkten,
+von denen jeder einzelne genügt:
+
+| Punkt | Sachstand |
+|---|---|
+| **Erreichbarkeit** | Für Steuerung *zum Gerät hin* müsste IFTTT unseren ESP aufrufen — er steht im LAN. Das ginge nur über Portfreigabe (inakzeptabel: unverschlüsseltes HTTP, ein aus dem Casambi-Passwort abgeleitetes Token, kein Rate-Limit) oder über einen Relay im Netz — dann braucht man wieder das Gerät, das man vermeiden wollte |
+| **Google Assistant** | Genau die Funktion, die wir bräuchten, ist weg: Seit dem 31.08.2022 unterstützt IFTTTs Google-Assistant-Dienst **keine Trigger mit variabler Eingabe** mehr („Sage einen Satz mit einer Zahl") und keine eigenen Antworten. Dimmen auf einen Prozentwert per Sprache ist damit ausgeschlossen; Googles „Conversational Actions" wurden am 12.06.2023 ganz eingestellt |
+| **Tarif** | Webhooks — der einzige technisch brauchbare Baustein — sind erst ab **IFTTT Pro** verfügbar; der kostenlose Tarif erlaubt 2 einfache Applets mit bis zu **60 Minuten Verzögerung**. Pro deckt 20 Applets ab. Bei einem Applet je Lampe und Aktion sind das gut eine Handvoll Leuchten |
+| **Architektur** | Ein Cloud-Dienst im Steuerpfad widerspricht der Grundidee dieser Firmware: nach der Provisionierung **lokal und offline** (BLE + LAN, keine Cloud). Latenz, Ausfall und Fremdabhängigkeit kämen ohne funktionalen Gegenwert dazu |
+
+Und selbst wenn all das anders wäre: IFTTT macht aus den Lampen **keine Geräte
+in Google Home**. Sie tauchen nicht in der Geräteliste auf, haben keine
+Raumzuordnung und keinen Zustand — es bleiben Sprach-Trigger auf feste Sätze.
+Als Ersatz für Matter taugt das nicht.
+
+### 15.2 Was als Schnittstellenerweiterung sinnvoll wäre
+
+Sinnvoll ist die Frage trotzdem — nur zeigt sie in eine andere Richtung.
+
+**a) Ausgehende Ereignis-Webhooks (klein, sofort machbar).**
+Bei Zustandsänderung, BLE-Verbindungsverlust oder Heap-Warnung ein HTTP-POST mit
+JSON an eine konfigurierbare URL. Nutzen: Benachrichtigungen und Automationen in
+FHEM, Node-RED, n8n oder Home Assistant — und, wer mag, IFTTT-Webhooks (Pro).
+Aufwand gering, Speicherbedarf minimal.
+**Randbedingung:** Ausgehendes **HTTPS** ist auf diesem Gerät die heikle
+Variante — der TLS-Handshake braucht einen großen zusammenhängenden Heapblock,
+weshalb der Cloud-Refresh heute bewusst vor dem BLE-Start läuft (README,
+„Troubleshooting"). Empfehlung deshalb: **HTTP an Empfänger im LAN**, TLS nur
+optional mit Heap-Prüfung und dokumentiertem Risiko.
+
+**b) MQTT-Client mit Home-Assistant-Auto-Discovery (die eigentliche Empfehlung).**
+Der ESP verbindet sich **ausgehend** zu einem Broker im LAN, meldet je Unit die
+Discovery-Nachricht und veröffentlicht Zustände; Kommandos kommen über
+`.../set`-Topics zurück. Vorteile:
+
+- **beide Richtungen**, ohne Portfreigabe, ohne Cloud, ohne zweites Gerät;
+- Home Assistant legt die Leuchten **automatisch** an — dasselbe
+  „ohne Konfiguration"-Prinzip wie beim QR-Code, nur eine Ebene höher;
+- über HA sind Google Home, Apple Home und Alexa erreichbar — genau das Ziel aus
+  #44, nur eben mit HA als Vermittler statt Matter im Gerät;
+- Speicherbedarf: eine TCP-Verbindung und ein kleiner Client — Größenordnung
+  wenige KB, unkritisch auf dem ATOM Lite;
+- der Kommandopfad wäre derselbe wie bei REST und Matter (7.1), MQTT also ein
+  weiterer Producer auf `command_queue`.
+
+**Ehrlich zur Grenze:** Auch b) braucht einen Broker und eine HA-Instanz im
+Netz. Wenn im Haushalt **kein** Dauerläufer existiert und weder Zusatzgerät noch
+Boardwechsel in Frage kommen, gibt es keinen Weg in Google Home — das ist eine
+Hardwaregrenze, keine Frage der Schnittstellengestaltung.
+
+### 15.3 Empfehlung
+
+1. IFTTT **nicht** verfolgen (15.1).
+2. Wenn eine Home-Assistant-Instanz existiert oder aufgesetzt werden kann:
+   **MQTT mit Auto-Discovery** als eigenes Issue — das ist die tragfähige
+   Erweiterung auf unveränderter Hardware und erreicht das ursprüngliche Ziel
+   über einen Umweg.
+3. Unabhängig davon: **ausgehende Ereignis-Webhooks** als kleines, nützliches
+   Feature für lokale Automatisierung.
+4. Issue #44 zurückstellen oder mit der Begründung aus Abschnitt 14 schließen.
 
 ## Quellen
 
@@ -625,5 +712,11 @@ einzige Weg zum Ziel. Offen sind:
   <https://tasmota.github.io/docs/Matter-Internals/>
 - Google Home Developers, Test einer Matter-Integration (Test-VID/PID,
   Developer-Console-Projekt): <https://developers.home.google.com/matter/test>
+- IFTTT, *Google Assistant changes* (Wegfall der Trigger mit variabler Eingabe
+  zum 31.08.2022): <https://ifttt.com/explore/google-assistant-changes>
+- Google, Einstellung der Conversational Actions zum 12.06.2023:
+  <https://en.wikipedia.org/wiki/Actions_on_Google>
+- IFTTT-Tarife (Webhooks erst ab Pro, kostenlos 2 Applets mit bis zu 60 min
+  Verzögerung): <https://ifttt.com/plans>
 - Arduino-Matter-Beispiele (kein Aggregator/Bridge-Beispiel vorhanden):
   <https://github.com/espressif/arduino-esp32/tree/master/libraries/Matter/examples>
