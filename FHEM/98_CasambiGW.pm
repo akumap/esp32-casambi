@@ -82,7 +82,7 @@ use constant MIN_FIRMWARE_BUILD  => 1;    # minimum accepted ESP32 build number
 # (predates the contract). Mismatches only warn (apiVersionWarning reading),
 # they never block operation.
 use constant API_VERSION_MAJOR   => 1;    # keep in sync with src/config.h
-use constant API_VERSION_MINOR   => 1;    # keep in sync with src/config.h
+use constant API_VERSION_MINOR   => 2;    # keep in sync with src/config.h
 use constant INFO_POLL_SETUP     => 15;   # seconds between /api/info polls while the ESP is in setup mode
 use constant INFO_POLL_OFFLINE   => 30;   # seconds between /api/info polls while the ESP is unreachable
 

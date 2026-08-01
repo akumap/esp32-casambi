@@ -129,10 +129,13 @@ On subsequent boots the controller reconnects automatically using the saved gate
 #### Connection
 
 ```bash
-scan               # Scan for Casambi devices
+scan               # Scan for Casambi devices (shows RSSI and BLE address type)
 connect 0          # Connect to first device found (auto-saves MAC)
 disconnect         # Disconnect from device
 status             # Show detailed system status (BLE, WiFi, heap, uptime)
+blediag            # BLE troubleshooting report: config, keys, the phase the last
+                   # connect attempt died in, plus a live scan of what is actually
+                   # advertising nearby (paste this into a bug report)
 restart            # Restart ESP32
 ```
 
@@ -419,10 +422,15 @@ In normal operation both stay at 0; a rising counter points to a protocol
 element worth capturing (get the raw hex with `debug parse on`).
 `gateway_rssi` is the BLE link strength to the gateway in dBm (refreshed every
 ~10 s; `0` = not measured yet). After a disconnect the response additionally
-carries `last_disconnect_reason` (numeric `DisconnectReason`) and
+carries `last_disconnect_reason` (numeric `DisconnectReason`),
+`last_disconnect_reason_name` (its readable form, e.g. `auth-failed`) and
 `last_disconnect_source` — which detector saw the loss: `silent` (health check
 found the link dead), `keepalive` (no response to the periodic read), `send`
 (link dead when sending a command), `connect` (failure during setup) or `user`.
+While the link is **down**, `last_connect_phase` and `last_connect_rc` report
+how far the last connect attempt got (`link`, `service`, `characteristic`,
+`devinfo`, `keyexchange`, `auth`, `ready`) and the NimBLE return code that
+ended it — the same information the serial `blediag` command prints in full.
 The same reason/source pair and the last known RSSI are written to the event
 log on every loss, and each successful auto-reconnect logs the attempt count
 and offline duration.
@@ -1054,6 +1062,33 @@ The actual cloud download runs early on the **next boot**, before the BLE stack 
 - **Authentication fails:** Run `clearconfig` and redo setup with correct password
 - **Auto-connect doesn’t work:** Run `scan` + `connect` once to save the MAC address
 - **Silent disconnects:** Enable `debug ble on` to see BLE packet activity
+
+#### BLE stays disconnected (setup worked, the link never comes up)
+
+Start with `blediag`. It prints the configuration, the **phase the last connect
+attempt died in**, the NimBLE return code, and a live scan — that combination
+identifies the fault without guessing:
+
+|Last phase      |What already worked            |Where to look                                                                       |
+|----------------|-------------------------------|------------------------------------------------------------------------------------|
+|`link`          |nothing — the peer never answered|Light powered off, out of range, a phone/gateway already holding the unit's single central slot, or the stored MAC belongs to a unit that is currently off|
+|`service`/`characteristic`|link established     |Connected to something that is not a Casambi unit — the trace lists the GATT services actually found|
+|`devinfo`       |GATT discovered                |Read rejected or the link dropped mid-handshake (rc and raw bytes are printed)        |
+|`keyexchange`   |device info read               |No notification from the device — the trace reports notification counts and whether the subscription succeeded|
+|`auth`          |ECDH completed                 |Wrong/outdated keys: run `refresh`, or `clearconfig` + `setup` with the correct password|
+|`ready`         |everything                     |The link is up; look at disconnects instead                                          |
+
+Additional pointers:
+
+- `blediag` flags an **address-type mismatch** (peer advertises `random`, the
+  reconnect path connects as `public`) — a device that is found by `scan` on
+  every attempt but never connects
+- `debug ble on` adds per-phase traces and re-runs the advertisement probe after
+  every failed connect attempt
+- If nothing is attempted at all, the log now says why once a minute
+  (`auto-connect is disabled`, `no gateway MAC stored`, …)
+- A Casambi unit accepts only **one** central at a time: close the Casambi phone
+  app (and disable other gateways) before testing
 
 ### Spontaneous Reboots
 

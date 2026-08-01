@@ -85,8 +85,12 @@
 // 1.1: + POST /api/units/:id/state (generic atomic full-state write) and the
 //      optional `name` field in every `controls` entry (hello, unit_state,
 //      GET /api/units) — compatible extension, older clients ignore both.
+// 1.2: + optional BLE connect diagnostics in GET /api/status:
+//      `last_disconnect_reason_name` alongside the numeric reason, plus
+//      `last_connect_phase` / `last_connect_rc` while the link is down —
+//      compatible extension, older clients ignore all three.
 #define FHEM_API_VERSION_MAJOR    1
-#define FHEM_API_VERSION_MINOR    1
+#define FHEM_API_VERSION_MINOR    2
 
 // Minimum Casambi unit firmware version (the numeric part of "Evolution/X.Y")
 #define MIN_UNIT_FIRMWARE_VERSION 48.0f

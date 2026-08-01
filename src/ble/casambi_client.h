@@ -49,6 +49,11 @@ enum class DisconnectReason {
     InternalError
 };
 
+// Human-readable reason for traces and the event log ("link-loss", "auth-failed",
+// …). Static string, never nullptr — a bare enum number in a serial log is
+// unusable for anyone reporting a problem.
+const char* disconnectReasonName(DisconnectReason reason);
+
 // ============================================================================
 // CALLBACK TYPES
 // ============================================================================
@@ -119,6 +124,23 @@ public:
      * Static string, never nullptr.
      */
     const char* getLastDisconnectSource() const { return _lastDisconnectSource; }
+
+    /**
+     * How far the LAST connection attempt got before it failed (or "ready" if
+     * it succeeded). One of: "idle", "link", "service", "characteristic",
+     * "keypair", "devinfo", "keyexchange", "auth", "ready". A plain
+     * DisconnectReason cannot tell "peer never answered the advertisement"
+     * from "GATT was fine but auth was rejected" — this can.
+     * Static string, never nullptr.
+     */
+    const char* getLastConnectPhase() const { return _lastConnectPhase.load(); }
+
+    /**
+     * NimBLE return code of the last failed link-up (0 = none/success). Carries
+     * the real reason a connect() attempt failed (timeout, no such peer,
+     * controller busy …) which is otherwise swallowed by the bool return.
+     */
+    int getLastConnectError() const { return _lastConnectRc.load(); }
 
     /**
      * Last known RSSI of the gateway link in dBm (0 = not measured yet).
@@ -224,6 +246,8 @@ private:
     std::atomic<uint32_t> _totalReceivedPackets;
     std::atomic<DisconnectReason> _lastDisconnectReason;
     std::atomic<const char*> _lastDisconnectSource;  // detector of the last disconnect (static string)
+    std::atomic<const char*> _lastConnectPhase;      // phase the last connect attempt reached
+    std::atomic<int> _lastConnectRc;     // NimBLE rc of the last failed link-up (0 = none)
     std::atomic<int> _lastRssi;          // last known link RSSI in dBm (0 = unknown)
 
     // Thread safety for concurrent command line + web server access
@@ -273,6 +297,32 @@ private:
      * Update state and fire callback
      */
     void _setState(ConnectionState newState, DisconnectReason reason = DisconnectReason::None);
+
+    // ========================================================================
+    // CONNECT DIAGNOSTICS
+    // ========================================================================
+
+    /**
+     * Record the connect phase we are entering (see getLastConnectPhase()) and
+     * trace it when BLE debug is on.
+     */
+    void _setPhase(const char* phase);
+
+    /**
+     * Dump the GATT topology actually discovered on the peer (services, their
+     * characteristics and properties) to Serial. Called when the expected
+     * Casambi service/characteristic is missing — the enumeration says whether
+     * we reached the wrong device or a device with an unexpected profile.
+     */
+    void _dumpGattTopology();
+
+    /**
+     * After a failed link-up: scan briefly and report whether the peer is
+     * advertising at all, with which address type and RSSI. Separates "light is
+     * off / out of range" from "advertises, but under a different address type
+     * than the one we connect with". Debug-gated (costs a blocking scan).
+     */
+    void _probePeer(const String& address);
 
     // ========================================================================
     // PACKET HANDLING

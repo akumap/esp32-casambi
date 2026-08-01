@@ -808,6 +808,15 @@ WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
     if (_client->getLastDisconnectReason() != DisconnectReason::None) {
         doc["last_disconnect_reason"] = static_cast<int>(_client->getLastDisconnectReason());
         doc["last_disconnect_source"] = _client->getLastDisconnectSource();
+        doc["last_disconnect_reason_name"] = disconnectReasonName(_client->getLastDisconnectReason());
+    }
+
+    if (!_client->isAuthenticated()) {
+        // How far the last connect attempt got, so a link that never comes up
+        // can be diagnosed over HTTP too — not only on an attached serial
+        // console (see the serial `blediag` command for the full report).
+        doc["last_connect_phase"] = _client->getLastConnectPhase();
+        doc["last_connect_rc"]    = _client->getLastConnectError();
     }
 
     String response;
