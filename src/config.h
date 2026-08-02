@@ -310,6 +310,14 @@
 // Operation lifetime default
 #define OPERATION_LIFETIME        5
 
+// Upper bound for every buffer in the encrypt/decrypt path. A BLE packet can
+// never exceed the negotiated ATT MTU minus the 3-byte ATT header, and the
+// preferred MTU NimBLE negotiates is 255 (CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU),
+// so 252 is the hard ceiling for both notifications and our own writes. The
+// crypto path sizes its stack buffers from this constant instead of allocating
+// per packet — see the task-allocation note in encryption.h.
+#define CRYPTO_MAX_PACKET_LEN     252
+
 // ============================================================================
 // API ENDPOINTS
 // ============================================================================

@@ -978,17 +978,23 @@ bool CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
     // the same nonce/origin instead of silently skipping a value.
     uint16_t originBefore = _origin;
 
-    std::vector<uint8_t> opPacket = _buildOperation(opcode, target, payload);
+    // Assemble the plaintext on the stack: 4-byte packet counter, type 0x07,
+    // then the operation block. Sized so the ciphertext (plaintext + CMAC)
+    // still fits CRYPTO_MAX_PACKET_LEN.
+    uint8_t packet[CRYPTO_MAX_PACKET_LEN - CMAC_SIZE];
+    size_t  pktLen = 0;
 
-    std::vector<uint8_t> fullPacket;
-    fullPacket.push_back(_outPacketCount & 0xFF);
-    fullPacket.push_back((_outPacketCount >> 8) & 0xFF);
-    fullPacket.push_back((_outPacketCount >> 16) & 0xFF);
-    fullPacket.push_back((_outPacketCount >> 24) & 0xFF);
-    fullPacket.push_back(0x07);
-    fullPacket.insert(fullPacket.end(), opPacket.begin(), opPacket.end());
+    packet[pktLen++] = _outPacketCount & 0xFF;
+    packet[pktLen++] = (_outPacketCount >> 8) & 0xFF;
+    packet[pktLen++] = (_outPacketCount >> 16) & 0xFF;
+    packet[pktLen++] = (_outPacketCount >> 24) & 0xFF;
+    packet[pktLen++] = 0x07;
 
-    if (!_sendEncryptedPacket(fullPacket, _outPacketCount)) {
+    if (!_buildOperation(opcode, target, payload, packet, sizeof(packet), pktLen)) {
+        return false;   // did not fit; _origin untouched, nothing transmitted
+    }
+
+    if (!_sendEncryptedPacket(packet, pktLen, _outPacketCount)) {
         _origin = originBefore;   // roll back; nothing was transmitted
         return false;
     }
@@ -996,27 +1002,35 @@ bool CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
     return true;
 }
 
-std::vector<uint8_t> CasambiClient::_buildOperation(uint8_t opcode, uint16_t target,
-                                                     const std::vector<uint8_t>& payload) {
-    std::vector<uint8_t> packet;
+bool CasambiClient::_buildOperation(uint8_t opcode, uint16_t target,
+                                    const std::vector<uint8_t>& payload,
+                                    uint8_t* out, size_t outCap, size_t& outLen) {
+    // 9 bytes of operation header plus the payload.
+    const size_t need = 9 + payload.size();
+    if (outLen + need > outCap) {
+        Serial.printf("BLE: Operation too large for packet buffer (%u + %u > %u)\n",
+                      (unsigned)outLen, (unsigned)need, (unsigned)outCap);
+        return false;
+    }
 
     uint16_t flags = (OPERATION_LIFETIME << 11) | payload.size();
-    packet.push_back((flags >> 8) & 0xFF);
-    packet.push_back(flags & 0xFF);
-    packet.push_back(opcode);
-    packet.push_back((_origin >> 8) & 0xFF);
-    packet.push_back(_origin & 0xFF);
+    out[outLen++] = (flags >> 8) & 0xFF;
+    out[outLen++] = flags & 0xFF;
+    out[outLen++] = opcode;
+    out[outLen++] = (_origin >> 8) & 0xFF;
+    out[outLen++] = _origin & 0xFF;
     _origin++;
-    packet.push_back((target >> 8) & 0xFF);
-    packet.push_back(target & 0xFF);
-    packet.push_back(0x00);
-    packet.push_back(0x00);
-    packet.insert(packet.end(), payload.begin(), payload.end());
+    out[outLen++] = (target >> 8) & 0xFF;
+    out[outLen++] = target & 0xFF;
+    out[outLen++] = 0x00;
+    out[outLen++] = 0x00;
+    memcpy(out + outLen, payload.data(), payload.size());
+    outLen += payload.size();
 
-    return packet;
+    return true;
 }
 
-bool CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uint32_t counter) {
+bool CasambiClient::_sendEncryptedPacket(const uint8_t* packet, size_t pktLen, uint32_t counter) {
     if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
         Serial.println("BLE: _sendEncryptedPacket: encMutex timeout");
         return false;
@@ -1028,8 +1042,13 @@ bool CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uin
         return false;
     }
 
-    std::vector<uint8_t> nonce = _getNonce(counter);
-    std::vector<uint8_t> encrypted = _encryption->encryptThenMac(packet, nonce);
+    uint8_t nonce[NONCE_SIZE];
+    _getNonce(counter, nonce);
+
+    uint8_t encrypted[CRYPTO_MAX_PACKET_LEN];
+    size_t  encLen = 0;
+    bool ok = _encryption->encryptThenMac(packet, pktLen, nonce,
+                                          encrypted, sizeof(encrypted), encLen);
 
     // Release the mutex before writeValue: the BLE stack can fire the response
     // notification synchronously during writeValue (same FreeRTOS tick), so
@@ -1038,36 +1057,34 @@ bool CasambiClient::_sendEncryptedPacket(const std::vector<uint8_t>& packet, uin
     // timeout and silently drop the notification.
     xSemaphoreGive(_encMutex);
 
-    if (encrypted.empty()) {
+    if (!ok || encLen == 0) {
         Serial.println("BLE: Encryption produced empty ciphertext");
         return false;
     }
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Sending encrypted packet - counter=%u, plaintext_len=%d, encrypted_len=%d\n",
-                      counter, packet.size(), encrypted.size());
+        Serial.printf("BLE: Sending encrypted packet - counter=%u, plaintext_len=%u, encrypted_len=%u\n",
+                      counter, (unsigned)pktLen, (unsigned)encLen);
     }
 
     // Write without response (Casambi control writes are unacknowledged), so a
     // true return only means the stack accepted the buffer, not that the peer
     // received it. It still distinguishes a queued write from an outright
     // failure (disconnected characteristic, full tx buffer).
-    if (!_authChar->writeValue(encrypted.data(), encrypted.size(), false)) {
+    if (!_authChar->writeValue(encrypted, encLen, false)) {
         Serial.println("BLE: GATT writeValue failed");
         return false;
     }
     return true;
 }
 
-std::vector<uint8_t> CasambiClient::_getNonce(uint32_t counter) {
-    std::vector<uint8_t> nonce(NONCE_SIZE);
-    memcpy(nonce.data(), _nonce, 4);
+void CasambiClient::_getNonce(uint32_t counter, uint8_t nonce[NONCE_SIZE]) {
+    memcpy(nonce, _nonce, 4);
     nonce[4] = counter & 0xFF;
     nonce[5] = (counter >> 8) & 0xFF;
     nonce[6] = (counter >> 16) & 0xFF;
     nonce[7] = (counter >> 24) & 0xFF;
-    memcpy(nonce.data() + 8, _nonce + 8, 8);
-    return nonce;
+    memcpy(nonce + 8, _nonce + 8, 8);
 }
 
 // ============================================================================
@@ -1173,15 +1190,27 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
         Serial.printf("BLE: Auth response packet (counter=%u, len=%d)\n", counter, len);
     }
 
-    std::vector<uint8_t> nonce(NONCE_SIZE);
-    memcpy(nonce.data(), data, 4);
-    memcpy(nonce.data() + 4, _nonce + 4, 12);
+    if (len > CRYPTO_MAX_PACKET_LEN) {
+        Serial.printf("BLE: Auth response exceeds crypto buffer (%u > %u)\n",
+                      (unsigned)len, (unsigned)CRYPTO_MAX_PACKET_LEN);
+        xSemaphoreGive(_encMutex);
+        _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
+        return;
+    }
 
-    std::vector<uint8_t> packet(data, data + len);
-    std::vector<uint8_t> plaintext = _encryption->decryptAndVerify(packet, nonce, 4);
+    uint8_t nonce[NONCE_SIZE];
+    memcpy(nonce, data, 4);
+    memcpy(nonce + 4, _nonce + 4, 12);
+
+    // Stack buffers, no heap: this runs on the NimBLE host task (see the
+    // allocation policy note in encryption.h).
+    uint8_t plaintext[CRYPTO_MAX_PACKET_LEN];
+    size_t  plainLen = 0;
+    bool ok = _encryption->decryptAndVerify(data, len, nonce,
+                                            plaintext, sizeof(plaintext), plainLen, 4);
     xSemaphoreGive(_encMutex);
 
-    if (plaintext.size() == 0) {
+    if (!ok || plainLen == 0) {
         Serial.println("BLE: Auth response decryption failed");
         _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
         return;
@@ -1220,17 +1249,30 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         return;
     }
 
+    if (len > CRYPTO_MAX_PACKET_LEN) {
+        // Cannot happen below the negotiated ATT MTU, but a truncated read here
+        // would decrypt into a partial buffer — drop the packet instead.
+        xSemaphoreGive(_encMutex);
+        Serial.printf("BLE: Data packet exceeds crypto buffer (%u > %u), dropped\n",
+                      (unsigned)len, (unsigned)CRYPTO_MAX_PACKET_LEN);
+        return;
+    }
+
     uint32_t counter = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
 
-    std::vector<uint8_t> nonce(NONCE_SIZE);
-    memcpy(nonce.data(), data, 4);
-    memcpy(nonce.data() + 4, _nonce + 4, 12);
+    uint8_t nonce[NONCE_SIZE];
+    memcpy(nonce, data, 4);
+    memcpy(nonce + 4, _nonce + 4, 12);
 
-    std::vector<uint8_t> packet(data, data + len);
-    std::vector<uint8_t> plaintext = _encryption->decryptAndVerify(packet, nonce, 4);
+    // Stack buffers, no heap: this is the hot incoming path and it runs on the
+    // NimBLE host task — see the allocation policy note in encryption.h.
+    uint8_t plaintext[CRYPTO_MAX_PACKET_LEN];
+    size_t  plainLen = 0;
+    bool ok = _encryption->decryptAndVerify(data, len, nonce,
+                                            plaintext, sizeof(plaintext), plainLen, 4);
     xSemaphoreGive(_encMutex);
 
-    if (plaintext.size() == 0) {
+    if (!ok || plainLen == 0) {
         if (bleDebugEnabled) {
             Serial.println("BLE: Data packet decryption failed");
         }
@@ -1240,12 +1282,12 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
     uint8_t packetType = plaintext[0];
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Data packet type=0x%02x, decrypted_len=%d, counter=0x%08x\n",
-                      packetType, plaintext.size(), counter);
+        Serial.printf("BLE: Data packet type=0x%02x, decrypted_len=%u, counter=0x%08x\n",
+                      packetType, (unsigned)plainLen, counter);
     }
 
-    const uint8_t* payload = plaintext.data() + 1;
-    size_t payloadLen = plaintext.size() - 1;
+    const uint8_t* payload = plaintext + 1;
+    size_t payloadLen = plainLen - 1;
 
     switch (packetType) {
         case 0x06: {

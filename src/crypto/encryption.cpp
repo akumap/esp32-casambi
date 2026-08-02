@@ -1,5 +1,8 @@
 /**
  * Casambi Encryption Implementation
+ *
+ * Allocation-free by design — see the ALLOCATION POLICY note in encryption.h
+ * for why this matters on the BLE notification task.
  */
 
 #include "encryption.h"
@@ -14,110 +17,93 @@ CasambiEncryption::~CasambiEncryption() {
     memset(_key, 0, AES_KEY_SIZE);
 }
 
-std::vector<uint8_t> CasambiEncryption::encryptThenMac(
-    const std::vector<uint8_t>& packet,
-    const std::vector<uint8_t>& nonce,
-    size_t headerLen
-) {
-    if (nonce.size() != NONCE_SIZE) {
-        Serial.println("Encrypt: Invalid nonce size");
-        return std::vector<uint8_t>();
-    }
+bool CasambiEncryption::encryptThenMac(const uint8_t* packet, size_t pktLen,
+                                       const uint8_t* nonce,
+                                       uint8_t* out, size_t outCap, size_t& outLen,
+                                       size_t headerLen) {
+    outLen = 0;
 
-    if (packet.size() < headerLen) {
+    if (pktLen < headerLen) {
         Serial.println("Encrypt: Packet too small");
-        return std::vector<uint8_t>();
+        return false;
+    }
+    if (outCap < pktLen + CMAC_SIZE) {
+        Serial.printf("Encrypt: Output buffer too small (%u < %u)\n",
+                      (unsigned)outCap, (unsigned)(pktLen + CMAC_SIZE));
+        return false;
     }
 
-    // Split packet into header and payload
-    std::vector<uint8_t> header(packet.begin(), packet.begin() + headerLen);
-    std::vector<uint8_t> payload(packet.begin() + headerLen, packet.end());
+    // Header travels in the clear, the payload is AES-CTR encrypted straight
+    // into the destination — the ciphertext is assembled in `out` so the CMAC
+    // below can run over it without a second copy.
+    memcpy(out, packet, headerLen);
+    _ctrXcrypt(packet + headerLen, pktLen - headerLen, nonce, out + headerLen);
 
-    // Encrypt payload
-    std::vector<uint8_t> encrypted_payload = _encryptInternal(payload, nonce);
+    // CMAC over header || ciphertext, appended.
+    _computeCMAC(out, pktLen, out + pktLen);
 
-    // Combine header + encrypted payload
-    std::vector<uint8_t> ciphertext = header;
-    ciphertext.insert(ciphertext.end(), encrypted_payload.begin(), encrypted_payload.end());
-
-    // Compute CMAC over ciphertext
-    std::vector<uint8_t> mac = _computeCMAC(ciphertext);
-
-    // Append CMAC
-    ciphertext.insert(ciphertext.end(), mac.begin(), mac.end());
-
-    return ciphertext;
+    outLen = pktLen + CMAC_SIZE;
+    return true;
 }
 
-std::vector<uint8_t> CasambiEncryption::decryptAndVerify(
-    const std::vector<uint8_t>& packet,
-    const std::vector<uint8_t>& nonce,
-    size_t headerLen
-) {
-    if (nonce.size() != NONCE_SIZE) {
-        Serial.println("Decrypt: Invalid nonce size");
-        return std::vector<uint8_t>();
-    }
+bool CasambiEncryption::decryptAndVerify(const uint8_t* packet, size_t pktLen,
+                                         const uint8_t* nonce,
+                                         uint8_t* out, size_t outCap, size_t& outLen,
+                                         size_t headerLen) {
+    outLen = 0;
 
-    if (packet.size() < headerLen + CMAC_SIZE) {
+    if (pktLen < headerLen + CMAC_SIZE) {
         Serial.println("Decrypt: Packet too small");
-        return std::vector<uint8_t>();
+        return false;
     }
 
-    // Split packet: ciphertext (header + encrypted payload) and MAC
-    size_t ciphertext_len = packet.size() - CMAC_SIZE;
-    std::vector<uint8_t> ciphertext(packet.begin(), packet.begin() + ciphertext_len);
-    std::vector<uint8_t> received_mac(packet.begin() + ciphertext_len, packet.end());
+    const size_t ciphertextLen = pktLen - CMAC_SIZE;
+    const size_t plainLen      = ciphertextLen - headerLen;
 
-    // Verify CMAC
-    std::vector<uint8_t> computed_mac = _computeCMAC(ciphertext);
+    if (outCap < plainLen) {
+        Serial.printf("Decrypt: Output buffer too small (%u < %u)\n",
+                      (unsigned)outCap, (unsigned)plainLen);
+        return false;
+    }
+
+    // Verify the MAC over header || ciphertext BEFORE decrypting anything.
+    const uint8_t* receivedMac = packet + ciphertextLen;
+    uint8_t computedMac[CMAC_SIZE];
+    _computeCMAC(packet, ciphertextLen, computedMac);
 
     // Constant-time compare: OR all byte differences instead of breaking on the
     // first mismatch, so the time taken does not leak how many leading MAC bytes
     // matched (which would be a forgery oracle).
     uint8_t mac_diff = 0;
     for (size_t i = 0; i < CMAC_SIZE; i++) {
-        mac_diff |= received_mac[i] ^ computed_mac[i];
+        mac_diff |= receivedMac[i] ^ computedMac[i];
     }
-    bool mac_valid = (mac_diff == 0);
 
-    if (!mac_valid) {
+    if (mac_diff != 0) {
         if (bleDebugEnabled) {
             Serial.println("Decrypt: CMAC verification failed!");
             Serial.print("Expected: ");
-            for (size_t i = 0; i < 8; i++) Serial.printf("%02x ", received_mac[i]);
+            for (size_t i = 0; i < 8; i++) Serial.printf("%02x ", receivedMac[i]);
             Serial.print("\nComputed: ");
-            for (size_t i = 0; i < 8; i++) Serial.printf("%02x ", computed_mac[i]);
+            for (size_t i = 0; i < 8; i++) Serial.printf("%02x ", computedMac[i]);
             Serial.println();
         }
-        return std::vector<uint8_t>();
+        return false;
     }
 
     if (bleDebugEnabled) {
         Serial.println("Decrypt: CMAC verified OK");
     }
 
-    // Extract encrypted payload (skip header)
-    std::vector<uint8_t> encrypted_payload(ciphertext.begin() + headerLen, ciphertext.end());
+    // AES-CTR is symmetric, so decrypt == encrypt.
+    _ctrXcrypt(packet + headerLen, plainLen, nonce, out);
 
-    // Decrypt (AES-CTR is symmetric, so decrypt = encrypt)
-    std::vector<uint8_t> plaintext = _encryptInternal(encrypted_payload, nonce);
-
-    return plaintext;
+    outLen = plainLen;
+    return true;
 }
 
-std::vector<uint8_t> CasambiEncryption::_encryptInternal(
-    const std::vector<uint8_t>& data,
-    const std::vector<uint8_t>& nonce
-) {
-    if (nonce.size() != NONCE_SIZE) {
-        Serial.println("_encryptInternal: Invalid nonce size");
-        return std::vector<uint8_t>();
-    }
-
-    std::vector<uint8_t> result;
-    result.reserve(data.size());
-
+void CasambiEncryption::_ctrXcrypt(const uint8_t* in, size_t len,
+                                   const uint8_t* nonce, uint8_t* out) {
     // Initialize AES context for ECB mode
     mbedtls_aes_context aes_ctx;
     mbedtls_aes_init(&aes_ctx);
@@ -127,10 +113,10 @@ std::vector<uint8_t> CasambiEncryption::_encryptInternal(
     uint32_t counter = 0;
     size_t offset = 0;
 
-    while (offset < data.size()) {
+    while (offset < len) {
         // Build counter block: nonce with last 4 bytes as little-endian counter
         uint8_t counter_block[16];
-        memcpy(counter_block, nonce.data(), 12); // First 12 bytes from nonce
+        memcpy(counter_block, nonce, 12); // First 12 bytes from nonce
 
         // Last 4 bytes: counter in little-endian
         counter_block[12] = counter & 0xFF;
@@ -139,15 +125,15 @@ std::vector<uint8_t> CasambiEncryption::_encryptInternal(
         counter_block[15] = (counter >> 24) & 0xFF;
 
         // Encrypt counter block
-        uint8_t encrypted_block[16];
-        mbedtls_aes_crypt_ecb(&aes_ctx, MBEDTLS_AES_ENCRYPT, counter_block, encrypted_block);
+        uint8_t keystream[16];
+        mbedtls_aes_crypt_ecb(&aes_ctx, MBEDTLS_AES_ENCRYPT, counter_block, keystream);
 
         // XOR with plaintext/ciphertext
-        size_t remaining = data.size() - offset;
+        size_t remaining = len - offset;
         size_t block_size = (remaining < 16) ? remaining : 16;
 
         for (size_t i = 0; i < block_size; i++) {
-            result.push_back(data[offset + i] ^ encrypted_block[i]);
+            out[offset + i] = in[offset + i] ^ keystream[i];
         }
 
         offset += block_size;
@@ -155,12 +141,10 @@ std::vector<uint8_t> CasambiEncryption::_encryptInternal(
     }
 
     mbedtls_aes_free(&aes_ctx);
-    return result;
 }
 
-std::vector<uint8_t> CasambiEncryption::_computeCMAC(const std::vector<uint8_t>& data) {
-    std::vector<uint8_t> mac(CMAC_SIZE);
-
+void CasambiEncryption::_computeCMAC(const uint8_t* data, size_t len,
+                                     uint8_t mac[CMAC_SIZE]) {
     // Manual CMAC-AES implementation (RFC 4493)
     // Since mbedTLS CMAC is not compiled in, we implement it using AES-ECB
 
@@ -189,18 +173,18 @@ std::vector<uint8_t> CasambiEncryption::_computeCMAC(const std::vector<uint8_t>&
 
     // Process message
     uint8_t M_last[16] = {0};
-    bool complete_block = (data.size() > 0 && data.size() % 16 == 0);
+    bool complete_block = (len > 0 && len % 16 == 0);
 
     if (complete_block) {
         // M_last = M_n XOR K1
-        size_t last_block_offset = data.size() - 16;
+        size_t last_block_offset = len - 16;
         for (int i = 0; i < 16; i++) {
             M_last[i] = data[last_block_offset + i] ^ K1[i];
         }
     } else {
         // M_last = (M_n || 10^j) XOR K2
-        size_t remaining = data.size() % 16;
-        size_t last_block_offset = data.size() - remaining;
+        size_t remaining = len % 16;
+        size_t last_block_offset = len - remaining;
 
         for (size_t i = 0; i < remaining; i++) {
             M_last[i] = data[last_block_offset + i];
@@ -214,7 +198,7 @@ std::vector<uint8_t> CasambiEncryption::_computeCMAC(const std::vector<uint8_t>&
 
     // CBC-MAC
     uint8_t X[16] = {0};
-    size_t num_blocks = (data.size() + 15) / 16;
+    size_t num_blocks = (len + 15) / 16;
 
     // Process all but last block (i + 1 < num_blocks avoids size_t underflow when num_blocks == 0)
     for (size_t i = 0; i + 1 < num_blocks; i++) {
@@ -231,10 +215,9 @@ std::vector<uint8_t> CasambiEncryption::_computeCMAC(const std::vector<uint8_t>&
     mbedtls_aes_crypt_ecb(&aes_ctx, MBEDTLS_AES_ENCRYPT, X, X);
 
     // Copy result
-    memcpy(mac.data(), X, CMAC_SIZE);
+    memcpy(mac, X, CMAC_SIZE);
 
     mbedtls_aes_free(&aes_ctx);
-    return mac;
 }
 
 bool CasambiEncryption::selfTestRFC4493() {
@@ -261,9 +244,9 @@ bool CasambiEncryption::selfTestRFC4493() {
 
     CasambiEncryption enc(K);
     for (const auto& v : vecs) {
-        std::vector<uint8_t> msg(M, M + v.len);
-        std::vector<uint8_t> mac = enc._computeCMAC(msg);
-        if (mac.size() != CMAC_SIZE || memcmp(mac.data(), v.mac, CMAC_SIZE) != 0) {
+        uint8_t mac[CMAC_SIZE];
+        enc._computeCMAC(M, v.len, mac);
+        if (memcmp(mac, v.mac, CMAC_SIZE) != 0) {
             Serial.printf("CMAC self-test FAILED for message length %u\n",
                           (unsigned)v.len);
             return false;
@@ -278,15 +261,4 @@ void CasambiEncryption::_leftShift(const uint8_t* input, uint8_t* output) {
         output[i] = (input[i] << 1) | overflow;
         overflow = (input[i] & 0x80) ? 1 : 0;
     }
-}
-
-std::vector<uint8_t> CasambiEncryption::_xor(
-    const std::vector<uint8_t>& a,
-    const std::vector<uint8_t>& b
-) {
-    std::vector<uint8_t> result(a.size());
-    for (size_t i = 0; i < a.size(); i++) {
-        result[i] = a[i] ^ b[i];
-    }
-    return result;
 }
