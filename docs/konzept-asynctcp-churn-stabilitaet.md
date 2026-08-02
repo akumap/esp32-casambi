@@ -282,7 +282,7 @@ Pass-Kriterien: kein `REBOOT DETECTED`, kein `Guru Meditation` (insb. kein
 `_accept` / `_lwip_fin`), freier Heap erholt sich, „largest block recovered".
 Der WSDBG-Trace zeigt keine Client-Akkumulation.
 
-### 6.1 Ergebnis (auf Hardware, ESP32 DevKit V4)
+### 6.1 Ergebnis (auf Hardware, M5Stack ATOM Lite / ESP32-PICO-D4)
 
 - **Stufe 1 — Funktion:** `verify_tcp_stack.py` **10/10 bestanden**. Belege u. a.:
   T5 kein Per-POST-Leck (60 POSTs, Drift ~1,3 KB ≪ Limit), T8 abgebrochene Bodys
