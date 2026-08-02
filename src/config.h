@@ -112,6 +112,17 @@
 #define CONFIG_BAK_PATH           "/casambi_config.json.bak"
 #define WIFI_TMP_PATH             "/wifi_config.json.tmp"
 #define WIFI_BAK_PATH             "/wifi_config.json.bak"
+// Per-category debug flags. Split out of the main config because toggling one
+// bool otherwise rewrote the ENTIRE network configuration — serialize all keys,
+// units, groups and scenes, then re-read the result into a second JsonDocument
+// for validation. On a network with many units that is a large transient heap
+// spike (and a full-config rewrite that can fail) for a trivial setting, on a
+// device whose largest free block sits around 13 kB. This file holds six bools.
+// Values in the main config are still read as the fallback, so an installation
+// upgrading from an older firmware keeps its settings until the next toggle.
+#define DEBUG_FLAGS_PATH          "/debug_flags.json"
+#define DEBUG_FLAGS_TMP_PATH      "/debug_flags.json.tmp"
+#define DEBUG_FLAGS_BAK_PATH      "/debug_flags.json.bak"
 // Marker file: when present at boot, the firmware re-reads the Casambi cloud
 // configuration before BLE/web are started, then reboots into normal operation.
 #define REFRESH_FLAG_PATH         "/refresh_pending"

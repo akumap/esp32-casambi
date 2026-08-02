@@ -263,6 +263,71 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
     return false;
 }
 
+bool ConfigStore::saveDebugFlags(const NetworkConfig& config) {
+    if (!_initialized && !init()) return false;
+
+    JsonDocument doc;
+    doc["bleDebugEnabled"]     = config.bleDebugEnabled;
+    doc["casambiDebugEnabled"] = config.casambiDebugEnabled;
+    doc["webDebugEnabled"]     = config.webDebugEnabled;
+    doc["parseDebugEnabled"]   = config.parseDebugEnabled;
+    doc["heapDebugEnabled"]    = config.heapDebugEnabled;
+    doc["cloudDebugEnabled"]   = config.cloudDebugEnabled;
+
+    File file = LittleFS.open(DEBUG_FLAGS_TMP_PATH, "w");
+    if (!file) {
+        Serial.println("Storage: Failed to open temp debug-flags file for writing");
+        return false;
+    }
+    if (serializeJson(doc, file) == 0) {
+        Serial.println("Storage: Failed to write debug flags");
+        file.close();
+        LittleFS.remove(DEBUG_FLAGS_TMP_PATH);
+        return false;
+    }
+    file.close();
+
+    // Same atomic commit as the main config. No re-parse validation step here:
+    // the payload is six bools with no cross-field invariants, and a corrupt
+    // file is handled at load time by simply keeping the current values.
+    return commitAtomic(DEBUG_FLAGS_PATH, DEBUG_FLAGS_TMP_PATH, DEBUG_FLAGS_BAK_PATH);
+}
+
+bool ConfigStore::loadDebugFlags(NetworkConfig& config) {
+    if (!_initialized && !init()) return false;
+
+    const char* path = DEBUG_FLAGS_PATH;
+    if (!LittleFS.exists(path)) {
+        // Fall back to the backup of an interrupted save before giving up.
+        if (!LittleFS.exists(DEBUG_FLAGS_BAK_PATH)) return false;
+        path = DEBUG_FLAGS_BAK_PATH;
+    }
+
+    File file = LittleFS.open(path, "r");
+    if (!file) return false;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, file);
+    file.close();
+
+    if (err) {
+        // Keep whatever loadNetworkConfig() supplied rather than resetting to
+        // defaults; a debug flag is not worth failing a boot over.
+        Serial.printf("Storage: debug flags unreadable (%s), keeping config values\n",
+                      err.c_str());
+        return false;
+    }
+
+    // Absent keys keep the value already in `config` (the main-config fallback).
+    config.bleDebugEnabled     = doc["bleDebugEnabled"]     | config.bleDebugEnabled;
+    config.casambiDebugEnabled = doc["casambiDebugEnabled"] | config.casambiDebugEnabled;
+    config.webDebugEnabled     = doc["webDebugEnabled"]     | config.webDebugEnabled;
+    config.parseDebugEnabled   = doc["parseDebugEnabled"]   | config.parseDebugEnabled;
+    config.heapDebugEnabled    = doc["heapDebugEnabled"]    | config.heapDebugEnabled;
+    config.cloudDebugEnabled   = doc["cloudDebugEnabled"]   | config.cloudDebugEnabled;
+    return true;
+}
+
 bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config) {
     if (!LittleFS.exists(path)) {
         return false;
@@ -549,8 +614,9 @@ void ConfigStore::clearAll() {
     // Remove live files plus any temp/backup companions so a factory reset
     // cannot leave a stale recoverable copy behind.
     const char* paths[] = {
-        CONFIG_FILE_PATH, CONFIG_TMP_PATH, CONFIG_BAK_PATH,
-        WIFI_FILE_PATH,   WIFI_TMP_PATH,   WIFI_BAK_PATH,
+        CONFIG_FILE_PATH,      CONFIG_TMP_PATH,      CONFIG_BAK_PATH,
+        WIFI_FILE_PATH,        WIFI_TMP_PATH,        WIFI_BAK_PATH,
+        DEBUG_FLAGS_PATH,      DEBUG_FLAGS_TMP_PATH, DEBUG_FLAGS_BAK_PATH,
     };
     for (const char* p : paths) {
         if (LittleFS.exists(p)) LittleFS.remove(p);
