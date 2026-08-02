@@ -901,11 +901,20 @@ namespace {
 
 // Print sink that writes into a fixed stack/struct buffer with no allocation.
 // Used to serialize one log entry at a time for the chunked /api/log response.
+//
+// write() must keep returning the requested length — that is the Print
+// contract, and print()/printf() callers rely on it — so a full buffer cannot
+// be reported through the return value. It is reported out of band via
+// overflowed() instead: without that, a too-long entry would be silently cut
+// mid-object and the response would carry malformed JSON with no error signal
+// anywhere. See the LOG_ENTRY_STAGE sizing note below for why that is a
+// should-never-happen case rather than a routine one.
 class BufPrint : public Print {
 public:
-    BufPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0) {}
+    BufPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0), _overflow(false) {}
     size_t write(uint8_t c) override {
         if (_len < _cap) _buf[_len++] = (char)c;
+        else             _overflow = true;
         return 1;
     }
     size_t write(const uint8_t* data, size_t len) override {
@@ -913,18 +922,30 @@ public:
         size_t n = (len < room) ? len : room;
         memcpy(_buf + _len, data, n);
         _len += n;
+        if (n < len) _overflow = true;
         return len;
     }
     size_t length() const { return _len; }
+    bool   overflowed() const { return _overflow; }
 private:
     char*  _buf;
     size_t _cap;
     size_t _len;
+    bool   _overflow;
 };
 
 // Worst-case one entry as JSON: ~100 B of fixed fields plus a 120-char message
 // that may expand 6× when JSON-escaped (\uXXXX) → ~820 B. 1 KB is a safe bound.
 static const size_t LOG_ENTRY_STAGE = 1024;
+
+// Substituted for an entry that does not fit LOG_ENTRY_STAGE. Only reachable
+// via a corrupted record whose msgLen survives the clamp in writeEntryJson, so
+// it is a corruption signal, not an expected outcome — but emitting a valid
+// object keeps the array parseable for clients instead of handing them a
+// half-written one.
+static const char LOG_ENTRY_OVERFLOW_JSON[] =
+    "{\"tsUtc\":\"\",\"boot\":0,\"level\":3,\"levelName\":\"ERROR\","
+    "\"msg\":\"[entry omitted: exceeds the response stage buffer]\"}";
 
 // Resumable generator for the /api/log JSON array. Streams entries newest-first
 // in HTTP chunks, holding only a single entry in RAM at a time — so a large log
@@ -988,8 +1009,19 @@ struct LogJsonSource {
                 // Serialize one entry from the batch into the stage buffer.
                 BufPrint bp(stage, sizeof(stage));
                 if (!first) bp.write(',');
-                first = false;
                 EventLog::writeEntryJson(bp, batch[batchPos++]);
+                if (bp.overflowed()) {
+                    // Truncated object → would break the whole array. Replace it
+                    // with the placeholder, keeping the separator state correct.
+                    BufPrint fb(stage, sizeof(stage));
+                    if (!first) fb.write(',');
+                    fb.write((const uint8_t*)LOG_ENTRY_OVERFLOW_JSON,
+                             sizeof(LOG_ENTRY_OVERFLOW_JSON) - 1);
+                    stageLen = fb.length();
+                    first = false;
+                    continue;
+                }
+                first = false;
                 stageLen = bp.length();
                 continue;
             }
