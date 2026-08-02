@@ -32,7 +32,38 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 
 ### ESP32 Boards
 
-- **M5Stack ATOM Lite (ESP32-PICO-D4)** — the only board this firmware is tested on. 4 MB flash, no PSRAM (none is required).
+**M5Stack ATOM Lite** — the only board this firmware is tested on.
+
+|Property |Value                                                            |
+|---------|-----------------------------------------------------------------|
+|Chip     |ESP32-PICO-D4, revision v1.1                                      |
+|Cores    |Dual core @ 240 MHz                                               |
+|Radio    |WiFi + BT                                                         |
+|Flash    |4 MB, embedded in package (Coding Scheme None)                    |
+|Crystal  |40 MHz                                                            |
+|PSRAM    |None — and none is required                                       |
+|Other    |VRef calibration in efuse                                         |
+
+Build footprint of the `devkit-v4` environment on this chip:
+
+|Segment|Used                       |Capacity                    |     |
+|-------|---------------------------|----------------------------|-----|
+|RAM    |59 572 B (≈58 KB)          |532 480 B (520 KB)          |11.2 %|
+|Flash  |1 596 065 B (≈1.52 MiB)    |3 145 728 B (3 MiB)         |50.7 %|
+
+The flash capacity is the **app partition** of the `huge_app` layout
+(`app0` = 0x300000), not the 4 MB chip total; the rest of the chip holds the
+LittleFS data partition, NVS, the coredump area and the bootloader. `huge_app`
+buys that 3 MB precisely by dropping the second OTA slot, so there is no
+over-the-air rollback partition — updates go over serial. The RAM figure is
+what the **linker** places statically;
+it says nothing about free heap at runtime, which is what the stability notes
+below (`free_heap`, `largest_block`) are about. Roughly half the app partition
+is still free, so there is headroom for the firmware to grow.
+
+The dual-core part matters beyond the spec sheet: the BLE host task and the
+async_tcp task (pinned to core 1) genuinely run in parallel here, which is the
+premise behind the allocation policy in `src/crypto/encryption.h`.
 
 Other ESP32 boards are expected to work — nothing in the firmware is
 board-specific — but they are untested. The `devkit-v4` build environment is
