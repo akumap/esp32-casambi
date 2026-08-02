@@ -69,8 +69,8 @@ void CasambiScan::run(uint32_t seconds, std::vector<CasambiScanResult>& out) {
 
     scan->setScanCallbacks(&cb);
     scan->setActiveScan(true);
-    scan->setInterval(100);
-    scan->setWindow(99);
+    scan->setInterval(BLE_SCAN_INTERVAL_MS);
+    scan->setWindow(BLE_SCAN_WINDOW_MS);
 
     // NimBLE scan durations are in milliseconds. getResults() blocks for the
     // duration and fires the callback for each advertiser meanwhile.

@@ -206,7 +206,26 @@ bool CasambiClient::_connectLocked(const String& address) {
     _setState(ConnectionState::Connected);
     _connectTime = millis();
     _lastNotificationTime = millis();
-    Serial.printf("BLE: Connected (link up in %lu ms)\n", millis() - linkStart);
+
+    // NimBLE negotiates the ATT MTU itself during connect() (exchangeMTU
+    // defaults to true, preferred MTU 255), so there is nothing to request
+    // here — but the result was invisible, and several sizing decisions assume
+    // it succeeded: WS_BROADCAST_QUEUE_DEPTH is derived from "~40 unit records
+    // at MTU 247", and CRYPTO_MAX_PACKET_LEN bounds the crypto buffers. If a
+    // peer ever refused the exchange the link would fall back to 23, and a
+    // >20-byte control write would silently take NimBLE's long-write path
+    // (which needs a response) instead of the write-without-response we ask
+    // for. Log it once per connect so that failure mode is diagnosable instead
+    // of showing up as unexplained write failures.
+    uint16_t attMtu = _bleClient->getMTU();
+    Serial.printf("BLE: Connected (link up in %lu ms, ATT MTU=%u)\n",
+                  millis() - linkStart, attMtu);
+    if (attMtu < 64) {
+        Serial.printf("BLE: WARNING: ATT MTU %u is far below the negotiated default — "
+                      "control writes larger than %u bytes may fail\n",
+                      attMtu, (unsigned)(attMtu > 3 ? attMtu - 3 : 0));
+        EventLog::log(LOG_WARN, "BLE: low ATT MTU %u after connect", attMtu);
+    }
 
     _setPhase("service");
     NimBLERemoteService* service = _bleClient->getService(NimBLEUUID(CASAMBI_SERVICE_UUID));

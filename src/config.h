@@ -241,6 +241,17 @@
 // re-connect is a fresh lottery), so connectivity always wins over quality.
 #define BLE_RSSI_REROLL_MAX             2
 
+// --- Discovery scan parameters ---------------------------------------------
+// NimBLEScan::setInterval/setWindow take MILLISECONDS in NimBLE-Arduino 2.x
+// (converted internally to 0.625 ms ticks) — not raw ticks, as the BLE spec
+// units would suggest. Window ~= interval is a near-continuous scan: every
+// scan here is a short, blocking, user-triggered discovery run on a
+// mains-powered device, so catching an advertisement on the first pass is
+// worth more than the duty cycle. Do not lower the window to "save power"
+// without also accepting longer, less reliable discovery.
+#define BLE_SCAN_INTERVAL_MS            100
+#define BLE_SCAN_WINDOW_MS              99
+
 // Settle time before the gate reads the RSSI. Readings taken immediately
 // after the connect can be far off (unaveraged controller value).
 #define BLE_RSSI_SETTLE_MS              2000

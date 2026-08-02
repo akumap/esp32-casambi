@@ -2047,8 +2047,8 @@ void runSetupWizard() {
     scanCallbackInstance = new ScanCallbacks();
     pBLEScan->setScanCallbacks(scanCallbackInstance);
     pBLEScan->setActiveScan(true);
-    pBLEScan->setInterval(100);
-    pBLEScan->setWindow(99);
+    pBLEScan->setInterval(BLE_SCAN_INTERVAL_MS);
+    pBLEScan->setWindow(BLE_SCAN_WINDOW_MS);
 
     Serial.println("Scanning for 10 seconds...\n");
     pBLEScan->getResults(10000, false);  // blocking, duration in ms
@@ -2223,8 +2223,8 @@ void scanForDevices() {
     scanCallbackInstance = new ScanCallbacks();
     pBLEScan->setScanCallbacks(scanCallbackInstance);
     pBLEScan->setActiveScan(true);
-    pBLEScan->setInterval(100);
-    pBLEScan->setWindow(99);
+    pBLEScan->setInterval(BLE_SCAN_INTERVAL_MS);
+    pBLEScan->setWindow(BLE_SCAN_WINDOW_MS);
 
     pBLEScan->getResults(10000, false);  // blocking, duration in ms
 
