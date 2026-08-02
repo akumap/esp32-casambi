@@ -32,7 +32,12 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 
 ### ESP32 Boards
 
-- [AZDelivery ESP32 Dev Kit C V4](https://www.amazon.de/dp/B07Z83MF5W) — Primary development and test board (PSRAM not required)
+- **M5Stack ATOM Lite (ESP32-PICO-D4)** — the only board this firmware is tested on. 4 MB flash, no PSRAM (none is required).
+
+Other ESP32 boards are expected to work — nothing in the firmware is
+board-specific — but they are untested. The `devkit-v4` build environment is
+what the ATOM Lite is flashed with: both are plain ESP32 targets with 4 MB
+flash, so the `huge_app` partition layout applies unchanged.
 
 ### Build Host
 
@@ -74,7 +79,7 @@ The controller should work with any Casambi-enabled luminaire. Capabilities are 
 1. **Build and upload:**
    
    ```bash
-   # For ESP32 Dev Kit V4 (default)
+   # Default environment — used for the ATOM Lite and other plain ESP32 boards
    pio run -e devkit-v4 -t upload
    ```
 1. **Open serial monitor:**
@@ -1119,7 +1124,7 @@ Additional pointers:
 
 |Environment|Purpose                                          |
 |-----------|-------------------------------------------------|
-|`devkit-v4`|ESP32 Dev Kit V4 (default)                       |
+|`devkit-v4`|Plain ESP32 (default) — the environment the tested ATOM Lite is flashed with|
 |`esp32-c3` |ESP32-C3 DevKit M1 — build-only, untested on hardware|
 |`debug`    |Verbose logging, debug symbols, exception decoder|
 |`release`  |Size-optimized production build                  |
