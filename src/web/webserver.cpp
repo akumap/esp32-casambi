@@ -907,8 +907,8 @@ namespace {
 // be reported through the return value. It is reported out of band via
 // overflowed() instead: without that, a too-long entry would be silently cut
 // mid-object and the response would carry malformed JSON with no error signal
-// anywhere. See the LOG_ENTRY_STAGE sizing note below for why that is a
-// should-never-happen case rather than a routine one.
+// anywhere — the chunk callback reports success and the client just fails to
+// parse. See LOG_ENTRY_OVERFLOW_JSON for when that can actually happen.
 class BufPrint : public Print {
 public:
     BufPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0), _overflow(false) {}
@@ -938,11 +938,18 @@ private:
 // that may expand 6× when JSON-escaped (\uXXXX) → ~820 B. 1 KB is a safe bound.
 static const size_t LOG_ENTRY_STAGE = 1024;
 
-// Substituted for an entry that does not fit LOG_ENTRY_STAGE. Only reachable
-// via a corrupted record whose msgLen survives the clamp in writeEntryJson, so
-// it is a corruption signal, not an expected outcome — but emitting a valid
-// object keeps the array parseable for clients instead of handing them a
-// half-written one.
+// Substituted for an entry that does not fit LOG_ENTRY_STAGE.
+//
+// Unreachable as the code stands, and deliberately so: writeEntryJson clamps to
+// LOG_MSG_MAX, which caps one entry at 120 × 6 (worst-case \uXXXX escaping) plus
+// ~90 B of fixed fields ≈ 810 B, inside the 1 KB stage. A corrupted msgLen does
+// not change that — the clamp catches it. What this guards is the invariant, not
+// a live bug: raising LOG_MSG_MAX past ~155, or adding a field to writeEntryJson,
+// silently reintroduces truncation otherwise. Emitting a valid object keeps the
+// array parseable instead of handing clients a half-written one.
+//
+// Verified by driving the generator against an emitter without the clamp: the
+// response stays well-formed and the omission is visible.
 static const char LOG_ENTRY_OVERFLOW_JSON[] =
     "{\"tsUtc\":\"\",\"boot\":0,\"level\":3,\"levelName\":\"ERROR\","
     "\"msg\":\"[entry omitted: exceeds the response stage buffer]\"}";

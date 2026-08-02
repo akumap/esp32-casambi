@@ -916,23 +916,24 @@ bool CasambiClient::_authenticate() {
     mbedtls_sha256_finish(&sha_ctx, authDigest);
     mbedtls_sha256_free(&sha_ctx);
 
-    std::vector<uint8_t> authPacket;
-    authPacket.push_back(_inPacketCount & 0xFF);
-    authPacket.push_back((_inPacketCount >> 8) & 0xFF);
-    authPacket.push_back((_inPacketCount >> 16) & 0xFF);
-    authPacket.push_back((_inPacketCount >> 24) & 0xFF);
-    authPacket.push_back(0x04);
-    authPacket.push_back(key->id);
-    for (int i = 0; i < 32; i++) {
-        authPacket.push_back(authDigest[i]);
-    }
+    // 4-byte packet counter, type 0x04, key id, then the 32-byte digest.
+    uint8_t authPacket[6 + sizeof(authDigest)];
+    size_t  authLen = 0;
+    authPacket[authLen++] = _inPacketCount & 0xFF;
+    authPacket[authLen++] = (_inPacketCount >> 8) & 0xFF;
+    authPacket[authLen++] = (_inPacketCount >> 16) & 0xFF;
+    authPacket[authLen++] = (_inPacketCount >> 24) & 0xFF;
+    authPacket[authLen++] = 0x04;
+    authPacket[authLen++] = key->id;
+    memcpy(authPacket + authLen, authDigest, sizeof(authDigest));
+    authLen += sizeof(authDigest);
 
     if (bleDebugEnabled) {
         Serial.printf("BLE: Sending auth with counter=%u\n", _inPacketCount);
     }
     // A failed write means the auth packet never left the device — without
     // this check the wait below would blame the peer for our own send error.
-    if (!_sendEncryptedPacket(authPacket, _inPacketCount)) {
+    if (!_sendEncryptedPacket(authPacket, authLen, _inPacketCount)) {
         Serial.println("BLE: Failed to send auth packet");
         return false;
     }
