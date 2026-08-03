@@ -1052,8 +1052,10 @@ void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     // Default to the newest 25 entries (~3.5 KB JSON) so a plain GET fits in a
     // single TCP window and the framework's per-chunk malloc(space) (~5.5 KB)
     // stays within the largest free block. Larger responses span multiple chunks
-    // and, on this device's tight/fragmented heap (largest block ~13 KB), can
-    // fail to send (client sees HTTP/0.9). Use ?n=<count> for more (?n=0 = all)
+    // and, on a fragmented heap, can fail to send (client sees HTTP/0.9). The
+    // "largest block ~13 KB" figure this was sized against predates the NimBLE
+    // migration and has not been re-measured since, so the margin here is
+    // unverified rather than known-good. Use ?n=<count> for more (?n=0 = all)
     // at your own risk, or fetch the full log over serial ('log N').
     int n = 25;
     if (request->hasParam("n")) {

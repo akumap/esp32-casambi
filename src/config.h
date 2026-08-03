@@ -116,8 +116,8 @@
 // bool otherwise rewrote the ENTIRE network configuration — serialize all keys,
 // units, groups and scenes, then re-read the result into a second JsonDocument
 // for validation. On a network with many units that is a large transient heap
-// spike (and a full-config rewrite that can fail) for a trivial setting, on a
-// device whose largest free block sits around 13 kB. This file holds six bools.
+// spike (and a full-config rewrite that can fail) for a trivial setting. This
+// file holds six bools.
 // Values in the main config are still read as the fallback, so an installation
 // upgrading from an older firmware keeps its settings until the next toggle.
 #define DEBUG_FLAGS_PATH          "/debug_flags.json"
@@ -282,17 +282,28 @@
 // Broadcasts from the BLE task are enqueued here and drained by loop(), so
 // _ws->textAll() is always called from the loop task — never from a BLE task
 // callback — which avoids races with the async_tcp task's _clients management.
-// Sized above the worst case a single 0x06 packet can produce (~40 unit
-// records at MTU 247, one broadcast each) so group/scene bursts are never
-// dropped; the queue itself is only pointers (64 × 4 B). Should it still
+// Sized above the worst case a single 0x06 packet can produce (one broadcast
+// per unit record). The original figure assumed the ATT MTU would come out at
+// the NimBLE default of 247; measured against a real gateway it negotiates to
+// 158 (logged per connect, see _connectLocked), which caps a notification at
+// 155 B and therefore yields FEWER records per packet — the depth is more
+// conservative than intended, not less. The queue itself is only pointers
+// (64 × 4 B), so leaving the headroom costs nothing. Should it still
 // overflow, the drop is flagged and loop() pushes a fresh hello snapshot so
 // clients cannot stay stale on a missed unit_state.
 #define WS_BROADCAST_QUEUE_DEPTH        64
 
 // Upper bound of unit objects serialized into one WebSocket hello snapshot.
-// Each unit is ~150 B of JSON, so 50 units ≈ 7.5 kB — safely below the
-// ~13 kB largest-free-block floor observed on a fragmented heap (see the
-// /api/log sizing note). Networks beyond the cap get the first 50 units
+// Each unit is ~150 B of JSON, so 50 units ≈ 7.5 kB.
+//
+// The floor this was originally justified against — "~13 kB largest free
+// block" — dates from the Bluedroid era, before the NimBLE migration freed a
+// substantial amount of contiguous heap; idle values on NimBLE are an order of
+// magnitude higher (110 kB largest block observed at connect). It has NOT been
+// re-measured under load on NimBLE, so treat the cap as a bound that has not
+// been re-derived rather than one with a current margin behind it — and note
+// that a hello of this size is exactly the allocation that aborts if the heap
+// cannot serve it (see the WS_EVT_CONNECT path). Networks beyond the cap get the first 50 units
 // plus "units_truncated": true; clients needing the rest must fetch
 // GET /api/units themselves. Realistic Casambi home networks stay far
 // below this; the cap only guards the heap against the CLOUD_MAX_UNITS

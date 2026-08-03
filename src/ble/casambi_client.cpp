@@ -209,14 +209,22 @@ bool CasambiClient::_connectLocked(const String& address) {
 
     // NimBLE negotiates the ATT MTU itself during connect() (exchangeMTU
     // defaults to true, preferred MTU 255), so there is nothing to request
-    // here — but the result was invisible, and several sizing decisions assume
-    // it succeeded: WS_BROADCAST_QUEUE_DEPTH is derived from "~40 unit records
-    // at MTU 247", and CRYPTO_MAX_PACKET_LEN bounds the crypto buffers. If a
-    // peer ever refused the exchange the link would fall back to 23, and a
-    // >20-byte control write would silently take NimBLE's long-write path
-    // (which needs a response) instead of the write-without-response we ask
-    // for. Log it once per connect so that failure mode is diagnosable instead
-    // of showing up as unexplained write failures.
+    // here — but the result was invisible, and the buffer sizing depends on it
+    // (WS_BROADCAST_QUEUE_DEPTH, CRYPTO_MAX_PACKET_LEN). Measured against a
+    // real gateway the link settles at 158, not the 247 the sizing comments
+    // originally assumed — both bounds stay conservative, but only because the
+    // real value is lower. Worth knowing rather than guessing.
+    //
+    // The device-info record carries its own MTU byte (_mtu, read in
+    // _readDeviceInfo) and it reports the same 158 on that gateway, so the two
+    // are very likely the same number seen from both ends rather than
+    // independent fields — one observation, not a guarantee.
+    //
+    // The failure case this makes diagnosable: if a peer ever refused the
+    // exchange the link would fall back to 23, and a >20-byte control write
+    // would silently take NimBLE's long-write path (which needs a response)
+    // instead of the write-without-response we ask for — surfacing as
+    // unexplained write failures rather than as an MTU problem.
     uint16_t attMtu = _bleClient->getMTU();
     Serial.printf("BLE: Connected (link up in %lu ms, ATT MTU=%u)\n",
                   millis() - linkStart, attMtu);
