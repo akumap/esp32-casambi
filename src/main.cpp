@@ -383,7 +383,10 @@ void setup() {
 
             checkCasambiVersions(networkConfig);
 
-            // Load debug settings
+            // Load debug settings. The values parsed from the main config are
+            // the fallback for installations predating the split; once the
+            // device has written /debug_flags.json that file wins.
+            ConfigStore::loadDebugFlags(networkConfig);
             bleDebugEnabled     = networkConfig.bleDebugEnabled;
             casambiDebugEnabled = networkConfig.casambiDebugEnabled;
             webDebugEnabled     = networkConfig.webDebugEnabled;
@@ -1784,42 +1787,42 @@ void handleCommand(const String& cmd) {
                 bool val = subcmd.endsWith(" on");
                 bleDebugEnabled = val;
                 networkConfig.bleDebugEnabled = val;
-                ConfigStore::saveNetworkConfig(networkConfig);
+                ConfigStore::saveDebugFlags(networkConfig);
                 Serial.printf("BLE debug: %s\n", val ? "on" : "off");
             }
             else if (subcmd.startsWith("casambi ")) {
                 bool val = subcmd.endsWith(" on");
                 casambiDebugEnabled = val;
                 networkConfig.casambiDebugEnabled = val;
-                ConfigStore::saveNetworkConfig(networkConfig);
+                ConfigStore::saveDebugFlags(networkConfig);
                 Serial.printf("Casambi debug: %s\n", val ? "on" : "off");
             }
             else if (subcmd.startsWith("web ")) {
                 bool val = subcmd.endsWith(" on");
                 webDebugEnabled = val;
                 networkConfig.webDebugEnabled = val;
-                ConfigStore::saveNetworkConfig(networkConfig);
+                ConfigStore::saveDebugFlags(networkConfig);
                 Serial.printf("Web debug: %s\n", val ? "on" : "off");
             }
             else if (subcmd.startsWith("parse ")) {
                 bool val = subcmd.endsWith(" on");
                 parseDebugEnabled = val;
                 networkConfig.parseDebugEnabled = val;
-                ConfigStore::saveNetworkConfig(networkConfig);
+                ConfigStore::saveDebugFlags(networkConfig);
                 Serial.printf("Parse debug: %s\n", val ? "on" : "off");
             }
             else if (subcmd.startsWith("heap ")) {
                 bool val = subcmd.endsWith(" on");
                 heapDebugEnabled = val;
                 networkConfig.heapDebugEnabled = val;
-                ConfigStore::saveNetworkConfig(networkConfig);
+                ConfigStore::saveDebugFlags(networkConfig);
                 Serial.printf("Heap debug: %s\n", val ? "on" : "off");
             }
             else if (subcmd.startsWith("cloud ")) {
                 bool val = subcmd.endsWith(" on");
                 cloudDebugEnabled = val;
                 networkConfig.cloudDebugEnabled = val;
-                ConfigStore::saveNetworkConfig(networkConfig);
+                ConfigStore::saveDebugFlags(networkConfig);
                 Serial.printf("Cloud debug: %s (raw config dumped on next refresh, AES keys redacted)\n",
                               val ? "on" : "off");
             }
@@ -2047,8 +2050,8 @@ void runSetupWizard() {
     scanCallbackInstance = new ScanCallbacks();
     pBLEScan->setScanCallbacks(scanCallbackInstance);
     pBLEScan->setActiveScan(true);
-    pBLEScan->setInterval(100);
-    pBLEScan->setWindow(99);
+    pBLEScan->setInterval(BLE_SCAN_INTERVAL_MS);
+    pBLEScan->setWindow(BLE_SCAN_WINDOW_MS);
 
     Serial.println("Scanning for 10 seconds...\n");
     pBLEScan->getResults(10000, false);  // blocking, duration in ms
@@ -2223,8 +2226,8 @@ void scanForDevices() {
     scanCallbackInstance = new ScanCallbacks();
     pBLEScan->setScanCallbacks(scanCallbackInstance);
     pBLEScan->setActiveScan(true);
-    pBLEScan->setInterval(100);
-    pBLEScan->setWindow(99);
+    pBLEScan->setInterval(BLE_SCAN_INTERVAL_MS);
+    pBLEScan->setWindow(BLE_SCAN_WINDOW_MS);
 
     pBLEScan->getResults(10000, false);  // blocking, duration in ms
 

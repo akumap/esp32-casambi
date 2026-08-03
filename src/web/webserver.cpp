@@ -12,18 +12,48 @@
 #include <WiFi.h>
 #include <time.h>
 #include <memory>
+#include <new>              // std::bad_alloc — see the WS_HAS_EXCEPTIONS note
 #include <mbedtls/sha256.h>
 
+// Whether this translation unit can catch a failed allocation.
+//
+// libstdc++'s operator new throws on failure regardless — that is what turned a
+// hello-sized allocation on a fragmented heap into a device reboot: __cxa_throw
+// finds no handler and calls std::terminate. But arduino-esp32 builds C++ with
+// exceptions DISABLED by default, and then a catch clause is not merely useless
+// but a compile error. So the guards below are structured to work either way:
+// the heap pre-checks do the real work and are always compiled, and the catch
+// is added only where the toolchain supports it. Build with -fexceptions to get
+// the second layer; the first one holds without it.
+#if defined(__cpp_exceptions)
+#  define WS_HAS_EXCEPTIONS 1
+#else
+#  define WS_HAS_EXCEPTIONS 0
+#endif
+
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
+
+// RAII hold on g_configMutex.
+//
+// The JSON builders below allocate while holding the mutex (JsonDocument
+// growth, String append). On this build operator new throws, so a manual
+// take/give pair leaks the mutex on an allocation failure — and a permanently
+// held g_configMutex deadlocks every later reader on both tasks, which is a
+// far worse outcome than the failed send itself. Releasing from a destructor
+// makes the unwind path correct.
+struct ConfigLock {
+    ConfigLock()  { if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY); }
+    ~ConfigLock() { if (g_configMutex) xSemaphoreGive(g_configMutex); }
+    ConfigLock(const ConfigLock&) = delete;
+    ConfigLock& operator=(const ConfigLock&) = delete;
+};
 
 // Copy a mutable NetworkConfig string field under g_configMutex so a
 // concurrent writer on the loop task cannot reallocate the String buffer
 // while the async_tcp task is reading it.
 static String lockedCopy(const String& s) {
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    String out = s;
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
-    return out;
+    ConfigLock lock;
+    return s;   // copied while the lock is held; released by ~ConfigLock
 }
 
 // Emit a unit's channels as a generic `controls` array so consumers (FHEM)
@@ -56,7 +86,7 @@ CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
       _refreshRequested(false), _rebootRequested(false), _clearLogRequested(false),
       _ntpRequested(false),
       _broadcastQueue(nullptr), _bleCmdQueue(nullptr), _resyncNeeded(false),
-      _wsDropCount(0) {
+      _wsDropCount(0), _wsSendFailCount(0), _httpBusyCount(0), _helloInFlight(false) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(WsEvent));
     _bleCmdQueue    = xQueueCreate(BLE_CMD_QUEUE_DEPTH, sizeof(BleCommand));
 }
@@ -171,7 +201,7 @@ void CasambiWebServer::loop() {
         // exchange() so a set racing this clear is never lost.
         if (_resyncNeeded.exchange(false)) {
             if (_ws->count() > 0) {
-                _ws->textAll(_buildHelloMessage());
+                _sendHello(nullptr);   // nullptr = broadcast to all clients
                 WEB_LOG("WS: broadcast drop -> resync hello pushed\n");
             }
         }
@@ -200,13 +230,15 @@ bool CasambiWebServer::consumeNtpRequest(String& serverOut) {
     // Transactional consume: flag and string are read/cleared under the same
     // mutex hold the writer (_handleSetNtp) uses to set them, so the pair can
     // never be observed half-updated.
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    const bool had = _ntpRequested.exchange(false);
-    if (had) {
-        serverOut = _pendingNtpServer;
-        _pendingNtpServer = "";
+    bool had;
+    {
+        ConfigLock lock;
+        had = _ntpRequested.exchange(false);
+        if (had) {
+            serverOut = _pendingNtpServer;   // String copy: can allocate
+            _pendingNtpServer = "";
+        }
     }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
     return had;
 }
 
@@ -299,8 +331,10 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
         case WS_EVT_CONNECT:
             WEB_LOG("WS: client #%u connected from %s\n",
                     client->id(), client->remoteIP().toString().c_str());
-            // Send full state to the newly connected client
-            client->text(_buildHelloMessage());
+            // Send full state to the newly connected client. Guarded: this
+            // runs on the async_tcp task, and an unguarded allocation failure
+            // here used to abort the whole device (see _sendHello).
+            _sendHello(client);
             break;
 
         case WS_EVT_DISCONNECT:
@@ -350,7 +384,10 @@ String CasambiWebServer::_gatewayName(const String& mac) const {
     return String("");
 }
 
-String CasambiWebServer::_buildHelloMessage() const {
+String CasambiWebServer::_buildHelloMessage(size_t maxUnits) const {
+#if WS_HAS_EXCEPTIONS
+  try {
+#endif
     JsonDocument doc;
     doc["type"] = "hello";
     doc["build"] = FIRMWARE_BUILD;  // from generated firmware_build.h (see config.h)
@@ -388,15 +425,18 @@ String CasambiWebServer::_buildHelloMessage() const {
     // Bound the snapshot size: hello is pushed proactively (connect, resync)
     // and must never grow into an allocation a fragmented heap cannot serve
     // (see WS_HELLO_MAX_UNITS). Clients see "units_truncated" and can fetch
-    // the full list via GET /api/units themselves.
-    if (_config->units.size() > WS_HELLO_MAX_UNITS) {
+    // the full list via GET /api/units themselves. `maxUnits` lets the caller
+    // tighten that further — _sendHello() retries with 0 when the heap cannot
+    // serve the full snapshot, degrading instead of dropping the client.
+    if (_config->units.size() > maxUnits) {
         doc["units_truncated"] = true;
     }
     size_t helloUnits = 0;
     JsonArray units = doc["units"].to<JsonArray>();
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    {
+    ConfigLock lock;
     for (const auto& unit : _config->units) {
-        if (++helloUnits > WS_HELLO_MAX_UNITS) break;
+        if (++helloUnits > maxUnits) break;
         JsonObject u = units.add<JsonObject>();
         u["id"]          = unit.deviceId;
         u["name"]        = unit.name;
@@ -416,11 +456,115 @@ String CasambiWebServer::_buildHelloMessage() const {
         }
         addUnitControls(u, unit);   // generic, cloud-derived channel list
     }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    }   // ConfigLock
 
     String msg;
     serializeJson(doc, msg);
     return msg;
+#if WS_HAS_EXCEPTIONS
+  } catch (const std::bad_alloc&) {
+    // Out of contiguous heap while building. Report it as "no message" and let
+    // the caller degrade; aborting here would reboot the device over one
+    // client's snapshot.
+    return String();
+  }
+#endif
+}
+
+size_t CasambiWebServer::_helloHeapEstimate(size_t units) const {
+    // ~150 B of JSON per unit (see WS_HELLO_MAX_UNITS) plus the fixed header.
+    // Doubled because the document and the serialized String are alive at the
+    // same time, and the send then needs a third copy of the String's size —
+    // that last one is checked separately in _wsSendGuarded.
+    return 2 * (units * 150 + 512);
+}
+
+bool CasambiWebServer::_wsSendGuarded(AsyncWebSocketClient* client, const String& msg) {
+    if (!_ws || msg.isEmpty()) return false;
+
+    // AsyncWebSocket copies the payload into a shared buffer before queueing
+    // it, so the send needs a contiguous block of at least msg.length(). Check
+    // first — refusing here is cheap, whereas letting operator new throw inside
+    // the library reboots the device.
+    const size_t largest = ESP.getMaxAllocHeap();
+    if (largest < msg.length() + WS_SEND_HEAP_MARGIN) {
+        _wsSendFailCount++;
+        WEB_LOG("WS: send refused (%u B payload, largest block %u)\n",
+                (unsigned)msg.length(), (unsigned)largest);
+        return false;
+    }
+
+    // The check above can be overtaken by the other core between the reading
+    // and the allocation, so catch as well where the toolchain allows it.
+    // makeSharedBuffer throws before anything is enqueued, so the socket state
+    // is untouched and simply reporting failure is safe.
+#if WS_HAS_EXCEPTIONS
+    try {
+        if (client) client->text(msg);
+        else        _ws->textAll(msg);
+        return true;
+    } catch (const std::bad_alloc&) {
+        _wsSendFailCount++;
+        WEB_LOG("WS: send threw bad_alloc (%u B payload)\n", (unsigned)msg.length());
+        return false;
+    }
+#else
+    if (client) client->text(msg);
+    else        _ws->textAll(msg);
+    return true;
+#endif
+}
+
+void CasambiWebServer::_sendHello(AsyncWebSocketClient* client) {
+    // Two callers can build a hello, on two different tasks: a connecting
+    // client (async_tcp) and the resync broadcast (loop). Connect-triggered
+    // hellos cannot collide with each other — async_tcp handles its events
+    // serially — but a resync can land on top of one, doubling the peak.
+    //
+    // Only one of the two is deferrable, and it is the resync: _resyncNeeded
+    // stays set and loop() retries on the next iteration, so skipping costs a
+    // few milliseconds and nothing else. A connecting client is waiting and has
+    // no retry channel, so it never yields. That does not hard-bound the peak
+    // to one — a connect arriving mid-resync still proceeds — but it removes
+    // the pile-up that the stress profile produces.
+    struct FlagGuard {
+        std::atomic<bool>& f;
+        explicit FlagGuard(std::atomic<bool>& x) : f(x) { f = true; }
+        ~FlagGuard() { f = false; }
+    };
+
+    if (!client && _helloInFlight.load()) {
+        _resyncNeeded = true;       // try again next loop iteration
+        WEB_LOG("WS: resync hello deferred (one already in flight)\n");
+        return;
+    }
+    FlagGuard inFlight(_helloInFlight);
+
+    // Decide BEFORE building whether the full snapshot is affordable. On a
+    // default arduino-esp32 build there is no catch to fall back on, so this
+    // estimate — not the exception handler — is what keeps the path alive.
+    const size_t units   = _config ? _config->units.size() : 0;
+    const size_t capped  = (units < WS_HELLO_MAX_UNITS) ? units : WS_HELLO_MAX_UNITS;
+
+    if (ESP.getMaxAllocHeap() >= _helloHeapEstimate(capped) + WS_SEND_HEAP_MARGIN &&
+        _wsSendGuarded(client, _buildHelloMessage())) {
+        return;
+    }
+
+    // Full snapshot did not fit. Retry without the unit list: clients already
+    // treat "units_truncated" as "fetch GET /api/units yourself", so this is a
+    // documented degradation rather than a new protocol state.
+    if (_wsSendGuarded(client, _buildHelloMessage(0))) {
+        EventLog::log(LOG_WARN, "WS: hello degraded to unit-less (largest block %u)",
+                      (unsigned)ESP.getMaxAllocHeap());
+        return;
+    }
+
+    // Even the small one failed — the heap is genuinely exhausted. Drop this
+    // client instead of leaving it connected with no state; it will retry.
+    EventLog::log(LOG_ERROR, "WS: hello dropped, closing client (largest block %u)",
+                  (unsigned)ESP.getMaxAllocHeap());
+    if (client) client->close();
 }
 
 void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
@@ -464,6 +608,9 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
 }
 
 void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
+#if WS_HAS_EXCEPTIONS
+  try {
+#endif
     JsonDocument doc;
 
     if (ev.type == WsEvent::Type::UnitState) {
@@ -478,7 +625,7 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
         // (_applyUnitStates). This may reflect an update newer than this
         // event's level — events are drained within one loop tick, and the
         // hello resync covers any drop.
-        if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+        ConfigLock lock;
         CasambiUnit* unit = _config->getUnitById(ev.unitId);
         if (unit) {
             if (unit->hasVertical) doc["vertical"]  = unit->vertical;
@@ -489,7 +636,6 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
             }
             addUnitControls(doc.as<JsonObject>(), *unit);   // generic channel list
         }
-        if (g_configMutex) xSemaphoreGive(g_configMutex);
     } else {
         doc["type"]      = "connection_state";
         doc["connected"] = ev.connected;
@@ -507,7 +653,19 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
 
     String msg;
     serializeJson(doc, msg);
-    _ws->textAll(msg);
+    // Guarded like every other WS send: these events are small, but "small"
+    // is not a guarantee on a fragmented heap, and the failure mode is a
+    // device reboot rather than a dropped event. A drop is recoverable —
+    // _resyncNeeded already exists for exactly that.
+    if (!_wsSendGuarded(nullptr, msg)) {
+        _resyncNeeded = true;
+    }
+#if WS_HAS_EXCEPTIONS
+  } catch (const std::bad_alloc&) {
+    _wsSendFailCount++;
+    _resyncNeeded = true;
+  }
+#endif
 }
 
 // The dynamic POST routes that carry a JSON body. Shared by onRequestBody
@@ -769,6 +927,8 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["boot_count"] = EventLog::bootCount();
     // Broadcast events dropped on a full queue (each triggers a hello resync).
     doc["ws_drops"] = _wsDropCount.load();
+    doc["ws_send_fails"] = _wsSendFailCount.load();
+    doc["http_busy"] = _httpBusyCount.load();
     // Tolerant-parser diagnostics, summed over the packet types: "partial" =
     // packets whose understood prefix was applied while an undecoded tail was
     // dropped (a protocol element we do not know yet — worth investigating
@@ -824,38 +984,6 @@ WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
     request->send(200, "application/json", response);
 }
 
-void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
-    if (!_authOk(request)) return;
-    WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
-    JsonDocument doc;
-    JsonArray units = doc["units"].to<JsonArray>();
-    // Same consistent-snapshot rule as _buildHelloMessage: state fields are
-    // written by the BLE task under g_configMutex, so read them under it too.
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    for (const auto& unit : _config->units) {
-        JsonObject u = units.add<JsonObject>();
-        u["id"] = unit.deviceId;
-        u["name"] = unit.name;
-        u["type"] = unit.type;
-        u["address"] = unit.address;
-        u["online"] = unit.online;
-        u["on"] = unit.on;
-        u["level"] = unit.level;
-        u["numChannels"] = unit.numChannels;
-        if (unit.hasVertical) u["vertical"] = unit.vertical;
-        if (unit.hasCCT) {
-            u["colorTemp"] = unit.colorTemp;
-            u["cctMin"] = unit.cctMinKelvin;
-            u["cctMax"] = unit.cctMaxKelvin;
-        }
-        addUnitControls(u, unit);   // generic, cloud-derived channel list
-    }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-}
-
 void CasambiWebServer::_handleGetGroups(AsyncWebServerRequest* request) {
     if (!_authOk(request)) return;
     JsonDocument doc;
@@ -901,11 +1029,20 @@ namespace {
 
 // Print sink that writes into a fixed stack/struct buffer with no allocation.
 // Used to serialize one log entry at a time for the chunked /api/log response.
+//
+// write() must keep returning the requested length — that is the Print
+// contract, and print()/printf() callers rely on it — so a full buffer cannot
+// be reported through the return value. It is reported out of band via
+// overflowed() instead: without that, a too-long entry would be silently cut
+// mid-object and the response would carry malformed JSON with no error signal
+// anywhere — the chunk callback reports success and the client just fails to
+// parse. See LOG_ENTRY_OVERFLOW_JSON for when that can actually happen.
 class BufPrint : public Print {
 public:
-    BufPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0) {}
+    BufPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0), _overflow(false) {}
     size_t write(uint8_t c) override {
         if (_len < _cap) _buf[_len++] = (char)c;
+        else             _overflow = true;
         return 1;
     }
     size_t write(const uint8_t* data, size_t len) override {
@@ -913,18 +1050,37 @@ public:
         size_t n = (len < room) ? len : room;
         memcpy(_buf + _len, data, n);
         _len += n;
+        if (n < len) _overflow = true;
         return len;
     }
     size_t length() const { return _len; }
+    bool   overflowed() const { return _overflow; }
 private:
     char*  _buf;
     size_t _cap;
     size_t _len;
+    bool   _overflow;
 };
 
 // Worst-case one entry as JSON: ~100 B of fixed fields plus a 120-char message
 // that may expand 6× when JSON-escaped (\uXXXX) → ~820 B. 1 KB is a safe bound.
 static const size_t LOG_ENTRY_STAGE = 1024;
+
+// Substituted for an entry that does not fit LOG_ENTRY_STAGE.
+//
+// Unreachable as the code stands, and deliberately so: writeEntryJson clamps to
+// LOG_MSG_MAX, which caps one entry at 120 × 6 (worst-case \uXXXX escaping) plus
+// ~90 B of fixed fields ≈ 810 B, inside the 1 KB stage. A corrupted msgLen does
+// not change that — the clamp catches it. What this guards is the invariant, not
+// a live bug: raising LOG_MSG_MAX past ~155, or adding a field to writeEntryJson,
+// silently reintroduces truncation otherwise. Emitting a valid object keeps the
+// array parseable instead of handing clients a half-written one.
+//
+// Verified by driving the generator against an emitter without the clamp: the
+// response stays well-formed and the omission is visible.
+static const char LOG_ENTRY_OVERFLOW_JSON[] =
+    "{\"tsUtc\":\"\",\"boot\":0,\"level\":3,\"levelName\":\"ERROR\","
+    "\"msg\":\"[entry omitted: exceeds the response stage buffer]\"}";
 
 // Resumable generator for the /api/log JSON array. Streams entries newest-first
 // in HTTP chunks, holding only a single entry in RAM at a time — so a large log
@@ -988,8 +1144,19 @@ struct LogJsonSource {
                 // Serialize one entry from the batch into the stage buffer.
                 BufPrint bp(stage, sizeof(stage));
                 if (!first) bp.write(',');
-                first = false;
                 EventLog::writeEntryJson(bp, batch[batchPos++]);
+                if (bp.overflowed()) {
+                    // Truncated object → would break the whole array. Replace it
+                    // with the placeholder, keeping the separator state correct.
+                    BufPrint fb(stage, sizeof(stage));
+                    if (!first) fb.write(',');
+                    fb.write((const uint8_t*)LOG_ENTRY_OVERFLOW_JSON,
+                             sizeof(LOG_ENTRY_OVERFLOW_JSON) - 1);
+                    stageLen = fb.length();
+                    first = false;
+                    continue;
+                }
+                first = false;
                 stageLen = bp.length();
                 continue;
             }
@@ -1004,17 +1171,185 @@ struct LogJsonSource {
     }
 };
 
+// Worst case for one unit as JSON: the fixed fields, the unit name, and up to
+// MAX_CONTROLS control entries each with their own generated name. Same 1 KB
+// bound the log entries use, with the same overflow handling.
+static const size_t UNIT_ENTRY_STAGE = 1024;
+
+// Resumable generator for the GET /api/units body. Streams one unit at a time
+// in HTTP chunks, so the peak allocation is a single unit's JsonDocument rather
+// than a document holding the whole network — which at CLOUD_MAX_UNITS would be
+// ~37 kB, an allocation this device cannot serve at all.
+//
+// Trade-off worth knowing: the previous single-response version held
+// g_configMutex across the entire list, giving a whole-list consistent
+// snapshot. Chunks are produced across separate TCP callbacks, so holding the
+// mutex for the whole response would stall the BLE task for its full duration.
+// The lock is therefore taken PER UNIT, which yields per-unit consistency. That
+// matches how state actually reaches clients anyway — unit_state broadcasts are
+// per unit and already arrive independently.
+struct UnitsJsonSource {
+    const NetworkConfig* cfg = nullptr;
+    size_t count = 0;               // units at response start
+    size_t next  = 0;               // index of the next unit to emit
+    int    phase = 0;               // 0='{"units":[', 1=units, 2=']}', 3=done
+    bool   first = true;
+    char   stage[UNIT_ENTRY_STAGE];
+    size_t stageLen = 0, stagePos = 0;
+
+    // Serialize exactly one unit into the stage buffer. Returns false when the
+    // list ran out (shorter than at start — cannot happen at runtime today, a
+    // cloud refresh reboots, but the bound costs nothing).
+    bool emitUnit() {
+        BufPrint bp(stage, sizeof(stage));
+        if (!first) bp.write(',');
+        uint8_t id = 0;
+        {
+            ConfigLock lock;
+            if (!cfg || next >= cfg->units.size()) return false;
+            const CasambiUnit& unit = cfg->units[next++];
+            id = unit.deviceId;
+
+            JsonDocument d;
+            JsonObject u = d.to<JsonObject>();
+            u["id"]          = unit.deviceId;
+            u["name"]        = unit.name;
+            u["type"]        = unit.type;
+            u["address"]     = unit.address;
+            u["online"]      = unit.online;
+            u["on"]          = unit.on;
+            u["level"]       = unit.level;
+            u["numChannels"] = unit.numChannels;
+            if (unit.hasVertical) u["vertical"] = unit.vertical;
+            if (unit.hasCCT) {
+                u["colorTemp"] = unit.colorTemp;
+                u["cctMin"]    = unit.cctMinKelvin;
+                u["cctMax"]    = unit.cctMaxKelvin;
+            }
+            addUnitControls(u, unit);   // generic, cloud-derived channel list
+            serializeJson(d, bp);
+        }
+
+        if (bp.overflowed()) {
+            // Truncated object would break the whole array. Emit a minimal but
+            // valid one that still names the unit, so the client can tell which
+            // entry it needs to fetch another way.
+            int n = snprintf(stage, sizeof(stage), "%s{\"id\":%u,\"truncated\":true}",
+                             first ? "" : ",", (unsigned)id);
+            stageLen = (n > 0) ? (size_t)n : 0;
+            first = false;
+            return true;
+        }
+
+        first = false;
+        stageLen = bp.length();
+        return true;
+    }
+
+    size_t fill(uint8_t* out, size_t maxLen) {
+        size_t produced = 0;
+        while (produced < maxLen) {
+            // 1) Drain any bytes already staged.
+            if (stagePos < stageLen) {
+                size_t avail = stageLen - stagePos;
+                size_t room  = maxLen - produced;
+                size_t cp    = (avail < room) ? avail : room;
+                memcpy(out + produced, stage + stagePos, cp);
+                stagePos += cp;
+                produced += cp;
+                continue;
+            }
+            // 2) Staging empty → produce the next piece.
+            stageLen = stagePos = 0;
+            if (phase == 0) {
+                const char* p = "{\"units\":[";
+                stageLen = strlen(p);
+                memcpy(stage, p, stageLen);
+                phase = 1;
+                continue;
+            }
+            if (phase == 1) {
+                if (next >= count || !emitUnit()) phase = 2;
+                continue;
+            }
+            if (phase == 2) {
+                stage[stageLen++] = ']';
+                stage[stageLen++] = '}';
+                phase = 3;
+                continue;
+            }
+            break;              // phase 3: done
+        }
+        return produced;        // 0 once fully drained → ends the response
+    }
+};
+
 }  // namespace
+
+bool CasambiWebServer::_admitExpensiveGet(AsyncWebServerRequest* request, const char* what) {
+    const size_t largest = ESP.getMaxAllocHeap();
+    if (largest >= HTTP_EXPENSIVE_GET_HEAP_FLOOR) return true;
+
+    _httpBusyCount++;
+    WEB_LOG("Web: 503 %s (largest block %u < %u)\n",
+            what, (unsigned)largest, (unsigned)HTTP_EXPENSIVE_GET_HEAP_FLOOR);
+
+    // Free any buffered POST body first, exactly as _sendJsonError does — this
+    // path can be reached before a handler consumed it.
+    if (request->_tempObject) {
+        delete static_cast<String*>(request->_tempObject);
+        request->_tempObject = nullptr;
+    }
+
+    // 503 rather than 500: the request is valid, the device is momentarily out
+    // of contiguous heap. Retry-After tells the client it is worth trying again
+    // instead of surfacing an error to the user.
+    AsyncWebServerResponse* r = request->beginResponse(
+        503, "application/json",
+        String("{\"success\":false,\"error\":\"Busy: insufficient contiguous heap, retry\"}"));
+    r->addHeader("Retry-After", String(HTTP_BUSY_RETRY_AFTER_S).c_str());
+    request->send(r);
+    return false;
+}
+
+void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
+    if (!_admitExpensiveGet(request, "/api/units")) return;
+    WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
+
+    // Streamed in chunks, one unit at a time (see UnitsJsonSource). The old
+    // single-response version built the whole list in one JsonDocument and then
+    // copied it into one String — an allocation that grows with the network and
+    // is unservable at CLOUD_MAX_UNITS. It is also the request a client makes
+    // right after receiving a "units_truncated" hello, i.e. exactly when the
+    // heap is already under pressure.
+    auto src = std::make_shared<UnitsJsonSource>();
+    src->cfg = _config;
+    {
+        ConfigLock lock;
+        src->count = _config->units.size();
+    }
+
+    AsyncWebServerResponse* response = request->beginChunkedResponse(
+        "application/json",
+        [src](uint8_t* buffer, size_t maxLen, size_t /*index*/) -> size_t {
+            return src->fill(buffer, maxLen);
+        });
+    request->send(response);
+}
 
 void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     if (!_authOk(request)) return;
+    if (!_admitExpensiveGet(request, "/api/log")) return;
     WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
 
     // Default to the newest 25 entries (~3.5 KB JSON) so a plain GET fits in a
     // single TCP window and the framework's per-chunk malloc(space) (~5.5 KB)
     // stays within the largest free block. Larger responses span multiple chunks
-    // and, on this device's tight/fragmented heap (largest block ~13 KB), can
-    // fail to send (client sees HTTP/0.9). Use ?n=<count> for more (?n=0 = all)
+    // and, on a fragmented heap, can fail to send (client sees HTTP/0.9). The
+    // "largest block ~13 KB" figure this was sized against predates the NimBLE
+    // migration and has not been re-measured since, so the margin here is
+    // unverified rather than known-good. Use ?n=<count> for more (?n=0 = all)
     // at your own risk, or fetch the full log over serial ('log N').
     int n = 25;
     if (request->hasParam("n")) {
@@ -1101,10 +1436,11 @@ void CasambiWebServer::_handleSetNtp(AsyncWebServerRequest* request) {
     // ntpServer String and (b) block the async_tcp task on a flash write.
     // String AND flag are set under the same mutex hold so the consumer can
     // never see the flag without its matching value (transactional handoff).
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    _pendingNtpServer = server;
-    _ntpRequested.store(true);
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    {
+        ConfigLock lock;
+        _pendingNtpServer = server;   // String assignment: can allocate
+        _ntpRequested.store(true);
+    }
 
     WEB_LOG("Web: NTP server change to %s requested from %s\n",
             server.c_str(), _getClientIP(request).c_str());
@@ -1428,20 +1764,21 @@ void CasambiWebServer::_handleUnitState(AsyncWebServerRequest* request) {
     size_t  nControls = 0;
     uint8_t stateLen  = 0;
     bool    usable    = false;
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    if (unit->hasFixture && unit->stateLength > 0 &&
-        !unit->controls.empty() && unit->controls.size() <= statecodec::MAX_CONTROLS) {
-        usable    = true;
-        stateLen  = unit->stateLength;
-        nControls = unit->controls.size();
-        for (size_t i = 0; i < nControls; i++) {
-            specs[i].offset = unit->controls[i].offset;
-            specs[i].length = unit->controls[i].length;
-            specs[i].value  = unit->controls[i].value;
-            names[i] = controlName(*unit, i);
+    {
+        ConfigLock lock;
+        if (unit->hasFixture && unit->stateLength > 0 &&
+            !unit->controls.empty() && unit->controls.size() <= statecodec::MAX_CONTROLS) {
+            usable    = true;
+            stateLen  = unit->stateLength;
+            nControls = unit->controls.size();
+            for (size_t i = 0; i < nControls; i++) {
+                specs[i].offset = unit->controls[i].offset;
+                specs[i].length = unit->controls[i].length;
+                specs[i].value  = unit->controls[i].value;
+                names[i] = controlName(*unit, i);   // String assignment: can allocate
+            }
         }
     }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
 
     if (!usable) {
         // No fixture layout (older config, fixture fetch failed) — the state

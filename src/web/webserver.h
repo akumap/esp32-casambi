@@ -229,8 +229,43 @@ private:
     std::atomic<bool> _resyncNeeded;
     std::atomic<uint32_t> _wsDropCount;
 
+    // WebSocket sends refused or aborted because the heap could not serve the
+    // payload (/api/status ws_send_fails). Distinct from ws_drops: that counts
+    // a full broadcast QUEUE, this counts a failed ALLOCATION. A rising value
+    // means clients are missing updates under memory pressure — before this
+    // counter existed the same condition rebooted the device instead.
+    std::atomic<uint32_t> _wsSendFailCount;
+
+    // Expensive GETs refused with 503 because the heap was too fragmented to
+    // start building a response (/api/status http_busy).
+    std::atomic<uint32_t> _httpBusyCount;
+
+    // Set while a hello snapshot is being built/sent. The resync broadcast
+    // yields to it; a connecting client never does (see _sendHello).
+    std::atomic<bool> _helloInFlight;
+
     // Build and send the JSON for one dequeued broadcast event (loop task).
     void _sendWsEvent(const WsEvent& ev);
+
+    // Send `msg` to one client, or to all when `client` is nullptr, without
+    // letting an allocation failure abort the device. Returns false if the
+    // payload was refused (insufficient contiguous heap) or the send threw.
+    bool _wsSendGuarded(AsyncWebSocketClient* client, const String& msg);
+
+    // Send the hello snapshot, degrading to a unit-less hello and finally to
+    // closing the client if the heap cannot serve it. `client` nullptr
+    // broadcasts to all.
+    void _sendHello(AsyncWebSocketClient* client);
+
+    // Rough contiguous heap a hello with `units` units needs to BUILD (document
+    // plus serialized String). Checked before building because a default
+    // arduino-esp32 build cannot catch a failed allocation.
+    size_t _helloHeapEstimate(size_t units) const;
+
+    // Admission control for the endpoints whose response cost scales with
+    // stored data. Returns true to proceed; otherwise it has already answered
+    // 503 + Retry-After and the caller must return immediately.
+    bool _admitExpensiveGet(AsyncWebServerRequest* request, const char* what);
 
     // Setup route handlers
     void _setupRoutes();
@@ -325,7 +360,11 @@ private:
     // WebSocket helpers
     void _handleWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                                AwsEventType type, void* arg, uint8_t* data, size_t len);
-    String _buildHelloMessage() const;
+    // Full state snapshot for a WebSocket client. `maxUnits` bounds the unit
+    // list (WS_HELLO_MAX_UNITS by default; _sendHello retries with 0 under
+    // memory pressure). Returns an EMPTY string if the heap could not serve
+    // the build — callers must treat that as "no message", not as valid JSON.
+    String _buildHelloMessage(size_t maxUnits = WS_HELLO_MAX_UNITS) const;
 };
 
 #endif // WEBSERVER_H

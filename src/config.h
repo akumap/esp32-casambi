@@ -112,6 +112,17 @@
 #define CONFIG_BAK_PATH           "/casambi_config.json.bak"
 #define WIFI_TMP_PATH             "/wifi_config.json.tmp"
 #define WIFI_BAK_PATH             "/wifi_config.json.bak"
+// Per-category debug flags. Split out of the main config because toggling one
+// bool otherwise rewrote the ENTIRE network configuration — serialize all keys,
+// units, groups and scenes, then re-read the result into a second JsonDocument
+// for validation. On a network with many units that is a large transient heap
+// spike (and a full-config rewrite that can fail) for a trivial setting. This
+// file holds six bools.
+// Values in the main config are still read as the fallback, so an installation
+// upgrading from an older firmware keeps its settings until the next toggle.
+#define DEBUG_FLAGS_PATH          "/debug_flags.json"
+#define DEBUG_FLAGS_TMP_PATH      "/debug_flags.json.tmp"
+#define DEBUG_FLAGS_BAK_PATH      "/debug_flags.json.bak"
 // Marker file: when present at boot, the firmware re-reads the Casambi cloud
 // configuration before BLE/web are started, then reboots into normal operation.
 #define REFRESH_FLAG_PATH         "/refresh_pending"
@@ -241,6 +252,17 @@
 // re-connect is a fresh lottery), so connectivity always wins over quality.
 #define BLE_RSSI_REROLL_MAX             2
 
+// --- Discovery scan parameters ---------------------------------------------
+// NimBLEScan::setInterval/setWindow take MILLISECONDS in NimBLE-Arduino 2.x
+// (converted internally to 0.625 ms ticks) — not raw ticks, as the BLE spec
+// units would suggest. Window ~= interval is a near-continuous scan: every
+// scan here is a short, blocking, user-triggered discovery run on a
+// mains-powered device, so catching an advertisement on the first pass is
+// worth more than the duty cycle. Do not lower the window to "save power"
+// without also accepting longer, less reliable discovery.
+#define BLE_SCAN_INTERVAL_MS            100
+#define BLE_SCAN_WINDOW_MS              99
+
 // Settle time before the gate reads the RSSI. Readings taken immediately
 // after the connect can be far off (unaveraged controller value).
 #define BLE_RSSI_SETTLE_MS              2000
@@ -260,22 +282,64 @@
 // Broadcasts from the BLE task are enqueued here and drained by loop(), so
 // _ws->textAll() is always called from the loop task — never from a BLE task
 // callback — which avoids races with the async_tcp task's _clients management.
-// Sized above the worst case a single 0x06 packet can produce (~40 unit
-// records at MTU 247, one broadcast each) so group/scene bursts are never
-// dropped; the queue itself is only pointers (64 × 4 B). Should it still
+// Sized above the worst case a single 0x06 packet can produce (one broadcast
+// per unit record). The original figure assumed the ATT MTU would come out at
+// the NimBLE default of 247; measured against a real gateway it negotiates to
+// 158 (logged per connect, see _connectLocked), which caps a notification at
+// 155 B and therefore yields FEWER records per packet — the depth is more
+// conservative than intended, not less. The queue itself is only pointers
+// (64 × 4 B), so leaving the headroom costs nothing. Should it still
 // overflow, the drop is flagged and loop() pushes a fresh hello snapshot so
 // clients cannot stay stale on a missed unit_state.
 #define WS_BROADCAST_QUEUE_DEPTH        64
 
 // Upper bound of unit objects serialized into one WebSocket hello snapshot.
-// Each unit is ~150 B of JSON, so 50 units ≈ 7.5 kB — safely below the
-// ~13 kB largest-free-block floor observed on a fragmented heap (see the
-// /api/log sizing note). Networks beyond the cap get the first 50 units
+// Each unit is ~150 B of JSON, so 50 units ≈ 7.5 kB.
+//
+// The floor this was originally justified against — "~13 kB largest free
+// block" — dates from the Bluedroid era, before the NimBLE migration freed a
+// substantial amount of contiguous heap; idle values on NimBLE are an order of
+// magnitude higher (110 kB largest block observed at connect). It has NOT been
+// re-measured under load on NimBLE, so treat the cap as a bound that has not
+// been re-derived rather than one with a current margin behind it — and note
+// that a hello of this size is exactly the allocation that aborts if the heap
+// cannot serve it (see the WS_EVT_CONNECT path). Networks beyond the cap get the first 50 units
 // plus "units_truncated": true; clients needing the rest must fetch
 // GET /api/units themselves. Realistic Casambi home networks stay far
 // below this; the cap only guards the heap against the CLOUD_MAX_UNITS
 // worst case (250 units ≈ 37 kB, an impossible single allocation here).
 #define WS_HELLO_MAX_UNITS              50
+
+// Contiguous heap that must remain free ON TOP of a WebSocket payload before
+// the send is attempted. AsyncWebSocket copies every payload into a
+// shared_ptr<vector<uint8_t>> (makeSharedBuffer), and on this build operator
+// new THROWS on failure — an uncaught bad_alloc there calls std::terminate and
+// reboots the device, which is what a connecting client used to be able to
+// trigger under WS churn. The margin covers the shared_ptr control block, the
+// message queue entry and the TCP buffers the send itself needs, so a payload
+// that only just fits is refused rather than taking the heap to the edge.
+#define WS_SEND_HEAP_MARGIN             4096
+
+// Contiguous heap below which the expensive GETs (/api/units, /api/log) answer
+// 503 + Retry-After instead of starting to build a response. The BLE command
+// queue already answers 503 the same way when it is full, so clients know the
+// contract.
+//
+// CALIBRATION. Both endpoints stream in chunks now, so their peak no longer
+// scales with stored data: the async framework's per-chunk buffer (~5.5 kB)
+// plus the ~1 kB generator held by the response, plus a small per-entry
+// document — roughly 7 kB, fixed. The first value here was 12 kB, carried over
+// from before the streaming change and never re-derived; a heavy stress run
+// then refused ~120 requests that the pre-guard firmware had served, because
+// the floor sat about 5 kB above what the work actually needs. 8 kB refuses
+// only when a chunked response genuinely cannot be served (the same run bottomed
+// out at a 7 kB largest block). Raise this only together with evidence that a
+// response needs more than a chunk buffer.
+#define HTTP_EXPENSIVE_GET_HEAP_FLOOR   8192
+
+// Retry-After (seconds) sent with those 503s. Short: the condition is a
+// transient heap dip under load, not a scheduled outage.
+#define HTTP_BUSY_RETRY_AFTER_S         2
 
 // Depth of the REST→loop BLE command queue (stores BleCommand values).
 // Control handlers on the async_tcp task only validate and enqueue; the loop
@@ -309,6 +373,14 @@
 
 // Operation lifetime default
 #define OPERATION_LIFETIME        5
+
+// Upper bound for every buffer in the encrypt/decrypt path. A BLE packet can
+// never exceed the negotiated ATT MTU minus the 3-byte ATT header, and the
+// preferred MTU NimBLE negotiates is 255 (CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU),
+// so 252 is the hard ceiling for both notifications and our own writes. The
+// crypto path sizes its stack buffers from this constant instead of allocating
+// per packet — see the task-allocation note in encryption.h.
+#define CRYPTO_MAX_PACKET_LEN     252
 
 // ============================================================================
 // API ENDPOINTS

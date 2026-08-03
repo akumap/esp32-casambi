@@ -199,15 +199,29 @@ class Stats:
         if not samples:
             return
         print("\nDevice diagnostics (delta over run):")
-        for key, label in (("ws_drops",        "WS broadcasts dropped"),
-                           ("parse_partial",   "BLE packets partially decoded"),
-                           ("parse_malformed", "BLE packets malformed/dropped")):
+        # ws_send_fails is NOT an "investigate" counter like the others: it
+        # counts WS payloads refused (or caught) because the heap could not
+        # serve them. Before that guard existed the same condition rebooted the
+        # device, so a non-zero value here is the guard working as intended —
+        # it means clients missed an update instead of everyone losing the
+        # gateway. Worth seeing, not worth alarming about.
+        for key, label, alarm in (
+                ("ws_drops",        "WS broadcasts dropped",         True),
+                ("ws_send_fails",   "WS sends refused (low heap)",   False),
+                ("http_busy",       "GETs answered 503 (low heap)",  False),
+                ("parse_partial",   "BLE packets partially decoded", True),
+                ("parse_malformed", "BLE packets malformed/dropped", True)):
             vals = [s[key] for s in samples if s.get(key) is not None]
             if not vals:
                 print(f"  {label:<30}: not reported (older firmware)")
                 continue
             delta = vals[-1] - vals[0]
-            note = "" if delta == 0 else "  <-- investigate"
+            if delta == 0:
+                note = ""
+            elif alarm:
+                note = "  <-- investigate"
+            else:
+                note = "  <-- guard fired (degraded, did not crash)"
             print(f"  {label:<30}: +{delta}{note}")
         # min_free_heap is an all-time low-water mark: if it dropped during
         # the run, THIS load produced a new worst-case heap dip.
@@ -662,6 +676,8 @@ def worker_heap_monitor(host, port, interval=4):
                 stats.record_diag({
                     "min_free_heap":   data.get("min_free_heap"),
                     "ws_drops":        data.get("ws_drops"),
+                    "ws_send_fails":   data.get("ws_send_fails"),
+                    "http_busy":       data.get("http_busy"),
                     "parse_partial":   data.get("parse_partial"),
                     "parse_malformed": data.get("parse_malformed"),
                 })
@@ -950,11 +966,28 @@ def main():
             lb_min   = min(v for v, _ in lb)
             print(f"  largest block       : start={lb_base//1024}KB"
                   f"  min={lb_min//1024}KB  after cooldown={lb_final//1024}KB")
-            if lb_final < lb_base * 0.9:
-                print(f"  => FRAGMENTED — largest block did not recover"
-                      f" (free heap can look fine while allocations still fail).")
+            # Judging fragmentation by this run's start/end delta alone gives a
+            # coin-flip verdict: the largest block wanders by tens of KB between
+            # runs, and measured back to back it goes up as often as down
+            # (79 -> 43 -> 71 -> 51 KB over three identical WS-churn runs, one
+            # of which ended 28 KB ABOVE its start). What actually matters is
+            # whether the block still clears the largest single allocation the
+            # firmware makes — a hello snapshot, or the framework's per-chunk
+            # buffer, both under ~10 KB. FRAG_FLOOR_KB is set well above that.
+            FRAG_FLOOR_KB = 24
+            final_kb = lb_final // 1024
+            if lb_final >= lb_base * 0.9:
+                print("  => largest block recovered — no lasting fragmentation.")
+            elif final_kb >= FRAG_FLOOR_KB:
+                print(f"  => below start, but {final_kb} KB still leaves ample"
+                      f" headroom (largest single allocation is under ~10 KB).")
+                print("     A single run's start/end delta is NOT evidence of lasting"
+                      " fragmentation — compare this value across consecutive runs.")
             else:
-                print(f"  => largest block recovered — no lasting fragmentation.")
+                print(f"  => FRAGMENTED — largest block down to {final_kb} KB,"
+                      f" close to what a single allocation needs.")
+                print("     Re-run without rebooting: a further drop across runs is"
+                      " a real leak, a rebound is normal wander.")
         else:
             print("  (largest_block not reported — update ESP32 firmware to track"
                   " fragmentation)")

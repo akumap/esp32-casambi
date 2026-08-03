@@ -352,10 +352,18 @@ function sha256hex(str){
 
 /* --------------------------------------------------------------- transport */
 class AuthError extends Error{}
+/* 503 from an expensive GET: the device is momentarily short of contiguous
+   heap, not broken. Carries the server's Retry-After so the caller can wait
+   exactly as long as asked instead of guessing. */
+class BusyError extends Error{ constructor(s){ super("busy"); this.retryAfter=s; } }
 
 async function get(path){
   const r=await fetch(path,{cache:"no-store",headers:token?{"X-API-Key":token}:{}});
   if(r.status===401) throw new AuthError("unauthorized");
+  if(r.status===503){
+    const ra=parseInt(r.headers.get("Retry-After")||"2",10);
+    throw new BusyError(isNaN(ra)?2:ra);
+  }
   if(!r.ok) throw new Error("HTTP "+r.status);
   return r.json();
 }
@@ -428,10 +436,16 @@ async function poll(){
   queueRender();
 }
 
+/* Retry state for a 503'd unit fetch. Bounded, so a device that stays short of
+   heap does not turn into an endless request loop. */
+let unitsRetryTimer=null, unitsRetries=0;
+const UNITS_RETRY_MAX=4;
+
 async function loadUnits(){
+  if(unitsRetryTimer){ clearTimeout(unitsRetryTimer); unitsRetryTimer=null; }
   try{
     const d=await get("/api/units");
-    httpOk=true;
+    httpOk=true; unitsRetries=0;
     if(Array.isArray(d.units)){
       const seen=new Set();
       d.units.forEach(u=>{ mergeUnit(u); seen.add(u.id); });
@@ -439,6 +453,21 @@ async function loadUnits(){
     }
   }catch(e){
     if(e instanceof AuthError){ needAuth(); return; }
+    if(e instanceof BusyError){
+      // This is the expected pairing: a truncated hello means the device was
+      // short of heap, and this fetch is what it told us to make instead — so
+      // it can hit the same shortage. Honour Retry-After rather than dropping
+      // the unit list, which would leave the page empty exactly when the
+      // gateway is busiest. httpOk stays true: the device answered correctly.
+      httpOk=true;
+      if(unitsRetries<UNITS_RETRY_MAX){
+        unitsRetries++;
+        unitsRetryTimer=setTimeout(()=>{ unitsRetryTimer=null; loadUnits(); },
+                                   e.retryAfter*1000*unitsRetries);
+      }
+      queueRender();
+      return;
+    }
     httpOk=false;
   }
   queueRender();

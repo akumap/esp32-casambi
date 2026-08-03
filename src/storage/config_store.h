@@ -38,6 +38,29 @@ public:
     static bool loadNetworkConfig(NetworkConfig& config);
 
     /**
+     * Persist only the per-category debug flags (six bools, own file).
+     *
+     * Kept apart from saveNetworkConfig() on purpose: that path serializes the
+     * whole network configuration and re-parses it for validation, which is a
+     * large transient heap cost to record a debug toggle. Use this for any
+     * change that only touches the debug flags.
+     *
+     * @return true on success
+     */
+    static bool saveDebugFlags(const NetworkConfig& config);
+
+    /**
+     * Overlay the debug flags from their own file onto `config`, if that file
+     * exists. Call right after loadNetworkConfig(): the values parsed from the
+     * main config act as the fallback for installations that predate the split,
+     * and this overrides them once the device has written the file at least
+     * once.
+     *
+     * @return true if the flags file existed and was applied
+     */
+    static bool loadDebugFlags(NetworkConfig& config);
+
+    /**
      * Save WiFi credentials to flash
      * @param creds WiFi credentials
      * @return true on success

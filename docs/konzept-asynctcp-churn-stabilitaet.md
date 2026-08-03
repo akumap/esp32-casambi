@@ -282,7 +282,7 @@ Pass-Kriterien: kein `REBOOT DETECTED`, kein `Guru Meditation` (insb. kein
 `_accept` / `_lwip_fin`), freier Heap erholt sich, „largest block recovered".
 Der WSDBG-Trace zeigt keine Client-Akkumulation.
 
-### 6.1 Ergebnis (auf Hardware, ESP32 DevKit V4)
+### 6.1 Ergebnis (auf Hardware, M5Stack ATOM Lite / ESP32-PICO-D4)
 
 - **Stufe 1 — Funktion:** `verify_tcp_stack.py` **10/10 bestanden**. Belege u. a.:
   T5 kein Per-POST-Leck (60 POSTs, Drift ~1,3 KB ≪ Limit), T8 abgebrochene Bodys
@@ -302,6 +302,83 @@ Der WSDBG-Trace zeigt keine Client-Akkumulation.
 → Die in #18 dokumentierten Churn-Crashes (`_accept` / `_lwip_fin`) treten auf
 dem ESP32Async-Stack **nicht mehr** auf; der watchdog-sichere Reconnect
 verhindert den `WiFi.begin()`-WDT-Hang. Damit ist #18 inhaltlich gelöst.
+
+> ⚠ Die Zahlen in 6.1 stammen aus der Zeit **vor** der Migration von Bluedroid
+> auf NimBLE. Der BLE-Stack bestimmt die Heap-Belegung maßgeblich mit, deshalb
+> sind sie kein gültiger Vergleichsmaßstab für den heutigen Stand — siehe 6.2.
+
+### 6.2 Fragmentierung isoliert (aktueller Stack, ATOM Lite)
+
+Alle Läufe unter `heavy`, 180 s, auf demselben Gerät ohne Reboot dazwischen.
+Der Mischlast-Lauf zeigte reproduzierbar „largest block did not recover", was
+die Frage aufwarf, welcher Anteil der Last das verursacht. Isoliert über die
+`--skip-*`-Flags:
+
+|Lauf                        |Start |Minimum|nach Cooldown|Urteil            |
+|----------------------------|------|-------|-------------|------------------|
+|**A** — nur WS-Churn        |75 KB |15 KB  |**37 KB**    |fragmentiert      |
+|**B** — nur HTTP (`--skip-ws`)|37 KB|7 KB   |**37 KB**    |**erholt sich**   |
+
+```bash
+# A — nur WebSocket-Churn
+--profile heavy --duration 180 \
+  --skip-get --skip-post --skip-control --skip-invalid --skip-oversize --skip-abort
+# B — nur HTTP
+--profile heavy --duration 180 --skip-ws
+```
+
+**Befund: die bleibende Fragmentierung stammt aus dem WebSocket-Churn, nicht
+aus den HTTP-Pfaden.** Lauf B startete auf dem Wert, den Lauf A hinterlassen
+hatte, fuhr 423 `/api/units` und 422 `/api/log` (beide gechunkt, jeweils mit
+einer ~1 KB-Generatorstruktur, die über die volle Antwortdauer gehalten wird)
+und endete exakt wieder bei 37 KB. Die naheliegende Vermutung, diese kleinen
+langlebigen Allokationen seien die Ursache, ist damit **widerlegt**.
+
+Einordnung:
+
+- Lauf A macht 2605 Verbindungen in 180 s ≈ **14,5 Verbindungsaufbauten pro
+  Sekunde**. Realbetrieb sind FHEM plus gelegentlich ein Browser, also eine
+  Handvoll pro Tag. Das Profil ist bewusst missbräuchlich.
+- Der Wert **konvergiert**: über inzwischen fünf Läufe landet der größte Block
+  nach Cooldown im Band 33–49 KB, unabhängig vom Startwert (41–75 KB). Das
+  spricht für ein charakteristisches Niveau, nicht für unbegrenzten Verfall.
+- Operativ ist bei 37 KB nichts in Gefahr: ein Hello braucht 7–10 KB, der
+  Chunk-Puffer des Frameworks ~5,5 KB.
+- Die Allokationen liegen in ESPAsyncWebServer/AsyncTCP (Client-Strukturen und
+  ihre Queues), nicht im Anwendungscode — pro WS-Client allokiert die Firmware
+  selbst nur die Hello-Nutzlast, und die ist kurzlebig.
+
+### 6.3 Akkumuliert es? Nein.
+
+Drei weitere WS-Churn-Läufe direkt hintereinander, ohne Reboot dazwischen:
+
+|Lauf|Start |Minimum|nach Cooldown|Delta  |Skript-Urteil (alt)|
+|----|------|-------|-------------|-------|-------------------|
+|C1  |79 KB |27 KB  |43 KB        |−36 KB |fragmentiert       |
+|C2  |43 KB |20 KB  |**71 KB**    |**+28 KB**|erholt          |
+|C3  |71 KB |25 KB  |51 KB        |−20 KB |fragmentiert       |
+
+**C2 endet 28 KB über seinem Startwert.** Die Folge 79 → 43 → 71 → 51 KB
+oszilliert, sie fällt nicht. Über fünf WS-Läufe hinweg gibt es keinen Trend
+nach unten — die bleibende Fragmentierung, die das Skript meldete, ist keine.
+
+Stützende Werte: `min_free_heap` blieb in C2 und C3 bei 16 KB stehen (kein
+neuer Tiefstand), freier Heap nach Cooldown konstant 93 KB in allen drei
+Läufen, 1–2 Fehler auf je ~5850 Anfragen. Und `largest_block_min` liegt bei
+reinem WS-Churn bei 20–27 KB, also deutlich höher als unter Mischlast (7–10 KB)
+— der Churn allein treibt den Heap gar nicht besonders weit herunter.
+
+Ein Nebenbefund: zwischen Lauf B und C1 stieg der größte Block im Leerlauf von
+37 auf 79 KB. Der Heap koalesziert also von selbst zurück, wenn man ihm Zeit
+lässt; die 30 s Cooldown des Skripts reichen dafür nicht immer aus.
+
+**Konsequenz für das Messwerkzeug:** das Urteil „largest block did not
+recover" verglich nur Start und Ende **eines** Laufs (`Ende < Start × 0,9`).
+Auf einem Wert, der zwischen Läufen um Dutzende KB wandert, ist das ein
+Münzwurf — genau deshalb meldete dieselbe Last dreimal hintereinander zweimal
+„fragmentiert" und einmal „erholt". `stress_test.py` bewertet jetzt stattdessen
+gegen den operativ relevanten Boden (größte Einzelallokation < 10 KB) und weist
+explizit darauf hin, dass ein Einzellauf-Delta kein Beleg ist.
 
 ## 7. Aufräumen nach Verifikation
 

@@ -32,7 +32,43 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 
 ### ESP32 Boards
 
-- [AZDelivery ESP32 Dev Kit C V4](https://www.amazon.de/dp/B07Z83MF5W) — Primary development and test board (PSRAM not required)
+**M5Stack ATOM Lite** — the only board this firmware is tested on.
+
+|Property |Value                                                            |
+|---------|-----------------------------------------------------------------|
+|Chip     |ESP32-PICO-D4, revision v1.1                                      |
+|Cores    |Dual core @ 240 MHz                                               |
+|Radio    |WiFi + BT                                                         |
+|Flash    |4 MB, embedded in package (Coding Scheme None)                    |
+|Crystal  |40 MHz                                                            |
+|PSRAM    |None — and none is required                                       |
+|Other    |VRef calibration in efuse                                         |
+
+Build footprint of the `devkit-v4` environment on this chip:
+
+|Segment|Used                       |Capacity                    |     |
+|-------|---------------------------|----------------------------|-----|
+|RAM    |59 572 B (≈58 KB)          |532 480 B (520 KB)          |11.2 %|
+|Flash  |1 596 065 B (≈1.52 MiB)    |3 145 728 B (3 MiB)         |50.7 %|
+
+The flash capacity is the **app partition** of the `huge_app` layout
+(`app0` = 0x300000), not the 4 MB chip total; the rest of the chip holds the
+LittleFS data partition, NVS, the coredump area and the bootloader. `huge_app`
+buys that 3 MB precisely by dropping the second OTA slot, so there is no
+over-the-air rollback partition — updates go over serial. The RAM figure is
+what the **linker** places statically;
+it says nothing about free heap at runtime, which is what the stability notes
+below (`free_heap`, `largest_block`) are about. Roughly half the app partition
+is still free, so there is headroom for the firmware to grow.
+
+The dual-core part matters beyond the spec sheet: the BLE host task and the
+async_tcp task (pinned to core 1) genuinely run in parallel here, which is the
+premise behind the allocation policy in `src/crypto/encryption.h`.
+
+Other ESP32 boards are expected to work — nothing in the firmware is
+board-specific — but they are untested. The `devkit-v4` build environment is
+what the ATOM Lite is flashed with: both are plain ESP32 targets with 4 MB
+flash, so the `huge_app` partition layout applies unchanged.
 
 ### Build Host
 
@@ -74,7 +110,7 @@ The controller should work with any Casambi-enabled luminaire. Capabilities are 
 1. **Build and upload:**
    
    ```bash
-   # For ESP32 Dev Kit V4 (default)
+   # Default environment — used for the ATOM Lite and other plain ESP32 boards
    pio run -e devkit-v4 -t upload
    ```
 1. **Open serial monitor:**
@@ -382,6 +418,8 @@ version `1.0`.
   "min_free_heap": 31000,
   "boot_count": 12,
   "ws_drops": 0,
+  "ws_send_fails": 0,
+  "http_busy": 0,
   "parse_partial": 0,
   "parse_malformed": 0,
   "ntp_server": "pool.ntp.org",
@@ -405,6 +443,16 @@ fragmentation that `free_heap` alone hides — and `min_free_heap` is the
 all-time low-water mark, catching transient dips between status polls.
 `ws_drops` counts WebSocket broadcast events dropped on a full queue (each
 drop triggers a fresh `hello` snapshot, so clients never stay stale).
+
+`ws_send_fails` and `http_busy` count the two heap-admission guards, and are
+**not** failures in the sense the other counters are — they are the device
+refusing work it cannot currently afford, instead of attempting it and
+aborting. `ws_send_fails` counts WebSocket payloads not sent because the heap
+could not serve the copy the framework makes (a `hello` then degrades to a
+unit-less snapshot; a dropped broadcast sets the resync flag). `http_busy`
+counts expensive GETs answered `503` + `Retry-After` before building a
+response. Both rising under load means the guards are working; both staying at
+zero through a stress run means there was headroom to spare.
 `parse_partial` / `parse_malformed` count BLE packets that were only
 partially decoded (understood prefix applied, undecoded tail dropped —
 likely a protocol element the reverse-engineering does not cover yet) or
@@ -446,6 +494,13 @@ ESP32 the re-roll almost always lands there. Re-rolls appear in the event log
 (`BLE gateway re-roll 1/2: rssi=-91 < -85`).
 
 **GET /api/units** — List all units with current state
+
+Streamed in HTTP chunks, one unit at a time, so the response never needs a
+single contiguous allocation proportional to the network size. May answer
+`503` with a `Retry-After` header when the heap is momentarily too fragmented
+to start — the request was fine, retry after the given number of seconds. A
+unit whose JSON would exceed the per-entry buffer is emitted as
+`{"id":N,"truncated":true}` rather than breaking the array.
 
 ```json
 {
@@ -1119,7 +1174,7 @@ Additional pointers:
 
 |Environment|Purpose                                          |
 |-----------|-------------------------------------------------|
-|`devkit-v4`|ESP32 Dev Kit V4 (default)                       |
+|`devkit-v4`|Plain ESP32 (default) — the environment the tested ATOM Lite is flashed with|
 |`esp32-c3` |ESP32-C3 DevKit M1 — build-only, untested on hardware|
 |`debug`    |Verbose logging, debug symbols, exception decoder|
 |`release`  |Size-optimized production build                  |

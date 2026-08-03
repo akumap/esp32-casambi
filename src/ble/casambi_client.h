@@ -340,23 +340,26 @@ private:
     bool _sendOperation(uint8_t opcode, uint16_t target, const std::vector<uint8_t>& payload);
 
     /**
-     * Build operation packet
+     * Append an operation block to the packet under construction.
+     * Advances `outLen` and, on success, the _origin counter. Returns false if
+     * the block would not fit, leaving `out`/`outLen`/_origin unchanged.
      */
-    std::vector<uint8_t> _buildOperation(uint8_t opcode, uint16_t target,
-                                         const std::vector<uint8_t>& payload);
+    bool _buildOperation(uint8_t opcode, uint16_t target,
+                         const std::vector<uint8_t>& payload,
+                         uint8_t* out, size_t outCap, size_t& outLen);
 
     /**
      * Send encrypted packet
      */
     // Returns true only if writeValue() handed the packet to the GATT stack.
-    // Returns false on mutex timeout, missing encryption/characteristic, empty
-    // ciphertext or a failed GATT write.
-    bool _sendEncryptedPacket(const std::vector<uint8_t>& packet, uint32_t counter);
+    // Returns false on mutex timeout, missing encryption/characteristic, a
+    // failed encryption or a failed GATT write.
+    bool _sendEncryptedPacket(const uint8_t* packet, size_t pktLen, uint32_t counter);
 
     /**
-     * Get nonce for packet encryption
+     * Fill the caller's buffer with the nonce for the given packet counter.
      */
-    std::vector<uint8_t> _getNonce(uint32_t counter);
+    void _getNonce(uint32_t counter, uint8_t nonce[NONCE_SIZE]);
 
     // ========================================================================
     // BLE CALLBACKS
