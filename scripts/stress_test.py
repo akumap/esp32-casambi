@@ -199,15 +199,28 @@ class Stats:
         if not samples:
             return
         print("\nDevice diagnostics (delta over run):")
-        for key, label in (("ws_drops",        "WS broadcasts dropped"),
-                           ("parse_partial",   "BLE packets partially decoded"),
-                           ("parse_malformed", "BLE packets malformed/dropped")):
+        # ws_send_fails is NOT an "investigate" counter like the others: it
+        # counts WS payloads refused (or caught) because the heap could not
+        # serve them. Before that guard existed the same condition rebooted the
+        # device, so a non-zero value here is the guard working as intended —
+        # it means clients missed an update instead of everyone losing the
+        # gateway. Worth seeing, not worth alarming about.
+        for key, label, alarm in (
+                ("ws_drops",        "WS broadcasts dropped",        True),
+                ("ws_send_fails",   "WS sends refused (low heap)",  False),
+                ("parse_partial",   "BLE packets partially decoded", True),
+                ("parse_malformed", "BLE packets malformed/dropped", True)):
             vals = [s[key] for s in samples if s.get(key) is not None]
             if not vals:
                 print(f"  {label:<30}: not reported (older firmware)")
                 continue
             delta = vals[-1] - vals[0]
-            note = "" if delta == 0 else "  <-- investigate"
+            if delta == 0:
+                note = ""
+            elif alarm:
+                note = "  <-- investigate"
+            else:
+                note = "  <-- guard fired (degraded, did not crash)"
             print(f"  {label:<30}: +{delta}{note}")
         # min_free_heap is an all-time low-water mark: if it dropped during
         # the run, THIS load produced a new worst-case heap dip.
@@ -662,6 +675,7 @@ def worker_heap_monitor(host, port, interval=4):
                 stats.record_diag({
                     "min_free_heap":   data.get("min_free_heap"),
                     "ws_drops":        data.get("ws_drops"),
+                    "ws_send_fails":   data.get("ws_send_fails"),
                     "parse_partial":   data.get("parse_partial"),
                     "parse_malformed": data.get("parse_malformed"),
                 })
