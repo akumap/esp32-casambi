@@ -303,6 +303,56 @@ Der WSDBG-Trace zeigt keine Client-Akkumulation.
 dem ESP32Async-Stack **nicht mehr** auf; der watchdog-sichere Reconnect
 verhindert den `WiFi.begin()`-WDT-Hang. Damit ist #18 inhaltlich gelöst.
 
+> ⚠ Die Zahlen in 6.1 stammen aus der Zeit **vor** der Migration von Bluedroid
+> auf NimBLE. Der BLE-Stack bestimmt die Heap-Belegung maßgeblich mit, deshalb
+> sind sie kein gültiger Vergleichsmaßstab für den heutigen Stand — siehe 6.2.
+
+### 6.2 Fragmentierung isoliert (aktueller Stack, ATOM Lite)
+
+Alle Läufe unter `heavy`, 180 s, auf demselben Gerät ohne Reboot dazwischen.
+Der Mischlast-Lauf zeigte reproduzierbar „largest block did not recover", was
+die Frage aufwarf, welcher Anteil der Last das verursacht. Isoliert über die
+`--skip-*`-Flags:
+
+|Lauf                        |Start |Minimum|nach Cooldown|Urteil            |
+|----------------------------|------|-------|-------------|------------------|
+|**A** — nur WS-Churn        |75 KB |15 KB  |**37 KB**    |fragmentiert      |
+|**B** — nur HTTP (`--skip-ws`)|37 KB|7 KB   |**37 KB**    |**erholt sich**   |
+
+```bash
+# A — nur WebSocket-Churn
+--profile heavy --duration 180 \
+  --skip-get --skip-post --skip-control --skip-invalid --skip-oversize --skip-abort
+# B — nur HTTP
+--profile heavy --duration 180 --skip-ws
+```
+
+**Befund: die bleibende Fragmentierung stammt aus dem WebSocket-Churn, nicht
+aus den HTTP-Pfaden.** Lauf B startete auf dem Wert, den Lauf A hinterlassen
+hatte, fuhr 423 `/api/units` und 422 `/api/log` (beide gechunkt, jeweils mit
+einer ~1 KB-Generatorstruktur, die über die volle Antwortdauer gehalten wird)
+und endete exakt wieder bei 37 KB. Die naheliegende Vermutung, diese kleinen
+langlebigen Allokationen seien die Ursache, ist damit **widerlegt**.
+
+Einordnung:
+
+- Lauf A macht 2605 Verbindungen in 180 s ≈ **14,5 Verbindungsaufbauten pro
+  Sekunde**. Realbetrieb sind FHEM plus gelegentlich ein Browser, also eine
+  Handvoll pro Tag. Das Profil ist bewusst missbräuchlich.
+- Der Wert **konvergiert**: über inzwischen fünf Läufe landet der größte Block
+  nach Cooldown im Band 33–49 KB, unabhängig vom Startwert (41–75 KB). Das
+  spricht für ein charakteristisches Niveau, nicht für unbegrenzten Verfall.
+- Operativ ist bei 37 KB nichts in Gefahr: ein Hello braucht 7–10 KB, der
+  Chunk-Puffer des Frameworks ~5,5 KB.
+- Die Allokationen liegen in ESPAsyncWebServer/AsyncTCP (Client-Strukturen und
+  ihre Queues), nicht im Anwendungscode — pro WS-Client allokiert die Firmware
+  selbst nur die Hello-Nutzlast, und die ist kurzlebig.
+
+**Offen:** ob sich das über viele Zyklen doch summiert. Der entscheidende Test
+wäre Lauf A drei- bis viermal hintereinander ohne Reboot: bleibt das Band
+stehen, ist es unkritisch; wandert es nach unten, ist es ein echtes Leck in
+Form von Fragmentierung.
+
 ## 7. Aufräumen nach Verifikation
 
 - ✅ Diagnose-Instrumentierung **gegated statt entfernt**: `WSDBG` bleibt hinter
