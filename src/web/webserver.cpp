@@ -86,7 +86,7 @@ CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
       _refreshRequested(false), _rebootRequested(false), _clearLogRequested(false),
       _ntpRequested(false),
       _broadcastQueue(nullptr), _bleCmdQueue(nullptr), _resyncNeeded(false),
-      _wsDropCount(0), _wsSendFailCount(0) {
+      _wsDropCount(0), _wsSendFailCount(0), _httpBusyCount(0), _helloInFlight(false) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(WsEvent));
     _bleCmdQueue    = xQueueCreate(BLE_CMD_QUEUE_DEPTH, sizeof(BleCommand));
 }
@@ -516,6 +516,30 @@ bool CasambiWebServer::_wsSendGuarded(AsyncWebSocketClient* client, const String
 }
 
 void CasambiWebServer::_sendHello(AsyncWebSocketClient* client) {
+    // Two callers can build a hello, on two different tasks: a connecting
+    // client (async_tcp) and the resync broadcast (loop). Connect-triggered
+    // hellos cannot collide with each other — async_tcp handles its events
+    // serially — but a resync can land on top of one, doubling the peak.
+    //
+    // Only one of the two is deferrable, and it is the resync: _resyncNeeded
+    // stays set and loop() retries on the next iteration, so skipping costs a
+    // few milliseconds and nothing else. A connecting client is waiting and has
+    // no retry channel, so it never yields. That does not hard-bound the peak
+    // to one — a connect arriving mid-resync still proceeds — but it removes
+    // the pile-up that the stress profile produces.
+    struct FlagGuard {
+        std::atomic<bool>& f;
+        explicit FlagGuard(std::atomic<bool>& x) : f(x) { f = true; }
+        ~FlagGuard() { f = false; }
+    };
+
+    if (!client && _helloInFlight.load()) {
+        _resyncNeeded = true;       // try again next loop iteration
+        WEB_LOG("WS: resync hello deferred (one already in flight)\n");
+        return;
+    }
+    FlagGuard inFlight(_helloInFlight);
+
     // Decide BEFORE building whether the full snapshot is affordable. On a
     // default arduino-esp32 build there is no catch to fall back on, so this
     // estimate — not the exception handler — is what keeps the path alive.
@@ -904,6 +928,7 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     // Broadcast events dropped on a full queue (each triggers a hello resync).
     doc["ws_drops"] = _wsDropCount.load();
     doc["ws_send_fails"] = _wsSendFailCount.load();
+    doc["http_busy"] = _httpBusyCount.load();
     // Tolerant-parser diagnostics, summed over the packet types: "partial" =
     // packets whose understood prefix was applied while an undecoded tail was
     // dropped (a protocol element we do not know yet — worth investigating
@@ -954,39 +979,6 @@ WEB_LOG("Web: /api/status from %s\n", _getClientIP(request).c_str());
         doc["last_connect_rc"]    = _client->getLastConnectError();
     }
 
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-}
-
-void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
-    if (!_authOk(request)) return;
-    WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
-    JsonDocument doc;
-    JsonArray units = doc["units"].to<JsonArray>();
-    // Same consistent-snapshot rule as _buildHelloMessage: state fields are
-    // written by the BLE task under g_configMutex, so read them under it too.
-    {
-    ConfigLock lock;
-    for (const auto& unit : _config->units) {
-        JsonObject u = units.add<JsonObject>();
-        u["id"] = unit.deviceId;
-        u["name"] = unit.name;
-        u["type"] = unit.type;
-        u["address"] = unit.address;
-        u["online"] = unit.online;
-        u["on"] = unit.on;
-        u["level"] = unit.level;
-        u["numChannels"] = unit.numChannels;
-        if (unit.hasVertical) u["vertical"] = unit.vertical;
-        if (unit.hasCCT) {
-            u["colorTemp"] = unit.colorTemp;
-            u["cctMin"] = unit.cctMinKelvin;
-            u["cctMax"] = unit.cctMaxKelvin;
-        }
-        addUnitControls(u, unit);   // generic, cloud-derived channel list
-    }
-    }   // ConfigLock
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
@@ -1179,10 +1171,176 @@ struct LogJsonSource {
     }
 };
 
+// Worst case for one unit as JSON: the fixed fields, the unit name, and up to
+// MAX_CONTROLS control entries each with their own generated name. Same 1 KB
+// bound the log entries use, with the same overflow handling.
+static const size_t UNIT_ENTRY_STAGE = 1024;
+
+// Resumable generator for the GET /api/units body. Streams one unit at a time
+// in HTTP chunks, so the peak allocation is a single unit's JsonDocument rather
+// than a document holding the whole network — which at CLOUD_MAX_UNITS would be
+// ~37 kB, an allocation this device cannot serve at all.
+//
+// Trade-off worth knowing: the previous single-response version held
+// g_configMutex across the entire list, giving a whole-list consistent
+// snapshot. Chunks are produced across separate TCP callbacks, so holding the
+// mutex for the whole response would stall the BLE task for its full duration.
+// The lock is therefore taken PER UNIT, which yields per-unit consistency. That
+// matches how state actually reaches clients anyway — unit_state broadcasts are
+// per unit and already arrive independently.
+struct UnitsJsonSource {
+    const NetworkConfig* cfg = nullptr;
+    size_t count = 0;               // units at response start
+    size_t next  = 0;               // index of the next unit to emit
+    int    phase = 0;               // 0='{"units":[', 1=units, 2=']}', 3=done
+    bool   first = true;
+    char   stage[UNIT_ENTRY_STAGE];
+    size_t stageLen = 0, stagePos = 0;
+
+    // Serialize exactly one unit into the stage buffer. Returns false when the
+    // list ran out (shorter than at start — cannot happen at runtime today, a
+    // cloud refresh reboots, but the bound costs nothing).
+    bool emitUnit() {
+        BufPrint bp(stage, sizeof(stage));
+        if (!first) bp.write(',');
+        uint8_t id = 0;
+        {
+            ConfigLock lock;
+            if (!cfg || next >= cfg->units.size()) return false;
+            const CasambiUnit& unit = cfg->units[next++];
+            id = unit.deviceId;
+
+            JsonDocument d;
+            JsonObject u = d.to<JsonObject>();
+            u["id"]          = unit.deviceId;
+            u["name"]        = unit.name;
+            u["type"]        = unit.type;
+            u["address"]     = unit.address;
+            u["online"]      = unit.online;
+            u["on"]          = unit.on;
+            u["level"]       = unit.level;
+            u["numChannels"] = unit.numChannels;
+            if (unit.hasVertical) u["vertical"] = unit.vertical;
+            if (unit.hasCCT) {
+                u["colorTemp"] = unit.colorTemp;
+                u["cctMin"]    = unit.cctMinKelvin;
+                u["cctMax"]    = unit.cctMaxKelvin;
+            }
+            addUnitControls(u, unit);   // generic, cloud-derived channel list
+            serializeJson(d, bp);
+        }
+
+        if (bp.overflowed()) {
+            // Truncated object would break the whole array. Emit a minimal but
+            // valid one that still names the unit, so the client can tell which
+            // entry it needs to fetch another way.
+            int n = snprintf(stage, sizeof(stage), "%s{\"id\":%u,\"truncated\":true}",
+                             first ? "" : ",", (unsigned)id);
+            stageLen = (n > 0) ? (size_t)n : 0;
+            first = false;
+            return true;
+        }
+
+        first = false;
+        stageLen = bp.length();
+        return true;
+    }
+
+    size_t fill(uint8_t* out, size_t maxLen) {
+        size_t produced = 0;
+        while (produced < maxLen) {
+            // 1) Drain any bytes already staged.
+            if (stagePos < stageLen) {
+                size_t avail = stageLen - stagePos;
+                size_t room  = maxLen - produced;
+                size_t cp    = (avail < room) ? avail : room;
+                memcpy(out + produced, stage + stagePos, cp);
+                stagePos += cp;
+                produced += cp;
+                continue;
+            }
+            // 2) Staging empty → produce the next piece.
+            stageLen = stagePos = 0;
+            if (phase == 0) {
+                const char* p = "{\"units\":[";
+                stageLen = strlen(p);
+                memcpy(stage, p, stageLen);
+                phase = 1;
+                continue;
+            }
+            if (phase == 1) {
+                if (next >= count || !emitUnit()) phase = 2;
+                continue;
+            }
+            if (phase == 2) {
+                stage[stageLen++] = ']';
+                stage[stageLen++] = '}';
+                phase = 3;
+                continue;
+            }
+            break;              // phase 3: done
+        }
+        return produced;        // 0 once fully drained → ends the response
+    }
+};
+
 }  // namespace
+
+bool CasambiWebServer::_admitExpensiveGet(AsyncWebServerRequest* request, const char* what) {
+    const size_t largest = ESP.getMaxAllocHeap();
+    if (largest >= HTTP_EXPENSIVE_GET_HEAP_FLOOR) return true;
+
+    _httpBusyCount++;
+    WEB_LOG("Web: 503 %s (largest block %u < %u)\n",
+            what, (unsigned)largest, (unsigned)HTTP_EXPENSIVE_GET_HEAP_FLOOR);
+
+    // Free any buffered POST body first, exactly as _sendJsonError does — this
+    // path can be reached before a handler consumed it.
+    if (request->_tempObject) {
+        delete static_cast<String*>(request->_tempObject);
+        request->_tempObject = nullptr;
+    }
+
+    // 503 rather than 500: the request is valid, the device is momentarily out
+    // of contiguous heap. Retry-After tells the client it is worth trying again
+    // instead of surfacing an error to the user.
+    AsyncWebServerResponse* r = request->beginResponse(
+        503, "application/json",
+        String("{\"success\":false,\"error\":\"Busy: insufficient contiguous heap, retry\"}"));
+    r->addHeader("Retry-After", String(HTTP_BUSY_RETRY_AFTER_S).c_str());
+    request->send(r);
+    return false;
+}
+
+void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
+    if (!_authOk(request)) return;
+    if (!_admitExpensiveGet(request, "/api/units")) return;
+    WEB_LOG("Web: /api/units from %s\n", _getClientIP(request).c_str());
+
+    // Streamed in chunks, one unit at a time (see UnitsJsonSource). The old
+    // single-response version built the whole list in one JsonDocument and then
+    // copied it into one String — an allocation that grows with the network and
+    // is unservable at CLOUD_MAX_UNITS. It is also the request a client makes
+    // right after receiving a "units_truncated" hello, i.e. exactly when the
+    // heap is already under pressure.
+    auto src = std::make_shared<UnitsJsonSource>();
+    src->cfg = _config;
+    {
+        ConfigLock lock;
+        src->count = _config->units.size();
+    }
+
+    AsyncWebServerResponse* response = request->beginChunkedResponse(
+        "application/json",
+        [src](uint8_t* buffer, size_t maxLen, size_t /*index*/) -> size_t {
+            return src->fill(buffer, maxLen);
+        });
+    request->send(response);
+}
 
 void CasambiWebServer::_handleGetLog(AsyncWebServerRequest* request) {
     if (!_authOk(request)) return;
+    if (!_admitExpensiveGet(request, "/api/log")) return;
     WEB_LOG("Web: /api/log from %s\n", _getClientIP(request).c_str());
 
     // Default to the newest 25 entries (~3.5 KB JSON) so a plain GET fits in a

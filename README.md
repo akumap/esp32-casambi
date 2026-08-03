@@ -418,6 +418,8 @@ version `1.0`.
   "min_free_heap": 31000,
   "boot_count": 12,
   "ws_drops": 0,
+  "ws_send_fails": 0,
+  "http_busy": 0,
   "parse_partial": 0,
   "parse_malformed": 0,
   "ntp_server": "pool.ntp.org",
@@ -441,6 +443,16 @@ fragmentation that `free_heap` alone hides — and `min_free_heap` is the
 all-time low-water mark, catching transient dips between status polls.
 `ws_drops` counts WebSocket broadcast events dropped on a full queue (each
 drop triggers a fresh `hello` snapshot, so clients never stay stale).
+
+`ws_send_fails` and `http_busy` count the two heap-admission guards, and are
+**not** failures in the sense the other counters are — they are the device
+refusing work it cannot currently afford, instead of attempting it and
+aborting. `ws_send_fails` counts WebSocket payloads not sent because the heap
+could not serve the copy the framework makes (a `hello` then degrades to a
+unit-less snapshot; a dropped broadcast sets the resync flag). `http_busy`
+counts expensive GETs answered `503` + `Retry-After` before building a
+response. Both rising under load means the guards are working; both staying at
+zero through a stress run means there was headroom to spare.
 `parse_partial` / `parse_malformed` count BLE packets that were only
 partially decoded (understood prefix applied, undecoded tail dropped —
 likely a protocol element the reverse-engineering does not cover yet) or
@@ -482,6 +494,13 @@ ESP32 the re-roll almost always lands there. Re-rolls appear in the event log
 (`BLE gateway re-roll 1/2: rssi=-91 < -85`).
 
 **GET /api/units** — List all units with current state
+
+Streamed in HTTP chunks, one unit at a time, so the response never needs a
+single contiguous allocation proportional to the network size. May answer
+`503` with a `Retry-After` header when the heap is momentarily too fragmented
+to start — the request was fine, retry after the given number of seconds. A
+unit whose JSON would exceed the per-entry buffer is emitted as
+`{"id":N,"truncated":true}` rather than breaking the array.
 
 ```json
 {

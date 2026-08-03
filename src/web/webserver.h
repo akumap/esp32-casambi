@@ -236,6 +236,14 @@ private:
     // counter existed the same condition rebooted the device instead.
     std::atomic<uint32_t> _wsSendFailCount;
 
+    // Expensive GETs refused with 503 because the heap was too fragmented to
+    // start building a response (/api/status http_busy).
+    std::atomic<uint32_t> _httpBusyCount;
+
+    // Set while a hello snapshot is being built/sent. The resync broadcast
+    // yields to it; a connecting client never does (see _sendHello).
+    std::atomic<bool> _helloInFlight;
+
     // Build and send the JSON for one dequeued broadcast event (loop task).
     void _sendWsEvent(const WsEvent& ev);
 
@@ -253,6 +261,11 @@ private:
     // plus serialized String). Checked before building because a default
     // arduino-esp32 build cannot catch a failed allocation.
     size_t _helloHeapEstimate(size_t units) const;
+
+    // Admission control for the endpoints whose response cost scales with
+    // stored data. Returns true to proceed; otherwise it has already answered
+    // 503 + Retry-After and the caller must return immediately.
+    bool _admitExpensiveGet(AsyncWebServerRequest* request, const char* what);
 
     // Setup route handlers
     void _setupRoutes();

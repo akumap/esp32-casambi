@@ -320,6 +320,19 @@
 // that only just fits is refused rather than taking the heap to the edge.
 #define WS_SEND_HEAP_MARGIN             4096
 
+// Contiguous heap below which the expensive GETs (/api/units, /api/log) answer
+// 503 + Retry-After instead of starting to build a response. Those two are the
+// endpoints whose cost scales with stored data, and the async framework mallocs
+// a per-chunk buffer (~5.5 kB) on top of whatever the handler holds. Refusing
+// early keeps a momentary dip from turning into a failed send — or, before the
+// WS guards, a reboot. The BLE command queue already answers 503 the same way
+// when it is full, so clients know the contract.
+#define HTTP_EXPENSIVE_GET_HEAP_FLOOR   12288
+
+// Retry-After (seconds) sent with those 503s. Short: the condition is a
+// transient heap dip under load, not a scheduled outage.
+#define HTTP_BUSY_RETRY_AFTER_S         2
+
 // Depth of the REST→loop BLE command queue (stores BleCommand values).
 // Control handlers on the async_tcp task only validate and enqueue; the loop
 // task dequeues one command per iteration and performs the BLE operation, so
