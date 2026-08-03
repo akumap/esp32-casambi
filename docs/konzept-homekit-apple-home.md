@@ -1,8 +1,16 @@
 # Konzept: Apple Home / HomeKit — Footprint-Abschätzung
 
-Status: **Analyse, nichts implementiert.** Beantwortet die Frage „Wie groß wäre
-der Footprint (Flash und Heap) für eine Homebridge, die ich in Apple Home
-einbinden kann?"
+Status: **abgeschlossen — nicht weiterverfolgt.** Reine Machbarkeits- und
+Footprint-Analyse; es wurde nichts implementiert und es ist auch nichts
+geplant. Die Anbindung an Apple Home läuft bereits über den Raspberry Pi
+(Variante A, Abschnitt 3); das native HAP im ESP32 (Variante B) ist mit dem
+hier ermittelten Heap-Bedarf und dem Webserver-Blocker aus 4.4 **verworfen**.
+Das Dokument bleibt als Entscheidungsgrundlage stehen — falls die Frage
+später mit anderer Hardware (ESP32-S3 mit PSRAM) wiederkommt, stehen die
+Zahlen und die Messanleitung (Abschnitt 6) bereit.
+
+Beantwortet die Frage „Wie groß wäre der Footprint (Flash und Heap) für eine
+Homebridge, die ich in Apple Home einbinden kann?"
 Branch: `claude/homebridge-apple-home-footprint-gnouc8`
 
 ## 0. Kurzantwort
@@ -273,17 +281,24 @@ die WebSocket-Push-Schicht und die gesamte Stabilitätsarbeit aus #18
 
 Der Speicher ist also nicht einmal das teuerste Argument.
 
-## 5. Empfehlung
+## 5. Entscheidung
 
-**Variante A.** Sie kostet auf dem ESP32 exakt nichts, nutzt mit dem
+**Variante A — und zwar bereits im Einsatz.** Die Apple-Home-Anbindung läuft
+über den Raspberry Pi; am ESP32 ändert sich dadurch nichts. **Variante B ist
+verworfen** und wird nicht weiterverfolgt: der Heap-Bedarf passt auf dem ATOM
+Lite nicht (4.3), und der Webserver-Blocker (4.4) würde den Preis auch dann
+nicht rechtfertigen, wenn er es täte. Die folgenden Absätze halten fest,
+*warum* — nicht, was noch zu tun wäre.
+
+Variante A kostet auf dem ESP32 exakt nichts, nutzt mit dem
 WebSocket-Push genau den Pfad, für den er gebaut wurde, und lässt die
 BLE-/Web-Architektur unangetastet. Die HomeKit-Logik (Mired-Umrechnung,
 Debounce, Fehlerstatus) liegt dort, wo sie billig zu ändern ist — auf dem Pi,
 neben FHEM.
 
-Variante B ist auf dem ATOM Lite nicht sinnvoll umsetzbar. Falls native
-HomeKit-Unterstützung wirklich das Ziel ist, sind das die beiden gangbaren
-Wege:
+Zwei Wege blieben, falls die Frage später doch noch einmal aufkommt — beide
+sind ausdrücklich **nicht** eingeplant und hier nur festgehalten, damit die
+Analyse nicht erneut geführt werden muss:
 
 - **ESP32-S3 mit PSRAM** als Zielboard; dann trägt PSRAM die Accessory-DB, und
   es bleibt „nur" die Webserver-Portierung aus 4.4.
@@ -292,10 +307,11 @@ Wege:
   Pi. Dort ist der Heap frei, weil kein BLE-Stack und kein Casambi-Protokoll
   darauf laufen.
 
-## 6. Verifikation, falls Variante B doch geprüft werden soll
+## 6. Messanleitung (nicht ausgeführt)
 
-Die Zahlen in 4.1/4.2 sind hergeleitet, nicht auf dieser Hardware gemessen.
-Beide lassen sich mit überschaubarem Aufwand hart machen:
+Die Zahlen in 4.1/4.2 sind hergeleitet, nicht auf dieser Hardware gemessen —
+und werden es nach der Entscheidung in Abschnitt 5 auch nicht. Wer sie doch
+einmal hart machen will, braucht dafür etwa eine Stunde:
 
 1. **Flash:** `homespan/HomeSpan` in ein Wegwerf-Environment aufnehmen, eine
    minimale Bridge mit 15 Lightbulb-Accessories bauen, `pio run -t size`
