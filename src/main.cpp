@@ -23,7 +23,9 @@
 #include "web/setup_portal.h"
 #include "log/event_log.h"
 #include "serial_args.h"
-#include <ESPmDNS.h>
+#include "app_state.h"
+#include "net/time_sync.h"
+#include "net/wifi_manager.h"
 
 // Global state
 NetworkConfig networkConfig;
@@ -37,8 +39,8 @@ SetupPortal* setupPortal = nullptr;
 SemaphoreHandle_t g_configMutex = nullptr;
 
 // Take/give g_configMutex around a String mutation on the loop task.
-static void configLock()   { if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY); }
-static void configUnlock() { if (g_configMutex) xSemaphoreGive(g_configMutex); }
+void configLock()   { if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY); }
+void configUnlock() { if (g_configMutex) xSemaphoreGive(g_configMutex); }
 bool bleDebugEnabled     = false;
 bool casambiDebugEnabled = true;
 bool webDebugEnabled     = true;
@@ -46,22 +48,7 @@ bool parseDebugEnabled   = false;
 bool heapDebugEnabled    = false;
 bool cloudDebugEnabled   = false;
 
-// Cached WiFi credentials — loaded once at boot and updated by 'wifi set'.
-// Avoids repeated LittleFS reads in the 30 s reconnect loop.
-static WiFiCredentials g_wifiCreds;
-static bool g_wifiCredsLoaded = false;
-
-// BLE scan state
-struct ScannedDevice {
-    String address;
-    String name;
-    int rssi;
-    // Advertised address type. The reconnect path always connects as "public",
-    // so a device listed here as "random" can be discovered but never reached.
-    uint8_t addrType;
-
-    ScannedDevice() : rssi(0), addrType(0) {}
-};
+// BLE scan state (ScannedDevice is declared in app_state.h)
 std::vector<ScannedDevice> scannedDevices;
 
 // ============================================================================
@@ -106,213 +93,10 @@ void handleCommand(const String& cmd);
 void requestCloudRefresh(const String& password);
 void runScheduledCloudRefresh();
 void checkAndReconnectBLE();
-void checkAndReconnectWiFi();
 void monitorHeap();
 void printStatus();
 void printBLEDiagnostics();
 void checkCasambiVersions(const NetworkConfig& cfg);
-void syncTime();
-void startMDNS();
-
-// Short, stable per-device suffix (the LAST two MAC octets) used for the mDNS
-// hostname and the setup-AP SSID so several gateways stay distinguishable.
-// ESP.getEfuseMac() stores MAC octet 0 (the vendor OUI) in the LOWEST byte, so
-// `mac & 0xFFFF` would yield the OUI — identical across boards of a batch. The
-// device-specific tail lives in bits 32..47. (Keep in sync with the copy in
-// setup_portal.cpp.)
-static String deviceSuffix() {
-    uint64_t mac = ESP.getEfuseMac();
-    char buf[5];
-    sprintf(buf, "%02x%02x",
-            (unsigned)((mac >> 32) & 0xFF),    // mac[4]
-            (unsigned)((mac >> 40) & 0xFF));   // mac[5], last octet
-    return String(buf);
-}
-
-// True once MDNS.begin() succeeded, so the recovery paths below can call
-// startMDNS() unconditionally without re-registering the responder.
-static bool g_mdnsStarted = false;
-
-// Advertise the configured gateway as casambi-XXXX.local so FHEM can find it.
-// Idempotent: called from the boot path and from every WiFi/webserver recovery
-// path, because a device that boots before the router is up would otherwise
-// never become discoverable. ESPmDNS re-announces on later IP changes itself.
-void startMDNS() {
-    if (g_mdnsStarted) return;
-    String host = "casambi-" + deviceSuffix();
-    if (MDNS.begin(host.c_str())) {
-        g_mdnsStarted = true;
-        MDNS.addService("http", "tcp", 80);
-        MDNS.addServiceTxt("http", "tcp", "configured", "1");
-        MDNS.addServiceTxt("http", "tcp", "build", String(FIRMWARE_BUILD));
-        MDNS.addServiceTxt("http", "tcp", "network", networkConfig.networkName);
-        Serial.printf("mDNS: http://%s.local/\n", host.c_str());
-    } else {
-        Serial.println("mDNS: failed to start (will retry on next WiFi recovery)");
-    }
-}
-
-// Tracks whether NTP has reported a valid wall-clock time yet.
-static bool g_timeSynced = false;
-// True while WiFi is known-up, so we only log the WiFi-loss event once per drop.
-static bool g_wifiWasConnected = false;
-
-// ============================================================================
-// WIFI DISCONNECT DIAGNOSTICS
-// ============================================================================
-
-// WiFi.status() only says THAT the link is down; WHY is delivered exclusively
-// in the STA_DISCONNECTED event (IDF wifi_err_reason_t) and would otherwise be
-// lost. The reason separates the three broad causes that need different fixes:
-// AP kicked us (ASSOC_LEAVE/AUTH_EXPIRE — steering, reboot, WLAN schedule),
-// radio problems (BEACON_TIMEOUT/NO_AP_FOUND — signal, interference, channel
-// change) and credential trouble (AUTH_FAIL/HANDSHAKE_TIMEOUT).
-
-// Last RSSI sampled while the link was up (0 = never sampled). Written on
-// loopTask / event task, read on the WiFi event task at disconnect time.
-static std::atomic<int8_t> g_lastWifiRssi{0};
-
-// Reason of the current disconnect episode, 0 = link is up. The IDF retries
-// every few seconds during an outage and fires STA_DISCONNECTED on every
-// failed attempt; this deduplicates the flash log to one entry per episode
-// (plus one per reason change).
-static std::atomic<uint8_t> g_lastWifiDiscReason{0};
-
-// millis() at the first disconnect event of the current episode. The 30 s poll
-// in checkAndReconnectWiFi() quantizes its log entries to the check grid; the
-// event pair DISCONNECTED→GOT_IP measures the true outage duration.
-static std::atomic<uint32_t> g_wifiLostAtMs{0};
-
-static const char* wifiDisconnectReasonName(uint8_t reason) {
-    switch (reason) {
-        case WIFI_REASON_UNSPECIFIED:            return "UNSPECIFIED";
-        case WIFI_REASON_AUTH_EXPIRE:            return "AUTH_EXPIRE";
-        case WIFI_REASON_AUTH_LEAVE:             return "AUTH_LEAVE";
-        case WIFI_REASON_ASSOC_EXPIRE:           return "ASSOC_EXPIRE";
-        case WIFI_REASON_ASSOC_TOOMANY:          return "ASSOC_TOOMANY";
-        case WIFI_REASON_NOT_AUTHED:             return "NOT_AUTHED";
-        case WIFI_REASON_NOT_ASSOCED:            return "NOT_ASSOCED";
-        case WIFI_REASON_ASSOC_LEAVE:            return "ASSOC_LEAVE";
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4WAY_HANDSHAKE_TIMEOUT";
-        case WIFI_REASON_BEACON_TIMEOUT:         return "BEACON_TIMEOUT";
-        case WIFI_REASON_NO_AP_FOUND:            return "NO_AP_FOUND";
-        case WIFI_REASON_AUTH_FAIL:              return "AUTH_FAIL";
-        case WIFI_REASON_ASSOC_FAIL:             return "ASSOC_FAIL";
-        case WIFI_REASON_HANDSHAKE_TIMEOUT:      return "HANDSHAKE_TIMEOUT";
-        case WIFI_REASON_CONNECTION_FAIL:        return "CONNECTION_FAIL";
-        default:                                 return "unknown";
-    }
-}
-
-// Runs on the WiFi event task, not loopTask. EventLog::log() is task-safe and
-// writes only RTC RAM from foreign tasks (flash persistence happens later via
-// flush() on loopTask), so no flash I/O blocks the event task here.
-static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-    switch (event) {
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
-            uint8_t reason = info.wifi_sta_disconnected.reason;
-            if (g_lastWifiDiscReason == 0) g_wifiLostAtMs = millis();
-            if (reason != g_lastWifiDiscReason) {
-                g_lastWifiDiscReason = reason;
-                if (g_lastWifiRssi != 0) {
-                    EventLog::log(LOG_WARN, "WiFi disconnect: reason=%u (%s), last rssi=%d dBm",
-                                  (unsigned)reason, wifiDisconnectReasonName(reason),
-                                  (int)g_lastWifiRssi);
-                } else {
-                    EventLog::log(LOG_WARN, "WiFi disconnect: reason=%u (%s)",
-                                  (unsigned)reason, wifiDisconnectReasonName(reason));
-                }
-            }
-            break;
-        }
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            // Only after a disconnect episode — GOT_IP also fires on the boot
-            // connect and on DHCP lease renewals.
-            if (g_lastWifiDiscReason != 0) {
-                uint32_t outageMs = millis() - g_wifiLostAtMs;
-                EventLog::log(LOG_INFO, "WiFi got IP after %lu.%lus offline",
-                              (unsigned long)(outageMs / 1000),
-                              (unsigned long)((outageMs % 1000) / 100));
-            }
-            g_lastWifiDiscReason = 0;
-            g_lastWifiRssi = WiFi.RSSI();
-            break;
-        default:
-            break;
-    }
-}
-
-// ============================================================================
-// TIME SYNCHRONISATION (NTP, UTC)
-// ============================================================================
-
-// True for RFC 1918 private IPv4 addresses (typical home-LAN router/DNS).
-static bool isPrivateIPv4(const IPAddress& ip) {
-    uint8_t a = ip[0], b = ip[1];
-    return (a == 10) ||
-           (a == 172 && b >= 16 && b <= 31) ||
-           (a == 192 && b == 168);
-}
-
-// Candidate order of the last syncTime() call, for 'ntp status'.
-static String g_ntpCandidates;
-
-// Kick off SNTP. Non-blocking: the first call from setup() starts the query;
-// the loop re-checks and logs once time is valid.
-//
-// Local-first: while the configured server is still the untouched default
-// (pool.ntp.org), the DHCP-provided DNS server and the gateway — in home
-// networks usually the router, which typically serves NTP — are tried first.
-// lwIP-SNTP is built with SNTP_MAX_SERVERS=3 and cycles to the next candidate
-// on timeout, so a router without NTP only delays the first sync by a few
-// seconds, while a network without internet still gets valid time from the
-// router. An explicitly configured server ('ntp set' / POST /api/ntp) always
-// takes precedence alone — no auto-detection in that case.
-void syncTime() {
-    // lwIP's sntp_setservername() stores the passed POINTER, not a copy, so
-    // every string handed to configTime() must stay valid for the lifetime of
-    // the SNTP session. Static buffers make that unconditional (the heap
-    // buffer of networkConfig.ntpServer can move when the setting changes).
-    static char cfgServer[65];
-    static char dnsServer[16];
-    static char gwServer[16];
-
-    String cfg = networkConfig.ntpServer.length() > 0
-                     ? networkConfig.ntpServer
-                     : String(NTP_SERVER_DEFAULT);
-    strlcpy(cfgServer, cfg.c_str(), sizeof(cfgServer));
-
-    const char* localDns = nullptr;
-    const char* localGw  = nullptr;
-    if (cfg == NTP_SERVER_DEFAULT) {
-        IPAddress dns = WiFi.dnsIP();
-        IPAddress gw  = WiFi.gatewayIP();
-        if (isPrivateIPv4(dns)) {
-            strlcpy(dnsServer, dns.toString().c_str(), sizeof(dnsServer));
-            localDns = dnsServer;
-        }
-        if (isPrivateIPv4(gw) && !(gw == dns)) {
-            strlcpy(gwServer, gw.toString().c_str(), sizeof(gwServer));
-            localGw = gwServer;
-        }
-    }
-
-    if (localDns && localGw) {
-        configTime(0, 0, localDns, localGw, cfgServer);  // UTC (no offset, no DST)
-        g_ntpCandidates = String(localDns) + " (DNS), " + localGw + " (gateway), " + cfgServer;
-    } else if (localDns) {
-        configTime(0, 0, localDns, cfgServer);
-        g_ntpCandidates = String(localDns) + " (DNS), " + cfgServer;
-    } else if (localGw) {
-        configTime(0, 0, localGw, cfgServer);
-        g_ntpCandidates = String(localGw) + " (gateway), " + cfgServer;
-    } else {
-        configTime(0, 0, cfgServer);
-        g_ntpCandidates = cfgServer;
-    }
-    Serial.printf("NTP: time sync requested, server order: %s (UTC)\n",
-                  g_ntpCandidates.c_str());
-}
 
 // ============================================================================
 // SETUP
@@ -358,7 +142,7 @@ void setup() {
 
     // Register before any connect path (boot AND the later 'wifi set' path) so
     // every STA disconnect is captured with its IDF reason code.
-    WiFi.onEvent(onWiFiEvent);
+    wifiInstallEventHandler();
 
     // Validate the AES-CMAC implementation against the RFC 4493 test vectors
     // once at boot. A failure here means the BLE crypto cannot be trusted.
@@ -477,10 +261,8 @@ void setup() {
             }
 
             // Connect to WiFi after BLE is initialized
-            WiFiCredentials wifiCreds;
-            if (ConfigStore::loadWiFiCredentials(wifiCreds)) {
-                g_wifiCreds = wifiCreds;
-                g_wifiCredsLoaded = true;
+            if (wifiLoadCachedCredentials()) {
+                const WiFiCredentials& wifiCreds = wifiCachedCredentials();
                 Serial.printf("\nConnecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
                 WiFi.mode(WIFI_STA);
                 WiFi.setAutoReconnect(true);  // Enable WiFi auto-reconnect
@@ -495,7 +277,7 @@ void setup() {
 
                 if (WiFi.status() == WL_CONNECTED) {
                     Serial.printf("WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
-                    g_wifiWasConnected = true;
+                    wifiNoteConnected();
                     syncTime();  // start NTP (UTC)
                 } else {
                     Serial.println("WiFi connection failed - will retry in background");
@@ -589,10 +371,10 @@ void loop() {
     checkAndReconnectWiFi();
 
     // Detect first successful NTP sync and log it with the real wall-clock time.
-    if (!g_timeSynced && WiFi.status() == WL_CONNECTED) {
+    if (!timeSynced() && WiFi.status() == WL_CONNECTED) {
         time_t nowSec = time(nullptr);
         if (nowSec >= 1577836800) {  // >= 2020-01-01 → NTP has set the clock
-            g_timeSynced = true;
+            setTimeSynced(true);
             char ts[32];
             struct tm tmUtc;
             gmtime_r(&nowSec, &tmUtc);
@@ -621,7 +403,7 @@ void loop() {
             networkConfig.ntpServer = newNtpServer;
             configUnlock();
             ConfigStore::saveNetworkConfig(networkConfig);
-            g_timeSynced = false;
+            setTimeSynced(false);
             syncTime();  // re-arm SNTP with the new server
             EventLog::log(LOG_INFO, "NTP server changed to %s", newNtpServer.c_str());
         }
@@ -787,77 +569,6 @@ void checkAndReconnectBLE() {
                           consecutiveReconnectFailures, bleReconnectInterval / 1000);
         }
     }
-}
-
-// ============================================================================
-// WIFI MONITORING & RECONNECT
-// ============================================================================
-
-void checkAndReconnectWiFi() {
-    unsigned long now = millis();
-    if (now - lastWiFiCheck < WIFI_RECONNECT_INTERVAL_MS) return;
-    lastWiFiCheck = now;
-
-    if (WiFi.status() == WL_CONNECTED) {
-        // Keep a fresh signal reading around so the disconnect event handler
-        // can report the last strength BEFORE the drop (afterwards RSSI is
-        // unreadable). Granularity is one reading per check interval.
-        g_lastWifiRssi = WiFi.RSSI();
-
-        // Handle the disconnected → connected transition exactly once, so NTP
-        // re-arm and the (defensive) web-server restart run only on a real
-        // recovery, not on every check while connected.
-        if (!g_wifiWasConnected) {
-            g_wifiWasConnected = true;
-            Serial.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
-            if (heapDebugEnabled) Serial.println("WiFiRC: <- reconnected");
-            EventLog::log(LOG_INFO, "WiFi reconnected (SSID %s)", WiFi.SSID().c_str());
-            syncTime();  // re-arm NTP after reconnect
-
-            // Restart web server only if it was torn down (defensive — it is
-            // normally kept alive across a WiFi drop).
-            if (casambiClient && !webServer) {
-                webServer = new CasambiWebServer(casambiClient, &networkConfig);
-                if (webServer->begin()) {
-                    Serial.printf("Web API restarted at: http://%s/api\n",
-                                  WiFi.localIP().toString().c_str());
-                }
-            }
-
-            // Covers the boot-before-router case: without this, a device whose
-            // WiFi only came up after setup() would never be discoverable.
-            if (casambiClient) startMDNS();
-        }
-        return;
-    }
-
-    // WiFi is disconnected — use cached credentials (avoids repeated LittleFS reads)
-    if (!g_wifiCredsLoaded) return;
-
-    // Log the drop once per disconnect episode.
-    if (g_wifiWasConnected) {
-        EventLog::log(LOG_WARN, "WiFi connection lost (SSID %s)", g_wifiCreds.ssid.c_str());
-        g_wifiWasConnected = false;
-    }
-
-    // NON-BLOCKING reconnect (issue #18, part B).
-    // The old path blocked loopTask in WiFi.disconnect()+begin()+a 5 s wait
-    // loop. Under heap distress WiFi.begin() itself stalled for the full 30 s
-    // without returning, so loopTask stopped feeding the task watchdog → WDT
-    // reboot. We now never block here:
-    //   * WiFi.setAutoReconnect(true) (set at first connect) already makes the
-    //     IDF WiFi task retry on its own — that is the primary recovery path.
-    //   * We only give it a periodic nudge via WiFi.reconnect(), which reuses
-    //     the stored config (lighter than begin()) and returns immediately;
-    //     the new status is observed on a later tick, not awaited here.
-    // The WiFiRC: checkpoints are kept (gated behind 'debug heap on', like WSDBG)
-    // so a future stall (if any) is still localizable from the last line printed
-    // before a reboot. The esp_task_wdt_reset() calls stay UNCONDITIONAL — they
-    // feed the watchdog and are functional, not diagnostics.
-    esp_task_wdt_reset();
-    if (heapDebugEnabled) Serial.println("WiFiRC: -> reconnect() [non-blocking]");
-    WiFi.reconnect();
-    esp_task_wdt_reset();
 }
 
 // ============================================================================
@@ -1245,8 +956,7 @@ void runScheduledCloudRefresh() {
         Serial.println("ERROR: No WiFi credentials stored; skipping refresh.");
         return;
     }
-    g_wifiCreds = wifiCreds;
-    g_wifiCredsLoaded = true;
+    wifiLoadCachedCredentials();
 
     Serial.printf("Connecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
     WiFi.mode(WIFI_STA);
@@ -1557,7 +1267,7 @@ static void cmdNtp(const String& cmd) {
             ConfigStore::saveNetworkConfig(networkConfig);
             Serial.printf("NTP server set to: %s\n", server.c_str());
             if (WiFi.status() == WL_CONNECTED) {
-                g_timeSynced = false;
+                setTimeSynced(false);
                 syncTime();
             }
         }
@@ -1567,11 +1277,11 @@ static void cmdNtp(const String& cmd) {
         Serial.printf("NTP server (configured): %s%s\n",
                       networkConfig.ntpServer.c_str(),
                       isDefault ? " (default; local router tried first)" : "");
-        if (g_ntpCandidates.length() > 0) {
-            Serial.printf("Server order: %s\n", g_ntpCandidates.c_str());
+        if (ntpCandidates().length() > 0) {
+            Serial.printf("Server order: %s\n", ntpCandidates().c_str());
         }
-        Serial.printf("Time synced: %s\n", g_timeSynced ? "yes" : "no");
-        if (g_timeSynced) {
+        Serial.printf("Time synced: %s\n", timeSynced() ? "yes" : "no");
+        if (timeSynced()) {
             time_t nowSec = time(nullptr);
             char ts[32];
             struct tm tmUtc;
@@ -1704,10 +1414,10 @@ static void cmdWifi(const String& cmd) {
             Serial.printf("SSID: %s\n", WiFi.SSID().c_str());
             Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
             Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
-        } else if (g_lastWifiDiscReason != 0) {
+        } else if (wifiLastDisconnectReason() != 0) {
             Serial.printf("Last disconnect: reason=%u (%s)\n",
-                          (unsigned)g_lastWifiDiscReason,
-                          wifiDisconnectReasonName(g_lastWifiDiscReason));
+                          (unsigned)wifiLastDisconnectReason(),
+                          wifiDisconnectReasonName(wifiLastDisconnectReason()));
         }
 
         // Show stored credentials
