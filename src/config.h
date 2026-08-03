@@ -321,13 +321,21 @@
 #define WS_SEND_HEAP_MARGIN             4096
 
 // Contiguous heap below which the expensive GETs (/api/units, /api/log) answer
-// 503 + Retry-After instead of starting to build a response. Those two are the
-// endpoints whose cost scales with stored data, and the async framework mallocs
-// a per-chunk buffer (~5.5 kB) on top of whatever the handler holds. Refusing
-// early keeps a momentary dip from turning into a failed send — or, before the
-// WS guards, a reboot. The BLE command queue already answers 503 the same way
-// when it is full, so clients know the contract.
-#define HTTP_EXPENSIVE_GET_HEAP_FLOOR   12288
+// 503 + Retry-After instead of starting to build a response. The BLE command
+// queue already answers 503 the same way when it is full, so clients know the
+// contract.
+//
+// CALIBRATION. Both endpoints stream in chunks now, so their peak no longer
+// scales with stored data: the async framework's per-chunk buffer (~5.5 kB)
+// plus the ~1 kB generator held by the response, plus a small per-entry
+// document — roughly 7 kB, fixed. The first value here was 12 kB, carried over
+// from before the streaming change and never re-derived; a heavy stress run
+// then refused ~120 requests that the pre-guard firmware had served, because
+// the floor sat about 5 kB above what the work actually needs. 8 kB refuses
+// only when a chunked response genuinely cannot be served (the same run bottomed
+// out at a 7 kB largest block). Raise this only together with evidence that a
+// response needs more than a chunk buffer.
+#define HTTP_EXPENSIVE_GET_HEAP_FLOOR   8192
 
 // Retry-After (seconds) sent with those 503s. Short: the condition is a
 // transient heap dip under load, not a scheduled outage.

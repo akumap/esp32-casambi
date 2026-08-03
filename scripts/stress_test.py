@@ -206,8 +206,9 @@ class Stats:
         # it means clients missed an update instead of everyone losing the
         # gateway. Worth seeing, not worth alarming about.
         for key, label, alarm in (
-                ("ws_drops",        "WS broadcasts dropped",        True),
-                ("ws_send_fails",   "WS sends refused (low heap)",  False),
+                ("ws_drops",        "WS broadcasts dropped",         True),
+                ("ws_send_fails",   "WS sends refused (low heap)",   False),
+                ("http_busy",       "GETs answered 503 (low heap)",  False),
                 ("parse_partial",   "BLE packets partially decoded", True),
                 ("parse_malformed", "BLE packets malformed/dropped", True)):
             vals = [s[key] for s in samples if s.get(key) is not None]
@@ -676,6 +677,7 @@ def worker_heap_monitor(host, port, interval=4):
                     "min_free_heap":   data.get("min_free_heap"),
                     "ws_drops":        data.get("ws_drops"),
                     "ws_send_fails":   data.get("ws_send_fails"),
+                    "http_busy":       data.get("http_busy"),
                     "parse_partial":   data.get("parse_partial"),
                     "parse_malformed": data.get("parse_malformed"),
                 })
