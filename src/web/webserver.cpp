@@ -52,10 +52,8 @@ struct ConfigLock {
 // concurrent writer on the loop task cannot reallocate the String buffer
 // while the async_tcp task is reading it.
 static String lockedCopy(const String& s) {
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    String out = s;
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
-    return out;
+    ConfigLock lock;
+    return s;   // copied while the lock is held; released by ~ConfigLock
 }
 
 // Emit a unit's channels as a generic `controls` array so consumers (FHEM)
@@ -232,13 +230,15 @@ bool CasambiWebServer::consumeNtpRequest(String& serverOut) {
     // Transactional consume: flag and string are read/cleared under the same
     // mutex hold the writer (_handleSetNtp) uses to set them, so the pair can
     // never be observed half-updated.
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    const bool had = _ntpRequested.exchange(false);
-    if (had) {
-        serverOut = _pendingNtpServer;
-        _pendingNtpServer = "";
+    bool had;
+    {
+        ConfigLock lock;
+        had = _ntpRequested.exchange(false);
+        if (had) {
+            serverOut = _pendingNtpServer;   // String copy: can allocate
+            _pendingNtpServer = "";
+        }
     }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
     return had;
 }
 
@@ -966,7 +966,8 @@ void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
     JsonArray units = doc["units"].to<JsonArray>();
     // Same consistent-snapshot rule as _buildHelloMessage: state fields are
     // written by the BLE task under g_configMutex, so read them under it too.
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    {
+    ConfigLock lock;
     for (const auto& unit : _config->units) {
         JsonObject u = units.add<JsonObject>();
         u["id"] = unit.deviceId;
@@ -985,7 +986,7 @@ void CasambiWebServer::_handleGetUnits(AsyncWebServerRequest* request) {
         }
         addUnitControls(u, unit);   // generic, cloud-derived channel list
     }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    }   // ConfigLock
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
@@ -1277,10 +1278,11 @@ void CasambiWebServer::_handleSetNtp(AsyncWebServerRequest* request) {
     // ntpServer String and (b) block the async_tcp task on a flash write.
     // String AND flag are set under the same mutex hold so the consumer can
     // never see the flag without its matching value (transactional handoff).
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    _pendingNtpServer = server;
-    _ntpRequested.store(true);
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    {
+        ConfigLock lock;
+        _pendingNtpServer = server;   // String assignment: can allocate
+        _ntpRequested.store(true);
+    }
 
     WEB_LOG("Web: NTP server change to %s requested from %s\n",
             server.c_str(), _getClientIP(request).c_str());
@@ -1604,20 +1606,21 @@ void CasambiWebServer::_handleUnitState(AsyncWebServerRequest* request) {
     size_t  nControls = 0;
     uint8_t stateLen  = 0;
     bool    usable    = false;
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
-    if (unit->hasFixture && unit->stateLength > 0 &&
-        !unit->controls.empty() && unit->controls.size() <= statecodec::MAX_CONTROLS) {
-        usable    = true;
-        stateLen  = unit->stateLength;
-        nControls = unit->controls.size();
-        for (size_t i = 0; i < nControls; i++) {
-            specs[i].offset = unit->controls[i].offset;
-            specs[i].length = unit->controls[i].length;
-            specs[i].value  = unit->controls[i].value;
-            names[i] = controlName(*unit, i);
+    {
+        ConfigLock lock;
+        if (unit->hasFixture && unit->stateLength > 0 &&
+            !unit->controls.empty() && unit->controls.size() <= statecodec::MAX_CONTROLS) {
+            usable    = true;
+            stateLen  = unit->stateLength;
+            nControls = unit->controls.size();
+            for (size_t i = 0; i < nControls; i++) {
+                specs[i].offset = unit->controls[i].offset;
+                specs[i].length = unit->controls[i].length;
+                specs[i].value  = unit->controls[i].value;
+                names[i] = controlName(*unit, i);   // String assignment: can allocate
+            }
         }
     }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
 
     if (!usable) {
         // No fixture layout (older config, fixture fetch failed) — the state
