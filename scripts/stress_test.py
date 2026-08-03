@@ -966,11 +966,28 @@ def main():
             lb_min   = min(v for v, _ in lb)
             print(f"  largest block       : start={lb_base//1024}KB"
                   f"  min={lb_min//1024}KB  after cooldown={lb_final//1024}KB")
-            if lb_final < lb_base * 0.9:
-                print(f"  => FRAGMENTED — largest block did not recover"
-                      f" (free heap can look fine while allocations still fail).")
+            # Judging fragmentation by this run's start/end delta alone gives a
+            # coin-flip verdict: the largest block wanders by tens of KB between
+            # runs, and measured back to back it goes up as often as down
+            # (79 -> 43 -> 71 -> 51 KB over three identical WS-churn runs, one
+            # of which ended 28 KB ABOVE its start). What actually matters is
+            # whether the block still clears the largest single allocation the
+            # firmware makes — a hello snapshot, or the framework's per-chunk
+            # buffer, both under ~10 KB. FRAG_FLOOR_KB is set well above that.
+            FRAG_FLOOR_KB = 24
+            final_kb = lb_final // 1024
+            if lb_final >= lb_base * 0.9:
+                print("  => largest block recovered — no lasting fragmentation.")
+            elif final_kb >= FRAG_FLOOR_KB:
+                print(f"  => below start, but {final_kb} KB still leaves ample"
+                      f" headroom (largest single allocation is under ~10 KB).")
+                print("     A single run's start/end delta is NOT evidence of lasting"
+                      " fragmentation — compare this value across consecutive runs.")
             else:
-                print(f"  => largest block recovered — no lasting fragmentation.")
+                print(f"  => FRAGMENTED — largest block down to {final_kb} KB,"
+                      f" close to what a single allocation needs.")
+                print("     Re-run without rebooting: a further drop across runs is"
+                      " a real leak, a rebound is normal wander.")
         else:
             print("  (largest_block not reported — update ESP32 firmware to track"
                   " fragmentation)")

@@ -348,10 +348,37 @@ Einordnung:
   ihre Queues), nicht im Anwendungscode — pro WS-Client allokiert die Firmware
   selbst nur die Hello-Nutzlast, und die ist kurzlebig.
 
-**Offen:** ob sich das über viele Zyklen doch summiert. Der entscheidende Test
-wäre Lauf A drei- bis viermal hintereinander ohne Reboot: bleibt das Band
-stehen, ist es unkritisch; wandert es nach unten, ist es ein echtes Leck in
-Form von Fragmentierung.
+### 6.3 Akkumuliert es? Nein.
+
+Drei weitere WS-Churn-Läufe direkt hintereinander, ohne Reboot dazwischen:
+
+|Lauf|Start |Minimum|nach Cooldown|Delta  |Skript-Urteil (alt)|
+|----|------|-------|-------------|-------|-------------------|
+|C1  |79 KB |27 KB  |43 KB        |−36 KB |fragmentiert       |
+|C2  |43 KB |20 KB  |**71 KB**    |**+28 KB**|erholt          |
+|C3  |71 KB |25 KB  |51 KB        |−20 KB |fragmentiert       |
+
+**C2 endet 28 KB über seinem Startwert.** Die Folge 79 → 43 → 71 → 51 KB
+oszilliert, sie fällt nicht. Über fünf WS-Läufe hinweg gibt es keinen Trend
+nach unten — die bleibende Fragmentierung, die das Skript meldete, ist keine.
+
+Stützende Werte: `min_free_heap` blieb in C2 und C3 bei 16 KB stehen (kein
+neuer Tiefstand), freier Heap nach Cooldown konstant 93 KB in allen drei
+Läufen, 1–2 Fehler auf je ~5850 Anfragen. Und `largest_block_min` liegt bei
+reinem WS-Churn bei 20–27 KB, also deutlich höher als unter Mischlast (7–10 KB)
+— der Churn allein treibt den Heap gar nicht besonders weit herunter.
+
+Ein Nebenbefund: zwischen Lauf B und C1 stieg der größte Block im Leerlauf von
+37 auf 79 KB. Der Heap koalesziert also von selbst zurück, wenn man ihm Zeit
+lässt; die 30 s Cooldown des Skripts reichen dafür nicht immer aus.
+
+**Konsequenz für das Messwerkzeug:** das Urteil „largest block did not
+recover" verglich nur Start und Ende **eines** Laufs (`Ende < Start × 0,9`).
+Auf einem Wert, der zwischen Läufen um Dutzende KB wandert, ist das ein
+Münzwurf — genau deshalb meldete dieselbe Last dreimal hintereinander zweimal
+„fragmentiert" und einmal „erholt". `stress_test.py` bewertet jetzt stattdessen
+gegen den operativ relevanten Boden (größte Einzelallokation < 10 KB) und weist
+explizit darauf hin, dass ein Einzellauf-Delta kein Beleg ist.
 
 ## 7. Aufräumen nach Verifikation
 
