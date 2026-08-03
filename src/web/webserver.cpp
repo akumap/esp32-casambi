@@ -12,9 +12,41 @@
 #include <WiFi.h>
 #include <time.h>
 #include <memory>
+#include <new>              // std::bad_alloc — see the WS_HAS_EXCEPTIONS note
 #include <mbedtls/sha256.h>
 
+// Whether this translation unit can catch a failed allocation.
+//
+// libstdc++'s operator new throws on failure regardless — that is what turned a
+// hello-sized allocation on a fragmented heap into a device reboot: __cxa_throw
+// finds no handler and calls std::terminate. But arduino-esp32 builds C++ with
+// exceptions DISABLED by default, and then a catch clause is not merely useless
+// but a compile error. So the guards below are structured to work either way:
+// the heap pre-checks do the real work and are always compiled, and the catch
+// is added only where the toolchain supports it. Build with -fexceptions to get
+// the second layer; the first one holds without it.
+#if defined(__cpp_exceptions)
+#  define WS_HAS_EXCEPTIONS 1
+#else
+#  define WS_HAS_EXCEPTIONS 0
+#endif
+
 #define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
+
+// RAII hold on g_configMutex.
+//
+// The JSON builders below allocate while holding the mutex (JsonDocument
+// growth, String append). On this build operator new throws, so a manual
+// take/give pair leaks the mutex on an allocation failure — and a permanently
+// held g_configMutex deadlocks every later reader on both tasks, which is a
+// far worse outcome than the failed send itself. Releasing from a destructor
+// makes the unwind path correct.
+struct ConfigLock {
+    ConfigLock()  { if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY); }
+    ~ConfigLock() { if (g_configMutex) xSemaphoreGive(g_configMutex); }
+    ConfigLock(const ConfigLock&) = delete;
+    ConfigLock& operator=(const ConfigLock&) = delete;
+};
 
 // Copy a mutable NetworkConfig string field under g_configMutex so a
 // concurrent writer on the loop task cannot reallocate the String buffer
@@ -56,7 +88,7 @@ CasambiWebServer::CasambiWebServer(CasambiClient* client, NetworkConfig* config)
       _refreshRequested(false), _rebootRequested(false), _clearLogRequested(false),
       _ntpRequested(false),
       _broadcastQueue(nullptr), _bleCmdQueue(nullptr), _resyncNeeded(false),
-      _wsDropCount(0) {
+      _wsDropCount(0), _wsSendFailCount(0) {
     _broadcastQueue = xQueueCreate(WS_BROADCAST_QUEUE_DEPTH, sizeof(WsEvent));
     _bleCmdQueue    = xQueueCreate(BLE_CMD_QUEUE_DEPTH, sizeof(BleCommand));
 }
@@ -171,7 +203,7 @@ void CasambiWebServer::loop() {
         // exchange() so a set racing this clear is never lost.
         if (_resyncNeeded.exchange(false)) {
             if (_ws->count() > 0) {
-                _ws->textAll(_buildHelloMessage());
+                _sendHello(nullptr);   // nullptr = broadcast to all clients
                 WEB_LOG("WS: broadcast drop -> resync hello pushed\n");
             }
         }
@@ -299,8 +331,10 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
         case WS_EVT_CONNECT:
             WEB_LOG("WS: client #%u connected from %s\n",
                     client->id(), client->remoteIP().toString().c_str());
-            // Send full state to the newly connected client
-            client->text(_buildHelloMessage());
+            // Send full state to the newly connected client. Guarded: this
+            // runs on the async_tcp task, and an unguarded allocation failure
+            // here used to abort the whole device (see _sendHello).
+            _sendHello(client);
             break;
 
         case WS_EVT_DISCONNECT:
@@ -350,7 +384,10 @@ String CasambiWebServer::_gatewayName(const String& mac) const {
     return String("");
 }
 
-String CasambiWebServer::_buildHelloMessage() const {
+String CasambiWebServer::_buildHelloMessage(size_t maxUnits) const {
+#if WS_HAS_EXCEPTIONS
+  try {
+#endif
     JsonDocument doc;
     doc["type"] = "hello";
     doc["build"] = FIRMWARE_BUILD;  // from generated firmware_build.h (see config.h)
@@ -388,15 +425,18 @@ String CasambiWebServer::_buildHelloMessage() const {
     // Bound the snapshot size: hello is pushed proactively (connect, resync)
     // and must never grow into an allocation a fragmented heap cannot serve
     // (see WS_HELLO_MAX_UNITS). Clients see "units_truncated" and can fetch
-    // the full list via GET /api/units themselves.
-    if (_config->units.size() > WS_HELLO_MAX_UNITS) {
+    // the full list via GET /api/units themselves. `maxUnits` lets the caller
+    // tighten that further — _sendHello() retries with 0 when the heap cannot
+    // serve the full snapshot, degrading instead of dropping the client.
+    if (_config->units.size() > maxUnits) {
         doc["units_truncated"] = true;
     }
     size_t helloUnits = 0;
     JsonArray units = doc["units"].to<JsonArray>();
-    if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+    {
+    ConfigLock lock;
     for (const auto& unit : _config->units) {
-        if (++helloUnits > WS_HELLO_MAX_UNITS) break;
+        if (++helloUnits > maxUnits) break;
         JsonObject u = units.add<JsonObject>();
         u["id"]          = unit.deviceId;
         u["name"]        = unit.name;
@@ -416,11 +456,91 @@ String CasambiWebServer::_buildHelloMessage() const {
         }
         addUnitControls(u, unit);   // generic, cloud-derived channel list
     }
-    if (g_configMutex) xSemaphoreGive(g_configMutex);
+    }   // ConfigLock
 
     String msg;
     serializeJson(doc, msg);
     return msg;
+#if WS_HAS_EXCEPTIONS
+  } catch (const std::bad_alloc&) {
+    // Out of contiguous heap while building. Report it as "no message" and let
+    // the caller degrade; aborting here would reboot the device over one
+    // client's snapshot.
+    return String();
+  }
+#endif
+}
+
+size_t CasambiWebServer::_helloHeapEstimate(size_t units) const {
+    // ~150 B of JSON per unit (see WS_HELLO_MAX_UNITS) plus the fixed header.
+    // Doubled because the document and the serialized String are alive at the
+    // same time, and the send then needs a third copy of the String's size —
+    // that last one is checked separately in _wsSendGuarded.
+    return 2 * (units * 150 + 512);
+}
+
+bool CasambiWebServer::_wsSendGuarded(AsyncWebSocketClient* client, const String& msg) {
+    if (!_ws || msg.isEmpty()) return false;
+
+    // AsyncWebSocket copies the payload into a shared buffer before queueing
+    // it, so the send needs a contiguous block of at least msg.length(). Check
+    // first — refusing here is cheap, whereas letting operator new throw inside
+    // the library reboots the device.
+    const size_t largest = ESP.getMaxAllocHeap();
+    if (largest < msg.length() + WS_SEND_HEAP_MARGIN) {
+        _wsSendFailCount++;
+        WEB_LOG("WS: send refused (%u B payload, largest block %u)\n",
+                (unsigned)msg.length(), (unsigned)largest);
+        return false;
+    }
+
+    // The check above can be overtaken by the other core between the reading
+    // and the allocation, so catch as well where the toolchain allows it.
+    // makeSharedBuffer throws before anything is enqueued, so the socket state
+    // is untouched and simply reporting failure is safe.
+#if WS_HAS_EXCEPTIONS
+    try {
+        if (client) client->text(msg);
+        else        _ws->textAll(msg);
+        return true;
+    } catch (const std::bad_alloc&) {
+        _wsSendFailCount++;
+        WEB_LOG("WS: send threw bad_alloc (%u B payload)\n", (unsigned)msg.length());
+        return false;
+    }
+#else
+    if (client) client->text(msg);
+    else        _ws->textAll(msg);
+    return true;
+#endif
+}
+
+void CasambiWebServer::_sendHello(AsyncWebSocketClient* client) {
+    // Decide BEFORE building whether the full snapshot is affordable. On a
+    // default arduino-esp32 build there is no catch to fall back on, so this
+    // estimate — not the exception handler — is what keeps the path alive.
+    const size_t units   = _config ? _config->units.size() : 0;
+    const size_t capped  = (units < WS_HELLO_MAX_UNITS) ? units : WS_HELLO_MAX_UNITS;
+
+    if (ESP.getMaxAllocHeap() >= _helloHeapEstimate(capped) + WS_SEND_HEAP_MARGIN &&
+        _wsSendGuarded(client, _buildHelloMessage())) {
+        return;
+    }
+
+    // Full snapshot did not fit. Retry without the unit list: clients already
+    // treat "units_truncated" as "fetch GET /api/units yourself", so this is a
+    // documented degradation rather than a new protocol state.
+    if (_wsSendGuarded(client, _buildHelloMessage(0))) {
+        EventLog::log(LOG_WARN, "WS: hello degraded to unit-less (largest block %u)",
+                      (unsigned)ESP.getMaxAllocHeap());
+        return;
+    }
+
+    // Even the small one failed — the heap is genuinely exhausted. Drop this
+    // client instead of leaving it connected with no state; it will retry.
+    EventLog::log(LOG_ERROR, "WS: hello dropped, closing client (largest block %u)",
+                  (unsigned)ESP.getMaxAllocHeap());
+    if (client) client->close();
 }
 
 void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
@@ -464,6 +584,9 @@ void CasambiWebServer::broadcastConnectionState(bool connected, int reason) {
 }
 
 void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
+#if WS_HAS_EXCEPTIONS
+  try {
+#endif
     JsonDocument doc;
 
     if (ev.type == WsEvent::Type::UnitState) {
@@ -478,7 +601,7 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
         // (_applyUnitStates). This may reflect an update newer than this
         // event's level — events are drained within one loop tick, and the
         // hello resync covers any drop.
-        if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
+        ConfigLock lock;
         CasambiUnit* unit = _config->getUnitById(ev.unitId);
         if (unit) {
             if (unit->hasVertical) doc["vertical"]  = unit->vertical;
@@ -489,7 +612,6 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
             }
             addUnitControls(doc.as<JsonObject>(), *unit);   // generic channel list
         }
-        if (g_configMutex) xSemaphoreGive(g_configMutex);
     } else {
         doc["type"]      = "connection_state";
         doc["connected"] = ev.connected;
@@ -507,7 +629,19 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
 
     String msg;
     serializeJson(doc, msg);
-    _ws->textAll(msg);
+    // Guarded like every other WS send: these events are small, but "small"
+    // is not a guarantee on a fragmented heap, and the failure mode is a
+    // device reboot rather than a dropped event. A drop is recoverable —
+    // _resyncNeeded already exists for exactly that.
+    if (!_wsSendGuarded(nullptr, msg)) {
+        _resyncNeeded = true;
+    }
+#if WS_HAS_EXCEPTIONS
+  } catch (const std::bad_alloc&) {
+    _wsSendFailCount++;
+    _resyncNeeded = true;
+  }
+#endif
 }
 
 // The dynamic POST routes that carry a JSON body. Shared by onRequestBody
@@ -769,6 +903,7 @@ void CasambiWebServer::_handleGetStatus(AsyncWebServerRequest* request) {
     doc["boot_count"] = EventLog::bootCount();
     // Broadcast events dropped on a full queue (each triggers a hello resync).
     doc["ws_drops"] = _wsDropCount.load();
+    doc["ws_send_fails"] = _wsSendFailCount.load();
     // Tolerant-parser diagnostics, summed over the packet types: "partial" =
     // packets whose understood prefix was applied while an undecoded tail was
     // dropped (a protocol element we do not know yet — worth investigating

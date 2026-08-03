@@ -310,6 +310,16 @@
 // worst case (250 units ≈ 37 kB, an impossible single allocation here).
 #define WS_HELLO_MAX_UNITS              50
 
+// Contiguous heap that must remain free ON TOP of a WebSocket payload before
+// the send is attempted. AsyncWebSocket copies every payload into a
+// shared_ptr<vector<uint8_t>> (makeSharedBuffer), and on this build operator
+// new THROWS on failure — an uncaught bad_alloc there calls std::terminate and
+// reboots the device, which is what a connecting client used to be able to
+// trigger under WS churn. The margin covers the shared_ptr control block, the
+// message queue entry and the TCP buffers the send itself needs, so a payload
+// that only just fits is refused rather than taking the heap to the edge.
+#define WS_SEND_HEAP_MARGIN             4096
+
 // Depth of the REST→loop BLE command queue (stores BleCommand values).
 // Control handlers on the async_tcp task only validate and enqueue; the loop
 // task dequeues one command per iteration and performs the BLE operation, so
