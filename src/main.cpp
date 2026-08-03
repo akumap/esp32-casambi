@@ -1414,16 +1414,8 @@ static void reportSerialSend(bool ok) {
 // COMMAND HANDLER
 // ============================================================================
 
-void handleCommand(const String& cmd) {
-	// Echo the command, but never log credentials. `wifi set <ssid> <password>`
-	// carries the WiFi password as a plain argument, so mask everything after
-	// the subcommand for password-bearing commands.
-	if (cmd.startsWith("wifi set")) {
-		Serial.println(">>> CMD: wifi set <redacted>");
-	} else {
-		Serial.printf(">>> CMD: %s\n", cmd.c_str());
-	}
-        if (cmd == "help") {
+// Serial-console 'help' text.
+static void cmdHelp() {
             Serial.println("\n=== Commands ===");
             Serial.println("help          - Show this help");
             Serial.println("status        - Show detailed status");
@@ -1491,20 +1483,10 @@ void handleCommand(const String& cmd) {
                 Serial.println("* Motor commands may not work on all units.");
                 Serial.println("  Use scenes for reliable motor control.\n");
             }
-        }
-        else if (cmd == "status") {
-            printStatus();
-        }
-        else if (cmd == "blediag") {
-            printBLEDiagnostics();
-        }
-        else if (cmd == "restart") {
-            Serial.println("Restarting...");
-            EventLog::log(LOG_INFO, "Restart: requested via serial command");
-            delay(500);
-            ESP.restart();
-        }
-        else if (cmd == "refresh") {
+}
+
+// 'refresh' — re-download the Casambi cloud configuration.
+static void cmdRefresh() {
             if (!ConfigStore::hasValidConfig()) {
                 Serial.println("No configuration found. Run 'setup' first.");
                 return;
@@ -1541,15 +1523,10 @@ void handleCommand(const String& cmd) {
             // Schedule the refresh and reboot; the download runs early at the
             // next boot (race-free, see requestCloudRefresh). Never returns.
             requestCloudRefresh(password);
-        }
-        else if (cmd == "clearconfig") {
-            ConfigStore::clearAll();
-            Serial.println("Configuration cleared. Restarting...");
-            EventLog::log(LOG_INFO, "Restart: configuration cleared (factory reset)");
-            delay(1000);
-            ESP.restart();
-        }
-        else if (cmd == "log" || cmd.startsWith("log ")) {
+}
+
+// 'log [n]' / 'log clear' — event-log console access.
+static void cmdLog(const String& cmd) {
             String sub = cmd.length() > 3 ? cmd.substring(4) : "";
             sub.trim();
             if (sub == "clear") {
@@ -1562,8 +1539,10 @@ void handleCommand(const String& cmd) {
                 EventLog::writeText(Serial, n);
                 Serial.println();
             }
-        }
-        else if (cmd.startsWith("ntp")) {
+}
+
+// 'ntp status' / 'ntp set <host>' — NTP server configuration.
+static void cmdNtp(const String& cmd) {
             String sub = cmd.length() > 3 ? cmd.substring(4) : "";
             sub.trim();
             if (sub.startsWith("set ")) {
@@ -1601,22 +1580,10 @@ void handleCommand(const String& cmd) {
                     Serial.printf("Current UTC: %s\n", ts);
                 }
             }
-        }
-        else if (cmd == "setup") {
-            if (apiClient) {
-                runSetupWizard();
-            } else {
-                Serial.println("Already configured. Use 'clearconfig' to reset.");
-            }
-        }
-        else if (cmd == "scan") {
-            if (casambiClient) {
-                scanForDevices();
-            } else {
-                Serial.println("Not in operation mode");
-            }
-        }
-        else if (cmd.startsWith("connect ")) {
+}
+
+// 'connect <index>' — connect to a previously scanned device.
+static void cmdConnect(const String& cmd) {
             if (casambiClient) {
                 // Strict parse: toInt() turned "connect foo" into index 0 and
                 // silently connected to the first scanned device.
@@ -1629,14 +1596,10 @@ void handleCommand(const String& cmd) {
             } else {
                 Serial.println("Not in operation mode");
             }
-        }
-        else if (cmd == "disconnect") {
-            if (casambiClient) {
-                casambiClient->disconnect();
-                Serial.println("Disconnected");
-            }
-        }
-        else if (cmd.startsWith("reconnect ")) {
+}
+
+// 'reconnect on/off' — enable/disable BLE auto-reconnect.
+static void cmdReconnect(const String& cmd) {
             String subcmd = cmd.substring(10);
             subcmd.trim();
             if (subcmd == "on") {
@@ -1650,8 +1613,10 @@ void handleCommand(const String& cmd) {
             } else {
                 Serial.printf("Auto-reconnect: %s\n", bleReconnectEnabled ? "enabled" : "disabled");
             }
-        }
-        else if (cmd.startsWith("autoconnect ")) {
+}
+
+// 'autoconnect on/off/status/set <mac>'.
+static void cmdAutoconnect(const String& cmd) {
             String subcmd = cmd.substring(12);
             subcmd.trim();
 
@@ -1686,8 +1651,10 @@ void handleCommand(const String& cmd) {
             else {
                 Serial.println("Usage: autoconnect on/off/status/set <mac>");
             }
-        }
-        else if (cmd.startsWith("wifi ")) {
+}
+
+// 'wifi set <ssid> <password>' / 'wifi status'.
+static void cmdWifi(const String& cmd) {
             String subcmd = cmd.substring(5);
             subcmd.trim();
 
@@ -1752,8 +1719,10 @@ void handleCommand(const String& cmd) {
             else {
                 Serial.println("Usage: wifi set <ssid> <password> | wifi status");
             }
-        }
-        else if (cmd.startsWith("debug ")) {
+}
+
+// 'debug ...' — per-category debug flag control.
+static void cmdDebug(const String& cmd) {
             String subcmd = cmd.substring(6);
             subcmd.trim();
 
@@ -1844,9 +1813,11 @@ void handleCommand(const String& cmd) {
                 Serial.println("       debug heap on/off    - Heap monitoring");
                 Serial.println("       debug cloud on/off   - Raw cloud config dump (keys redacted)");
             }
-        }
-        // Scene commands
-        else if (cmd.startsWith("son ")) {
+}
+
+// Scene control: 'son <id>', 'soff <id>', 'slevel <id> <0-255>'.
+static void cmdSceneCommand(const String& cmd) {
+        if (cmd.startsWith("son ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
                 uint8_t id; long v;
                 if (parseControlArgs(SerialEntity::Scene, cmd.substring(4), id,
@@ -1879,8 +1850,11 @@ void handleCommand(const String& cmd) {
                 }
             } else { Serial.println("Not authenticated"); }
         }
-        // Unit commands
-        else if (cmd.startsWith("uon ")) {
+}
+
+// Unit control: 'uon/uoff/ulevel/uvertical/ucolor/utemp/uslider <id> ...'.
+static void cmdUnitCommand(const String& cmd) {
+        if (cmd.startsWith("uon ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
                 uint8_t id; long v;
                 if (parseControlArgs(SerialEntity::Unit, cmd.substring(4), id,
@@ -1965,8 +1939,11 @@ void handleCommand(const String& cmd) {
                 }
             } else { Serial.println("Not authenticated"); }
         }
-        // Group commands
-        else if (cmd.startsWith("glevel ")) {
+}
+
+// Group control: 'glevel/gvertical/gslider <id> <0-255>'.
+static void cmdGroupCommand(const String& cmd) {
+        if (cmd.startsWith("glevel ")) {
             if (casambiClient && casambiClient->isAuthenticated()) {
                 uint8_t id; long level;
                 if (parseControlArgs(SerialEntity::Group, cmd.substring(7), id,
@@ -1999,8 +1976,10 @@ void handleCommand(const String& cmd) {
                 }
             } else { Serial.println("Not authenticated"); }
         }
-        // List commands
-        else if (cmd.startsWith("list ")) {
+}
+
+// 'list units/groups/scenes'.
+static void cmdList(const String& cmd) {
             String what = cmd.substring(5);
             if (what == "units") {
                 Serial.printf("\n=== Units (%d) ===\n", networkConfig.units.size());
@@ -2024,6 +2003,104 @@ void handleCommand(const String& cmd) {
                 }
                 Serial.println();
             }
+}
+
+// ============================================================================
+// COMMAND DISPATCHER
+// ============================================================================
+
+void handleCommand(const String& cmd) {
+	// Echo the command, but never log credentials. `wifi set <ssid> <password>`
+	// carries the WiFi password as a plain argument, so mask everything after
+	// the subcommand for password-bearing commands.
+	if (cmd.startsWith("wifi set")) {
+		Serial.println(">>> CMD: wifi set <redacted>");
+	} else {
+		Serial.printf(">>> CMD: %s\n", cmd.c_str());
+	}
+        if (cmd == "help") {
+            cmdHelp();
+        }
+        else if (cmd == "status") {
+            printStatus();
+        }
+        else if (cmd == "blediag") {
+            printBLEDiagnostics();
+        }
+        else if (cmd == "restart") {
+            Serial.println("Restarting...");
+            EventLog::log(LOG_INFO, "Restart: requested via serial command");
+            delay(500);
+            ESP.restart();
+        }
+        else if (cmd == "refresh") {
+            cmdRefresh();
+        }
+        else if (cmd == "clearconfig") {
+            ConfigStore::clearAll();
+            Serial.println("Configuration cleared. Restarting...");
+            EventLog::log(LOG_INFO, "Restart: configuration cleared (factory reset)");
+            delay(1000);
+            ESP.restart();
+        }
+        else if (cmd == "log" || cmd.startsWith("log ")) {
+            cmdLog(cmd);
+        }
+        else if (cmd.startsWith("ntp")) {
+            cmdNtp(cmd);
+        }
+        else if (cmd == "setup") {
+            if (apiClient) {
+                runSetupWizard();
+            } else {
+                Serial.println("Already configured. Use 'clearconfig' to reset.");
+            }
+        }
+        else if (cmd == "scan") {
+            if (casambiClient) {
+                scanForDevices();
+            } else {
+                Serial.println("Not in operation mode");
+            }
+        }
+        else if (cmd.startsWith("connect ")) {
+            cmdConnect(cmd);
+        }
+        else if (cmd == "disconnect") {
+            if (casambiClient) {
+                casambiClient->disconnect();
+                Serial.println("Disconnected");
+            }
+        }
+        else if (cmd.startsWith("reconnect ")) {
+            cmdReconnect(cmd);
+        }
+        else if (cmd.startsWith("autoconnect ")) {
+            cmdAutoconnect(cmd);
+        }
+        else if (cmd.startsWith("wifi ")) {
+            cmdWifi(cmd);
+        }
+        else if (cmd.startsWith("debug ")) {
+            cmdDebug(cmd);
+        }
+        // Scene commands
+        else if (cmd.startsWith("son ") || cmd.startsWith("soff ") || cmd.startsWith("slevel ")) {
+            cmdSceneCommand(cmd);
+        }
+        // Unit commands
+        else if (cmd.startsWith("uon ") || cmd.startsWith("uoff ") || cmd.startsWith("ulevel ") ||
+                 cmd.startsWith("uvertical ") || cmd.startsWith("ucolor ") || cmd.startsWith("utemp ") ||
+                 cmd.startsWith("uslider ")) {
+            cmdUnitCommand(cmd);
+        }
+        // Group commands
+        else if (cmd.startsWith("glevel ") || cmd.startsWith("gvertical ") || cmd.startsWith("gslider ")) {
+            cmdGroupCommand(cmd);
+        }
+        // List commands
+        else if (cmd.startsWith("list ")) {
+            cmdList(cmd);
         }
         else {
             Serial.println("Unknown command. Type 'help'");
