@@ -1,9 +1,15 @@
 # Konzept: Matter-Bridge neben dem REST-API (Issue #44)
 
-Status: **Konzept / Entscheidungsvorlage** — noch keine Implementierung.
-**Entscheidung des Auftraggebers: Die Hardware bleibt der M5Stack ATOM Lite
-(ESP32-PICO-D4, 4 MB Flash, kein PSRAM), und ein zweites Gerät kommt nicht in
-Frage.** Ob darauf eine Matter-Bridge möglich ist, ist **offen und knapp**: Die
+Status: **ZURÜCKGESTELLT — wird vorerst nicht weiterverfolgt** (Stand
+2026-08-03, Entscheidung des Maintainers). Keine Implementierung, keine offenen
+Aufgaben. Das Dokument bleibt als **Analyse und Entscheidungsgrundlage**
+erhalten; wird das Thema wieder aufgenommen, sind die nächsten Schritte die
+beiden Messungen in 14.4.
+
+**Randbedingung zum Zeitpunkt der Zurückstellung: Die Hardware bleibt der
+M5Stack ATOM Lite (ESP32-PICO-D4, 4 MB Flash, kein PSRAM), und ein zweites Gerät
+kommt nicht in Frage.** Ob darauf eine Matter-Bridge möglich ist, ist **offen und
+knapp**: Die
 Rechnung mit der korrigierten Heap-Basislinie (~90 KB statt der aus der README
 übernommenen 56 KB) und die zwei noch fehlenden Messungen stehen in 14.
 Abschnitt 15 bewertet die Nachfrage nach IFTTT und nennt die Schnittstellen-
@@ -716,9 +722,12 @@ statischen DRAM-Anteil und den freien Heap auf **dieser** Hardware und
 entscheidet die Frage endgültig. Das ist der teure Schritt (Tage bis Wochen,
 4.4), und er sollte erst nach Messung 1 und 2 begonnen werden.
 
-**Konsequenz für Issue #44:** zurückstellen, bis Messung 1 und 2 vorliegen —
-nicht schließen. Bis dahin ist Abschnitt 15 der Weg, der ohne neue Hardware
-Nutzen bringt.
+**Konsequenz für Issue #44:** Der Maintainer hat das Thema am **2026-08-03
+zurückgestellt** — es wird vorerst nicht weiterverfolgt, und keine der beiden
+Messungen ist beauftragt. Das Issue bleibt offen, ohne laufende Arbeit; dieses
+Dokument ist der Stand, an dem eine spätere Wiederaufnahme ansetzen kann.
+Abschnitt 15 beschreibt den Weg, der ohne neue Hardware Nutzen brächte (MQTT) —
+ebenfalls nicht beauftragt.
 
 ## 15. Nachgefragt: IFTTT — und was auf dieser Hardware wirklich trägt
 
