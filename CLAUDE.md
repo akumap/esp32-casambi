@@ -129,8 +129,9 @@ second OTA slot by design) — reverting means reflashing over serial from
 
 ### Waiting for long-running commands
 
-Builds take 2-3 min per target and a serial flash several more (1.6 MB at
-115200 baud), which makes polling tempting. Don't. Start the command with
+Builds take 2-3 min per target; a serial flash (1.6 MB at 1.5M baud,
+`upload_speed`/`monitor_speed` in platformio.ini) takes well under a minute,
+but is still async — don't poll for it. Start the command with
 `run_in_background` and wait for the harness completion notification — that
 is the only reliable signal here.
 
@@ -158,7 +159,7 @@ Capture the boot log (toggling DTR/RTS triggers a clean reset):
 ```bash
 /home/pi/platformio-venv/bin/python3 - <<'PY'
 import serial, time
-s = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+s = serial.Serial('/dev/ttyUSB0', 1500000, timeout=1)   # matches monitor_speed/Serial.begin()
 s.dtr = False; s.rts = True; time.sleep(0.1)   # EN low  = reset
 s.rts = False                                  # EN high = run
 t0 = time.time()
@@ -178,7 +179,7 @@ CMDS = ["debug status","ntp status","autoconnect status","wifi status",
         "reconnect status","list units","log 2",
         "uon 199","glevel 199 5","son 199","ulevel 5 999",
         "connect foo","quatsch"]
-s = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+s = serial.Serial('/dev/ttyUSB0', 1500000, timeout=1)   # matches monitor_speed/Serial.begin()
 time.sleep(0.5); s.reset_input_buffer()
 t0 = time.time()                    # wait for boot (opening the port resets it)
 while time.time()-t0 < 45:
