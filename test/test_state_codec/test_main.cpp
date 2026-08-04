@@ -14,7 +14,9 @@
 
 using statecodec::ControlSpec;
 using statecodec::EncodeResult;
+using statecodec::DecodeResult;
 using statecodec::encodeState;
+using statecodec::decodeControl;
 using statecodec::maxControlValue;
 using statecodec::MAX_STATE_BYTES;
 
@@ -142,6 +144,73 @@ static void test_result_names_nonempty() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// decodeControl — the read-side mirror of encodeState, used to interpret an
+// incoming 0x06 record's raw state[] blob (UnitStateRecord, packet_parse.h)
+// once fixture controls (offset/length) are known.
+// ---------------------------------------------------------------------------
+
+static void test_decode_grace_layout() {
+    // Same blob encodeState would produce for the Oligo Grace layout.
+    const uint8_t state[3] = { 255, 128, 46 };
+    uint16_t value = 0xFFFF;
+    TEST_ASSERT_EQUAL(statecodec::DECODE_OK, decodeControl(state, 3, 0, 8, value));
+    TEST_ASSERT_EQUAL_UINT16(255, value);
+    TEST_ASSERT_EQUAL(statecodec::DECODE_OK, decodeControl(state, 3, 8, 8, value));
+    TEST_ASSERT_EQUAL_UINT16(128, value);
+    TEST_ASSERT_EQUAL(statecodec::DECODE_OK, decodeControl(state, 3, 16, 8, value));
+    TEST_ASSERT_EQUAL_UINT16(46, value);
+}
+
+static void test_decode_16bit_little_endian() {
+    // Byte 1-2 = 0xABCD little-endian, matching encodeState's write order.
+    const uint8_t state[3] = { 9, 0xCD, 0xAB };
+    uint16_t value = 0;
+    TEST_ASSERT_EQUAL(statecodec::DECODE_OK, decodeControl(state, 3, 8, 16, value));
+    TEST_ASSERT_EQUAL_UINT16(0xABCD, value);
+}
+
+static void test_decode_unaligned_offset_rejected() {
+    const uint8_t state[2] = { 1, 2 };
+    uint16_t value = 0;
+    TEST_ASSERT_EQUAL(statecodec::DECODE_UNSUPPORTED_LAYOUT,
+                      decodeControl(state, 2, 4, 8, value));   // bit offset 4
+}
+
+static void test_decode_odd_length_rejected() {
+    const uint8_t state[2] = { 1, 2 };
+    uint16_t value = 0;
+    TEST_ASSERT_EQUAL(statecodec::DECODE_UNSUPPORTED_LAYOUT,
+                      decodeControl(state, 2, 0, 12, value));
+}
+
+static void test_decode_control_past_blob_rejected() {
+    const uint8_t state[3] = { 1, 2, 3 };
+    uint16_t value = 0;
+    // 16-bit control at byte offset 2 needs bytes 2-3, blob only has 3 bytes.
+    TEST_ASSERT_EQUAL(statecodec::DECODE_TRUNCATED,
+                      decodeControl(state, 3, 16, 16, value));
+}
+
+// The write-up's correct catch: MAX_STATE_BYTES (8) is an outgoing-only
+// limit. A state_len of 16 (the largest a 0x06 record's b8 high nibble can
+// declare) must decode fine — nothing here is bounded by MAX_STATE_BYTES.
+static void test_decode_beyond_max_state_bytes() {
+    uint8_t state[16];
+    for (int i = 0; i < 16; i++) state[i] = (uint8_t)(i + 1);
+    uint16_t value = 0;
+    TEST_ASSERT_EQUAL(statecodec::DECODE_OK, decodeControl(state, 16, 15 * 8, 8, value));
+    TEST_ASSERT_EQUAL_UINT16(16, value);
+}
+
+static void test_decode_result_names_nonempty() {
+    for (int r = 0; r <= statecodec::DECODE_TRUNCATED; r++) {
+        const char* n = statecodec::decodeResultName(static_cast<DecodeResult>(r));
+        TEST_ASSERT_NOT_NULL(n);
+        TEST_ASSERT_TRUE(strlen(n) > 0);
+    }
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_grace_layout_full_state);
@@ -157,5 +226,13 @@ int main(int, char**) {
     RUN_TEST(test_value_out_of_range);
     RUN_TEST(test_max_control_value);
     RUN_TEST(test_result_names_nonempty);
+
+    RUN_TEST(test_decode_grace_layout);
+    RUN_TEST(test_decode_16bit_little_endian);
+    RUN_TEST(test_decode_unaligned_offset_rejected);
+    RUN_TEST(test_decode_odd_length_rejected);
+    RUN_TEST(test_decode_control_past_blob_rejected);
+    RUN_TEST(test_decode_beyond_max_state_bytes);
+    RUN_TEST(test_decode_result_names_nonempty);
     return UNITY_END();
 }
