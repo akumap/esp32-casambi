@@ -1,0 +1,367 @@
+>>> CMD: debug parse on
+Parse debug: on
+>>> CMD: debug ble on
+BLE debug: on
+BLE: Sending operation - opcode=0x30, target=0x0101, payload_len=2
+BLE: Sending encrypted packet - counter=2, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #17)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x8000000f
+PARSE 0x06 raw (5 bytes): 01 03 13 00 00
+PARSE 0x06: 1 record(s)
+  Unit 1: online=1 on=0 state[0]=0 state[1]=0
+Casambi: Unit [1] 'AZ Stehleuchte' OFF dimmer(b0)=0 vertical(b1)=0
+BLE: Sending operation - opcode=0x30, target=0x0101, payload_len=2
+BLE: Sending encrypted packet - counter=3, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #18)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000010
+PARSE 0x06 raw (6 bytes): 01 13 13 01 01 00
+PARSE 0x06: 1 record(s)
+  Unit 1: online=1 on=1 state[0]=1 state[1]=0
+Casambi: Unit [1] 'AZ Stehleuchte' ON dimmer(b0)=1 vertical(b1)=0
+BLE: Sending operation - opcode=0x30, target=0x0101, payload_len=2
+BLE: Sending encrypted packet - counter=4, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #19)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000011
+PARSE 0x06 raw (6 bytes): 01 13 13 40 40 40
+PARSE 0x06: 1 record(s)
+  Unit 1: online=1 on=1 state[0]=64 state[1]=64
+Casambi: Unit [1] 'AZ Stehleuchte' ON dimmer(b0)=64 vertical(b1)=64
+BLE: Sending operation - opcode=0x30, target=0x0101, payload_len=2
+BLE: Sending encrypted packet - counter=5, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #20)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000012
+PARSE 0x06 raw (6 bytes): 01 13 13 7f 7f c0
+PARSE 0x06: 1 record(s)
+  Unit 1: online=1 on=1 state[0]=127 state[1]=192
+Casambi: Unit [1] 'AZ Stehleuchte' ON dimmer(b0)=127 vertical(b1)=192
+BLE: Sending operation - opcode=0x30, target=0x0101, payload_len=2
+BLE: Sending encrypted packet - counter=6, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #21)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000013
+PARSE 0x06 raw (6 bytes): 01 13 13 fe fe ff
+PARSE 0x06: 1 record(s)
+  Unit 1: online=1 on=1 state[0]=254 state[1]=255
+Casambi: Unit [1] 'AZ Stehleuchte' ON dimmer(b0)=254 vertical(b1)=255
+BLE: Sending operation - opcode=0x30, target=0x0101, payload_len=2
+BLE: Sending encrypted packet - counter=7, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #22)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x80000014
+PARSE 0x06 raw (5 bytes): 01 03 13 ff ff
+PARSE 0x06: 1 record(s)
+  Unit 1: online=1 on=1 state[0]=255 state[1]=255
+Casambi: Unit [1] 'AZ Stehleuchte' ON dimmer(b0)=255 vertical(b1)=255
+BLE: Sending operation - opcode=0x30, target=0x0201, payload_len=1
+BLE: Sending encrypted packet - counter=8, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #23)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000015
+PARSE 0x06 raw (6 bytes): 02 17 03 80 71 00
+PARSE 0x06: 1 record(s)
+  Unit 2: online=1 on=0 state[0]=0
+Casambi: Unit [2] 'Più Spüle' OFF dimmer(b0)=0
+BLE: Sending operation - opcode=0x30, target=0x0201, payload_len=1
+BLE: Sending encrypted packet - counter=9, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #24)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000016
+PARSE 0x06 raw (6 bytes): 02 17 03 80 01 01
+PARSE 0x06: 1 record(s)
+  Unit 2: online=1 on=1 state[0]=1
+Casambi: Unit [2] 'Più Spüle' ON dimmer(b0)=1
+BLE: Sending operation - opcode=0x30, target=0x0201, payload_len=1
+BLE: Sending encrypted packet - counter=10, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #25)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000017
+PARSE 0x06 raw (6 bytes): 02 17 03 80 40 40
+PARSE 0x06: 1 record(s)
+  Unit 2: online=1 on=1 state[0]=64
+Casambi: Unit [2] 'Più Spüle' ON dimmer(b0)=64
+BLE: Sending operation - opcode=0x30, target=0x0201, payload_len=1
+BLE: Sending encrypted packet - counter=11, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #26)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000018
+PARSE 0x06 raw (6 bytes): 02 17 03 80 7f 7f
+PARSE 0x06: 1 record(s)
+  Unit 2: online=1 on=1 state[0]=127
+Casambi: Unit [2] 'Più Spüle' ON dimmer(b0)=127
+BLE: Sending operation - opcode=0x30, target=0x0201, payload_len=1
+BLE: Sending encrypted packet - counter=12, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #27)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000019
+PARSE 0x06 raw (6 bytes): 02 17 03 80 fe fe
+PARSE 0x06: 1 record(s)
+  Unit 2: online=1 on=1 state[0]=254
+Casambi: Unit [2] 'Più Spüle' ON dimmer(b0)=254
+BLE: Sending operation - opcode=0x30, target=0x0201, payload_len=1
+BLE: Sending encrypted packet - counter=13, plaintext_len=15, encrypted_len=31
+BLE: Notification received (26 bytes, total #28)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x8000001a
+PARSE 0x06 raw (5 bytes): 02 07 03 80 ff
+PARSE 0x06: 1 record(s)
+  Unit 2: online=1 on=1 state[0]=255
+Casambi: Unit [2] 'Più Spüle' ON dimmer(b0)=255
+BLE: Sending operation - opcode=0x30, target=0x0301, payload_len=1
+BLE: Sending encrypted packet - counter=14, plaintext_len=15, encrypted_len=31
+BLE: Notification received (26 bytes, total #29)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x8000001b
+PARSE 0x06 raw (5 bytes): 03 07 03 80 00
+PARSE 0x06: 1 record(s)
+  Unit 3: online=1 on=0 state[0]=0
+Casambi: Unit [3] 'Küche' OFF dimmer(b0)=0
+BLE: Sending operation - opcode=0x30, target=0x0301, payload_len=1
+BLE: Sending encrypted packet - counter=15, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #30)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x8000001c
+PARSE 0x06 raw (6 bytes): 03 17 03 80 80 80
+PARSE 0x06: 1 record(s)
+  Unit 3: online=1 on=1 state[0]=128
+Casambi: Unit [3] 'Küche' ON dimmer(b0)=128
+BLE: Sending operation - opcode=0x30, target=0x0301, payload_len=1
+BLE: Sending encrypted packet - counter=16, plaintext_len=15, encrypted_len=31
+BLE: Notification received (26 bytes, total #31)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x8000001d
+PARSE 0x06 raw (5 bytes): 03 07 03 80 ff
+PARSE 0x06: 1 record(s)
+  Unit 3: online=1 on=1 state[0]=255
+Casambi: Unit [3] 'Küche' ON dimmer(b0)=255
+BLE: Sending operation - opcode=0x30, target=0x0501, payload_len=2
+BLE: Sending encrypted packet - counter=17, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #32)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x8000001e
+PARSE 0x06 raw (5 bytes): 05 03 13 00 00
+PARSE 0x06: 1 record(s)
+  Unit 5: online=1 on=0 state[0]=0 state[1]=0
+Casambi: Unit [5] 'Peter Nachttisch' OFF dimmer(b0)=0 temperature(b1)=0(2700K)
+BLE: Sending operation - opcode=0x30, target=0x0501, payload_len=2
+BLE: Sending encrypted packet - counter=18, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #33)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x8000001f
+PARSE 0x06 raw (6 bytes): 05 13 13 40 40 00
+PARSE 0x06: 1 record(s)
+  Unit 5: online=1 on=1 state[0]=64 state[1]=0
+Casambi: Unit [5] 'Peter Nachttisch' ON dimmer(b0)=64 temperature(b1)=0(2700K)
+BLE: Sending operation - opcode=0x30, target=0x0501, payload_len=2
+BLE: Sending encrypted packet - counter=19, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #34)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x80000020
+PARSE 0x06 raw (5 bytes): 05 03 13 ff 80
+PARSE 0x06: 1 record(s)
+  Unit 5: online=1 on=1 state[0]=255 state[1]=128
+Casambi: Unit [5] 'Peter Nachttisch' ON dimmer(b0)=255 temperature(b1)=128(3352K)
+BLE: Sending operation - opcode=0x30, target=0x0501, payload_len=2
+BLE: Sending encrypted packet - counter=20, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #35)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x80000021
+PARSE 0x06 raw (5 bytes): 05 03 13 ff ff
+PARSE 0x06: 1 record(s)
+  Unit 5: online=1 on=1 state[0]=255 state[1]=255
+Casambi: Unit [5] 'Peter Nachttisch' ON dimmer(b0)=255 temperature(b1)=255(4000K)
+BLE: Sending operation - opcode=0x30, target=0x0701, payload_len=3
+BLE: Sending encrypted packet - counter=21, plaintext_len=17, encrypted_len=33
+BLE: Notification received (27 bytes, total #36)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000022
+PARSE 0x06 raw (6 bytes): 07 03 23 00 00 80
+PARSE 0x06: 1 record(s)
+  Unit 7: online=1 on=0 state[0]=0 state[1]=0 state[2]=128
+Casambi: Unit [7] 'Mito sospeso' OFF dimmer(b0)=0 vertical(b1)=0 temperature(b2)=128(3352K)
+BLE: Sending operation - opcode=0x30, target=0x0701, payload_len=3
+BLE: Sending encrypted packet - counter=22, plaintext_len=17, encrypted_len=33
+BLE: Notification received (27 bytes, total #37)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000023
+PARSE 0x06 raw (6 bytes): 07 03 23 ff ff 80
+PARSE 0x06: 1 record(s)
+  Unit 7: online=1 on=1 state[0]=255 state[1]=255 state[2]=128
+Casambi: Unit [7] 'Mito sospeso' ON dimmer(b0)=255 vertical(b1)=255 temperature(b2)=128(3352K)
+BLE: Sending operation - opcode=0x30, target=0x0701, payload_len=3
+BLE: Sending encrypted packet - counter=23, plaintext_len=17, encrypted_len=33
+BLE: Notification received (27 bytes, total #38)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000024
+PARSE 0x06 raw (6 bytes): 07 03 23 ff ff 00
+PARSE 0x06: 1 record(s)
+  Unit 7: online=1 on=1 state[0]=255 state[1]=255 state[2]=0
+Casambi: Unit [7] 'Mito sospeso' ON dimmer(b0)=255 vertical(b1)=255 temperature(b2)=0(2700K)
+BLE: Sending operation - opcode=0x30, target=0x0801, payload_len=2
+BLE: Sending encrypted packet - counter=24, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #39)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x80000025
+PARSE 0x06 raw (5 bytes): 08 03 13 00 00
+PARSE 0x06: 1 record(s)
+  Unit 8: online=1 on=0 state[0]=0 state[1]=0
+Casambi: Unit [8] 'Mel Luna sospeso' OFF dimmer(b0)=0 temperature(b1)=0(2700K)
+BLE: Sending operation - opcode=0x30, target=0x0801, payload_len=2
+BLE: Sending encrypted packet - counter=25, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #40)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x80000026
+PARSE 0x06 raw (5 bytes): 08 03 13 ff ff
+PARSE 0x06: 1 record(s)
+  Unit 8: online=1 on=1 state[0]=255 state[1]=255
+Casambi: Unit [8] 'Mel Luna sospeso' ON dimmer(b0)=255 temperature(b1)=255(4000K)
+BLE: Sending operation - opcode=0x30, target=0x0901, payload_len=2
+BLE: Sending encrypted packet - counter=26, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #41)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000027
+PARSE 0x06 raw (6 bytes): 09 13 13 fe 00 80
+PARSE 0x06: 1 record(s)
+  Unit 9: online=1 on=0 state[0]=0 state[1]=128
+Casambi: Unit [9] 'AZ Decke mitte' OFF dimmer(b0)=0 temperature(b1)=128(3352K)
+BLE: Sending operation - opcode=0x30, target=0x0901, payload_len=2
+BLE: Sending encrypted packet - counter=27, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #42)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000028
+PARSE 0x06 raw (6 bytes): 09 13 13 40 40 80
+PARSE 0x06: 1 record(s)
+  Unit 9: online=1 on=1 state[0]=64 state[1]=128
+Casambi: Unit [9] 'AZ Decke mitte' ON dimmer(b0)=64 temperature(b1)=128(3352K)
+BLE: Sending operation - opcode=0x30, target=0x0901, payload_len=2
+BLE: Sending encrypted packet - counter=28, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #43)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000029
+PARSE 0x06 raw (6 bytes): 09 13 13 fe fe ff
+PARSE 0x06: 1 record(s)
+  Unit 9: online=1 on=1 state[0]=254 state[1]=255
+Casambi: Unit [9] 'AZ Decke mitte' ON dimmer(b0)=254 temperature(b1)=255(4000K)
+BLE: Sending operation - opcode=0x30, target=0x0a01, payload_len=1
+BLE: Sending encrypted packet - counter=29, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #44)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x8000002a
+PARSE 0x06 raw (6 bytes): 0a 17 03 80 fe 00
+PARSE 0x06: 1 record(s)
+  Unit 10: online=1 on=0 state[0]=0
+Casambi: Unit [10] 'AZ Schrank' OFF dimmer(b0)=0
+BLE: Sending operation - opcode=0x30, target=0x0a01, payload_len=1
+BLE: Sending encrypted packet - counter=30, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #45)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x8000002b
+PARSE 0x06 raw (6 bytes): 0a 17 03 80 80 80
+PARSE 0x06: 1 record(s)
+  Unit 10: online=1 on=1 state[0]=128
+Casambi: Unit [10] 'AZ Schrank' ON dimmer(b0)=128
+BLE: Sending operation - opcode=0x30, target=0x0a01, payload_len=1
+BLE: Sending encrypted packet - counter=31, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #46)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x8000002c
+PARSE 0x06 raw (6 bytes): 0a 17 03 80 fe fe
+PARSE 0x06: 1 record(s)
+  Unit 10: online=1 on=1 state[0]=254
+Casambi: Unit [10] 'AZ Schrank' ON dimmer(b0)=254
+BLE: Sending operation - opcode=0x30, target=0x0b01, payload_len=1
+BLE: Sending encrypted packet - counter=32, plaintext_len=15, encrypted_len=31
+BLE: Notification received (26 bytes, total #47)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x8000002d
+PARSE 0x06 raw (5 bytes): 0b 07 03 80 00
+PARSE 0x06: 1 record(s)
+  Unit 11: online=1 on=0 state[0]=0
+Casambi: Unit [11] 'IFC' OFF dimmer(b0)=0
+BLE: Sending operation - opcode=0x30, target=0x0b01, payload_len=1
+BLE: Sending encrypted packet - counter=33, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #48)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x8000002e
+PARSE 0x06 raw (6 bytes): 0b 17 03 80 80 80
+PARSE 0x06: 1 record(s)
+  Unit 11: online=1 on=1 state[0]=128
+Casambi: Unit [11] 'IFC' ON dimmer(b0)=128
+BLE: Sending operation - opcode=0x30, target=0x0b01, payload_len=1
+BLE: Sending encrypted packet - counter=34, plaintext_len=15, encrypted_len=31
+BLE: Notification received (26 bytes, total #49)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x8000002f
+PARSE 0x06 raw (5 bytes): 0b 07 03 80 ff
+PARSE 0x06: 1 record(s)
+  Unit 11: online=1 on=1 state[0]=255
+Casambi: Unit [11] 'IFC' ON dimmer(b0)=255
+BLE: Sending operation - opcode=0x30, target=0x0101, payload_len=2
+BLE: Sending encrypted packet - counter=35, plaintext_len=16, encrypted_len=32
+BLE: Notification received (26 bytes, total #50)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=6, counter=0x80000030
+PARSE 0x06 raw (5 bytes): 01 03 13 00 80
+PARSE 0x06: 1 record(s)
+  Unit 1: online=1 on=0 state[0]=0 state[1]=128
+Casambi: Unit [1] 'AZ Stehleuchte' OFF dimmer(b0)=0 vertical(b1)=128
+BLE: Sending operation - opcode=0x30, target=0x0201, payload_len=1
+BLE: Sending encrypted packet - counter=36, plaintext_len=15, encrypted_len=31
+BLE: Notification received (27 bytes, total #51)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000031
+PARSE 0x06 raw (6 bytes): 02 17 03 80 71 71
+PARSE 0x06: 1 record(s)
+  Unit 2: online=1 on=1 state[0]=113
+Casambi: Unit [2] 'Più Spüle' ON dimmer(b0)=113
+BLE: Sending operation - opcode=0x30, target=0x0301, payload_len=1
+BLE: Sending encrypted packet - counter=37, plaintext_len=15, encrypted_len=31
+BLE: Sending operation - opcode=0x30, target=0x0501, payload_len=2
+BLE: Sending encrypted packet - counter=38, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #52)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000032
+PARSE 0x06 raw (6 bytes): 05 13 13 0a 0a ff
+PARSE 0x06: 1 record(s)
+  Unit 5: online=1 on=1 state[0]=10 state[1]=255
+Casambi: Unit [5] 'Peter Nachttisch' ON dimmer(b0)=10 temperature(b1)=255(4000K)
+BLE: Sending operation - opcode=0x30, target=0x0701, payload_len=3
+BLE: Sending encrypted packet - counter=39, plaintext_len=17, encrypted_len=33
+BLE: Notification received (27 bytes, total #53)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000033
+PARSE 0x06 raw (6 bytes): 07 03 23 ff 7f 00
+PARSE 0x06: 1 record(s)
+  Unit 7: online=1 on=1 state[0]=255 state[1]=127 state[2]=0
+Casambi: Unit [7] 'Mito sospeso' ON dimmer(b0)=255 vertical(b1)=127 temperature(b2)=0(2700K)
+BLE: Sending operation - opcode=0x30, target=0x0801, payload_len=2
+BLE: Sending encrypted packet - counter=40, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #54)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000034
+PARSE 0x06 raw (6 bytes): 08 13 13 0a 0a ff
+PARSE 0x06: 1 record(s)
+  Unit 8: online=1 on=1 state[0]=10 state[1]=255
+Casambi: Unit [8] 'Mel Luna sospeso' ON dimmer(b0)=10 temperature(b1)=255(4000K)
+BLE: Sending operation - opcode=0x30, target=0x0901, payload_len=2
+BLE: Sending encrypted packet - counter=41, plaintext_len=16, encrypted_len=32
+BLE: Notification received (27 bytes, total #55)
+Decrypt: CMAC verified OK
+BLE: Data packet type=0x06, decrypted_len=7, counter=0x80000035
+PARSE 0x06 raw (6 bytes): 09 13 13 fe fe 00
+PARSE 0x06: 1 record(s)
+  Unit 9: online=1 on=1 state[0]=254 state[1]=0
+Casambi: Unit [9] 'AZ Decke mitte' ON dimmer(b0)=254 temperature(b1)=0(2700K)
+BLE: Sending operation - opcode=0x30, target=0x0a01, payload_len=1
+BLE: Sending encrypted packet - counter=42, plaintext_len=15, encrypted_len=31
+BLE: Sending operation - opcode=0x30, target=0x0b01, payload_len=1
+BLE: Sending encrypted packet - counter=43, plaintext_len=15, encrypted_len=31
+BLE: Keepalive OK (25 bytes)
+BLE: Keepalive response (undecoded) (25 bytes): 01 2b 9e 00 0b 48 f0 2c dd 68 76 62 90 09 ad ee 93 ea 99 5f 22 1e 2b 00 01
+>>> CMD: debug parse off
+Parse debug: off
+>>> CMD: debug ble off
+BLE debug: off
