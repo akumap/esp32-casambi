@@ -87,7 +87,7 @@ void hexDump(const char* label, const uint8_t* data, size_t len, size_t maxBytes
 // 0x06 - Status Broadcast Parsing
 // ============================================================================
 
-bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitStateInfo>& states) {
+bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitStateRecord>& records) {
     // All PARSE output belongs to `debug parse` (not `debug ble`): raw hex,
     // parse diagnostics, and the positional per-record view. The named,
     // cloud-derived per-unit line ("Casambi: Unit ...") is emitted separately by
@@ -97,7 +97,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
     }
 
     packetparse::ParseDiag diag;
-    packetparse::ParseStatus st = packetparse::parseStatusBroadcast(data, len, states, &diag);
+    packetparse::ParseStatus st = packetparse::parseStatusBroadcast(data, len, records, &diag);
     if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed06++;
         if (parseDebugEnabled) {
@@ -110,17 +110,16 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
         g_parseStats.partial06++;
         if (parseDebugEnabled) {
             Serial.printf("PARSE 0x06: partial — %u record(s) applied, tail dropped at offset %u: %s\n",
-                          (unsigned)states.size(), (unsigned)diag.offset, diag.reason);
+                          (unsigned)records.size(), (unsigned)diag.offset, diag.reason);
         }
     }
 
-    if (parseDebugEnabled && !states.empty()) {
-        Serial.printf("PARSE 0x06: %d record(s)\n", states.size());
-        for (const auto& s : states) {
-            Serial.printf("  Unit %d: online=%d on=%d state[0]=%d",
-                          s.unitId, s.online, s.on, s.level);
-            if (s.hasVertical)  Serial.printf(" state[1]=%d", s.vertical);
-            if (s.hasColorTemp) Serial.printf(" state[2]=%d", s.colorTemp);
+    if (parseDebugEnabled && !records.empty()) {
+        Serial.printf("PARSE 0x06: %d record(s)\n", records.size());
+        for (const auto& r : records) {
+            Serial.printf("  Unit %d: on=%d online=%d priority=%d state[0..%d]=",
+                          r.unitId, r.on, r.online, r.priority, r.stateLen - 1);
+            for (uint8_t i = 0; i < r.stateLen; i++) Serial.printf("%d ", r.state[i]);
             Serial.println();
         }
     }

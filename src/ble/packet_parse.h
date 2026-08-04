@@ -27,9 +27,8 @@
  *
  *   Complete  — the whole payload was consumed and understood.
  *   Partial   — a well-formed prefix was parsed and IS returned; the rest of
- *               the payload was not understood (unknown capability, truncated
- *               tail record, trailing bytes) and is dropped. Diag says where
- *               and why.
+ *               the payload was not understood (truncated tail record,
+ *               trailing bytes) and is dropped. Diag says where and why.
  *   Malformed — nothing usable; the output is empty.
  *
  * Rationale for tolerance: these payloads arrive decrypted AND CMAC-verified,
@@ -41,30 +40,64 @@
  * yields nothing usable at all. Callers may apply results for Complete AND
  * Partial; a parser never fabricates state from bytes it did not understand.
  *
- * 0x06 status broadcast — one record per changed unit:
+ * 0x06 status broadcast — one record per changed unit. This framing replaced
+ * an earlier "capability descriptor" reading of byte 2 (aux-channel count +
+ * a special-cased 0x80 constant byte) that was reverse-engineered ad hoc from
+ * a handful of captures. That heuristic and the framing below compute the
+ * IDENTICAL record length for every packet ever captured on the reference
+ * network (56 real records across 5 fixture types, full dimmer/vertical/
+ * temperature sweeps, and genuine mains power-cycle/offline transitions —
+ * see docs/captures/2026-08-04-0x06-framing/), so the rewrite carried no
+ * framing risk; it was done because the two readings disagree on *meaning*
+ * (notably `online`, where the old low-nibble-nonzero heuristic is
+ * demonstrably wrong during a real offline transition — it reported
+ * `online: true` for a unit that had just gone dark, twice, in that capture).
  *
  *   Byte 0: Unit-ID
  *   Byte 1: Flags
- *            Bit 4:   stored_level byte present (+1 byte)
- *            Bit 0-3: Change source
- *                     0x0 = physical (power cycle, offline)
- *                     0x3 = software (app, ESP32) — devices with aux
- *                     0x7 = software (simple devices / type 1422)
- *   Byte 2: Capability descriptor
- *            Upper nibble = number of aux channels (0,1,2)
- *            Lower nibble: 0x00 or 0x03
- *            0x00 = simple device, 0 aux, NO constant byte
- *            0x03 = simple device, 0 aux, HAS constant byte (0x80)
- *            0x13 = 1 aux (brightness + temp OR vertical)
- *            0x23 = 2 aux (brightness + vertical + temp)
- *   [0x80]           — only if cap == 0x03 exactly (value observed as 0x80,
- *                      tolerated if different — possibly an undecoded flag)
- *   [stored_level]   — only if flags bit 4 set (previous brightness)
- *   Brightness       — current output level 0-255
- *   [Aux1]           — if aux_count >= 1 (vertical or temp, device-dependent)
- *   [Aux2]           — if aux_count >= 2 (temp)
+ *            Bit 0: on      — HARDWARE-VERIFIED as decoupled from live
+ *                             brightness (stays 1 while a unit is dimmed to
+ *                             exactly 0 while online) but always identical to
+ *                             bit 1 in every capture so far (56/56 records) —
+ *                             carries no information beyond `online` on this
+ *                             network. Passed through verbatim regardless;
+ *                             this firmware does not decide what "on" means
+ *                             for a dashboard, callers do (see UnitStateRecord).
+ *            Bit 1: online  — HARDWARE-VERIFIED more correct than the old
+ *                             low-nibble heuristic for real offline
+ *                             transitions (see above).
+ *            Bit 2: con     — optional byte present (+1 byte). UNVERIFIED
+ *                             distinct from `sid`/`extra` — on this hardware
+ *                             it only ever co-occurs with single-dimmer
+ *                             fixtures (type 1422) and always carries 0x80,
+ *                             same value/position the old "constant byte"
+ *                             heuristic already skipped.
+ *            Bit 3: sid     — optional byte present (+1 byte). UNVERIFIED —
+ *                             never observed set in any capture; implemented
+ *                             per the documented protocol regardless.
+ *            Bit 4: extra   — optional byte present (+1 byte). Same wire
+ *                             position as the old "stored_level" byte; this
+ *                             framing does not assume what it contains.
+ *            Bit 5:         — UNVERIFIED, never observed set.
+ *            Bit 6-7: padding length (0-3 trailing bytes). UNVERIFIED —
+ *                             never observed nonzero.
+ *   Byte 2: b8
+ *            Bits 4-7: state_len - 1  (state_len = 1-16 raw state bytes)
+ *            Bits 0-3: priority. UNVERIFIED beyond "always 3" — every one of
+ *                             56 real captures had priority == 3 regardless
+ *                             of fixture type, change source, or online/
+ *                             offline transition; implemented per the
+ *                             documented 0-15 range regardless.
+ *   [con]            — present iff flags bit 2
+ *   [sid]            — present iff flags bit 3
+ *   [extra]          — present iff flags bit 4
+ *   state[state_len] — raw per-unit state blob. NO fixture semantics here —
+ *                      which byte means "dimmer" vs "vertical" vs
+ *                      "temperature" comes from the cloud fixture's controls
+ *                      (offset/length), applied by the caller, not this parser.
+ *   padding[padding_len]
  *
- * Record length = 3 + has_const + has_prev + 1 + aux_count
+ * Record length = 3 + has_con + has_sid + has_extra + state_len + padding_len
  */
 
 #ifndef PACKET_PARSE_H
@@ -95,6 +128,48 @@ struct UnitStateInfo {
                       colorR(0), colorG(0), colorB(0),
                       hasLevel(false), hasVertical(false),
                       hasColorTemp(false), hasColor(false) {}
+};
+
+// Upper bounds on a 0x06 record's variable-length parts, straight from the
+// wire framing: state_len is a 4-bit nibble + 1 (1-16), padding_len is a
+// 2-bit field (0-3). Distinct from state_codec::MAX_STATE_BYTES, which
+// bounds the OUTGOING SetState encoder (8) — that limit does not apply here.
+constexpr size_t UNIT_STATE_MAX_LEN     = 16;
+constexpr size_t UNIT_STATE_MAX_PADDING = 3;
+
+/**
+ * One raw 0x06 status-broadcast record, decoded strictly per the documented
+ * wire framing (see the header comment above) with NO fixture semantics
+ * applied — `state` is the raw per-unit state blob exactly as received;
+ * which byte means "dimmer"/"vertical"/"temperature"/... comes from the
+ * unit's cloud fixture controls (offset/length), applied by the caller.
+ * `con`/`sid`/`extraByte` are likewise passed through uninterpreted — see
+ * the header comment for what is and is not hardware-verified about them.
+ */
+struct UnitStateRecord {
+    uint8_t unitId;
+    uint8_t flags;
+    bool    on;             // flags bit 0, verbatim — see header comment
+    bool    online;         // flags bit 1, verbatim — see header comment
+    uint8_t priority;       // b8 low nibble (0-15)
+
+    bool    hasCon;         // flags bit 2
+    bool    hasSid;         // flags bit 3
+    bool    hasExtra;       // flags bit 4
+    uint8_t con;            // valid iff hasCon
+    uint8_t sid;            // valid iff hasSid
+    uint8_t extraByte;      // valid iff hasExtra
+
+    uint8_t stateLen;                          // 1-16, b8 high nibble + 1
+    uint8_t state[UNIT_STATE_MAX_LEN];         // state[0..stateLen-1] valid
+
+    uint8_t paddingLen;                        // 0-3, flags bits 6-7
+    uint8_t padding[UNIT_STATE_MAX_PADDING];   // padding[0..paddingLen-1] valid
+
+    UnitStateRecord()
+        : unitId(0), flags(0), on(false), online(false), priority(0),
+          hasCon(false), hasSid(false), hasExtra(false), con(0), sid(0), extraByte(0),
+          stateLen(0), state(), paddingLen(0), padding() {}
 };
 
 /**
@@ -206,32 +281,19 @@ struct ParseDiag {
 
 namespace detail {
 
-// Known capability values: 0x00, 0x03, 0x13, 0x23.
-// Lower nibble must be 0x00 or 0x03, upper nibble 0-2.
-inline bool isValidCap(uint8_t cap) {
-    uint8_t low = cap & 0x0F;
-    uint8_t auxCount = (cap >> 4) & 0x0F;
-    return (low == 0x00 || low == 0x03) && (auxCount <= 2);
-}
-
-// Expected record length for one unit in a 0x06 packet.
-inline size_t recordLength(uint8_t flags, uint8_t cap) {
-    size_t auxCount = (cap >> 4) & 0x0F;
-    size_t hasConst = (cap == 0x03) ? 1 : 0;   // only exact 0x03 has the 0x80 byte
-    size_t hasPrev  = (flags & 0x10) ? 1 : 0;
-    return 3 + hasConst + hasPrev + 1 + auxCount;
-}
-
 inline void setDiag(ParseDiag* diag, size_t offset, const char* reason) {
     if (diag) { diag->offset = offset; diag->reason = reason; }
 }
 
 // Stop parsing at `offset` for `reason`: keep the records understood so far
 // (Partial) — or report Malformed when there is nothing usable to keep.
-inline ParseStatus stop(std::vector<UnitStateInfo>& states, ParseDiag* diag,
+// Templated: used for both UnitStateInfo (0x08 pair list) and
+// UnitStateRecord (0x06) output vectors.
+template <typename T>
+inline ParseStatus stop(std::vector<T>& records, ParseDiag* diag,
                         size_t offset, const char* reason) {
     setDiag(diag, offset, reason);
-    return states.empty() ? ParseStatus::Malformed : ParseStatus::Partial;
+    return records.empty() ? ParseStatus::Malformed : ParseStatus::Partial;
 }
 
 }  // namespace detail
@@ -239,86 +301,64 @@ inline ParseStatus stop(std::vector<UnitStateInfo>& states, ParseDiag* diag,
 /**
  * Parse a 0x06 status broadcast (unit state change event).
  * `data`/`len` is the decrypted payload AFTER the type byte.
- * Complete ⇒ `len` consumed exactly, ≥1 record. Partial ⇒ `states` holds the
- * well-formed leading records; the tail (unknown capability = unknown record
- * length, truncated record, leftover bytes) was dropped. Malformed ⇒ empty.
+ * Complete ⇒ `len` consumed exactly, ≥1 record. Partial ⇒ `records` holds the
+ * well-formed leading records; the tail (truncated record, leftover bytes)
+ * was dropped. Malformed ⇒ empty.
+ *
+ * Unlike the previous capability-heuristic parser, every possible `b8` value
+ * now maps to a valid state_len/priority pair — there is no "unknown
+ * capability" rejection anymore, so Malformed/Partial here only ever mean
+ * outright truncation, never an unrecognized byte-2 value.
  */
 inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
-                                        std::vector<UnitStateInfo>& states,
+                                        std::vector<UnitStateRecord>& records,
                                         ParseDiag* diag = nullptr) {
     using namespace detail;
-    states.clear();
+    records.clear();
 
-    // Shortest possible record (cap 0x00, no prev): 4 bytes.
-    if (len < 4) return stop(states, diag, 0, "packet shorter than one record");
+    // Shortest possible record (state_len 1, no optionals/padding): 4 bytes.
+    if (len < 4) return stop(records, diag, 0, "packet shorter than one record");
 
     size_t offset = 0;
     while (offset < len) {
         if (offset + 3 > len) {
-            return stop(states, diag, offset, "trailing bytes (no room for a record)");
-        }
-        uint8_t unitId = data[offset];
-        uint8_t flags  = data[offset + 1];
-        uint8_t cap    = data[offset + 2];
-
-        // An unknown capability means an unknown record LENGTH — nothing
-        // after this point can be located reliably, so keep what was
-        // understood and drop the rest (never guess at record boundaries).
-        if (!isValidCap(cap)) {
-            return stop(states, diag, offset + 2, "unknown capability byte");
+            return stop(records, diag, offset, "trailing bytes (no room for a record header)");
         }
 
-        size_t recordLen = recordLength(flags, cap);
+        UnitStateRecord rec;
+        rec.unitId = data[offset];
+        rec.flags  = data[offset + 1];
+        uint8_t b8 = data[offset + 2];
+
+        rec.on       = (rec.flags & 0x01) != 0;
+        rec.online   = (rec.flags & 0x02) != 0;
+        rec.hasCon   = (rec.flags & 0x04) != 0;
+        rec.hasSid   = (rec.flags & 0x08) != 0;
+        rec.hasExtra = (rec.flags & 0x10) != 0;
+        rec.paddingLen = (rec.flags >> 6) & 0x03;
+
+        rec.priority = b8 & 0x0F;
+        rec.stateLen = static_cast<uint8_t>(((b8 >> 4) & 0x0F) + 1);
+
+        size_t optionalLen = (rec.hasCon ? 1 : 0) + (rec.hasSid ? 1 : 0) + (rec.hasExtra ? 1 : 0);
+        size_t recordLen = 3 + optionalLen + rec.stateLen + rec.paddingLen;
+
         if (offset + recordLen > len) {
-            return stop(states, diag, offset, "truncated record");
-        }
-
-        uint8_t auxCount = (cap >> 4) & 0x0F;
-        bool hasConst = (cap == 0x03);
-        bool hasPrev  = (flags & 0x10) != 0;
-
-        UnitStateInfo info;
-        info.unitId = unitId;
-        info.online = true;
-
-        // Change source from lower nibble: 0x0 = physical/offline
-        if ((flags & 0x0F) == 0x00) {
-            info.online = false;
+            return stop(records, diag, offset, "truncated record");
         }
 
         size_t pos = offset + 3;
+        if (rec.hasCon)   rec.con       = data[pos++];
+        if (rec.hasSid)   rec.sid       = data[pos++];
+        if (rec.hasExtra) rec.extraByte = data[pos++];
 
-        // Constant byte — observed as 0x80 so far. The record length is known
-        // regardless of its value, so a different value is tolerated (it may
-        // simply be a flag byte the reverse-engineering has not decoded yet).
-        if (hasConst) {
-            pos++;
-        }
+        for (uint8_t i = 0; i < rec.stateLen; i++) rec.state[i] = data[pos + i];
+        pos += rec.stateLen;
 
-        // stored_level (previous brightness) — skipped
-        if (hasPrev) {
-            pos++;
-        }
+        for (uint8_t i = 0; i < rec.paddingLen; i++) rec.padding[i] = data[pos + i];
+        pos += rec.paddingLen;
 
-        // Current brightness
-        info.level = data[pos];
-        info.on = (info.level > 0);
-        info.hasLevel = true;
-        pos++;
-
-        // Aux channels
-        if (auxCount >= 1) {
-            info.vertical = data[pos];
-            info.hasVertical = true;
-            pos++;
-        }
-        if (auxCount >= 2) {
-            info.colorTemp = data[pos];
-            info.hasColorTemp = true;
-            pos++;
-        }
-
-        states.push_back(info);
+        records.push_back(rec);
         offset += recordLen;
     }
 
@@ -374,12 +414,21 @@ inline ParseStatus parseOperationEcho(const uint8_t* data, size_t len,
 }
 
 /**
- * Parse a 0x08 unit state update.
- * When byte 2 looks like a valid 0x06 capability the packet is parsed with
- * the (tolerant) 0x06 record format — no fall-back to pair interpretation on
- * failure, record boundaries would be guesswork then. Otherwise the payload
- * is read as [unitId][level] pairs; a trailing odd byte is tolerated and
- * dropped (Partial).
+ * Parse a 0x08 unit state update: [unitId][level] pairs; a trailing odd byte
+ * is tolerated and dropped (Partial).
+ *
+ * The previous version of this parser would delegate to the 0x06 record
+ * format when byte 2 "looked like a valid capability" — that heuristic relied
+ * on the old capability scheme having invalid byte-2 values to detect on.
+ * Under the corrected 0x06 framing (see packet_parse.h header comment) EVERY
+ * byte-2 value is a valid state_len/priority pair, so there is no principled
+ * way left to distinguish "0x08 in 0x06 record format" from a plain pair
+ * list by inspection — and 0x08 has never been observed in practice at all
+ * on the reference network (see DataPacketType::UnitState in packet.h), so
+ * there is no real capture to derive a better heuristic from. Always parsing
+ * as a pair list is therefore the honest choice; revisit with a real 0x08
+ * capture if one is ever seen (it would show up as a `malformed08`/oddly
+ * shaped pair-list count anomaly).
  */
 inline ParseStatus parseUnitStateUpdate(const uint8_t* data, size_t len,
                                         std::vector<UnitStateInfo>& states,
@@ -388,10 +437,6 @@ inline ParseStatus parseUnitStateUpdate(const uint8_t* data, size_t len,
     states.clear();
 
     if (len < 2) return stop(states, diag, 0, "packet shorter than one pair");
-
-    if (len >= 4 && isValidCap(data[2])) {
-        return parseStatusBroadcast(data, len, states, diag);
-    }
 
     for (size_t offset = 0; offset + 1 < len; offset += 2) {
         UnitStateInfo info;

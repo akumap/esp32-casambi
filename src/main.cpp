@@ -204,13 +204,13 @@ void setup() {
 
             // Set up unit state callback – log and push via WebSocket
             casambiClient->setUnitStateCallback(
-                [](uint8_t unitId, uint8_t level, bool online) {
+                [](uint8_t unitId, uint8_t level, bool online, bool on) {
                     if (casambiDebugEnabled) {
-                        Serial.printf("CALLBACK: Unit %d -> level=%d online=%d\n",
-                                      unitId, level, online);
+                        Serial.printf("CALLBACK: Unit %d -> level=%d online=%d on=%d\n",
+                                      unitId, level, online, on);
                     }
                     if (webServer) {
-                        webServer->broadcastUnitState(unitId, level, online);
+                        webServer->broadcastUnitState(unitId, level, online, on);
                     }
                 }
             );

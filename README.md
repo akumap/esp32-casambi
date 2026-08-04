@@ -541,6 +541,16 @@ unit whose JSON would exceed the per-entry buffer is emitted as
 }
 ```
 
+`on` and `online` (since API 1.3) are the Casambi unit's own flags bits from the
+0x06 status broadcast, passed through verbatim — `on` is no longer derived from
+`level > 0`. In every real capture gathered so far (5 fixture types, full
+dimmer/vertical/temperature sweeps, genuine mains power-cycle transitions —
+see `docs/captures/2026-08-04-0x06-framing/`), the device's `on` bit was
+indistinguishable from `online`, so this firmware makes no claim about
+whether a unit is "currently glowing" — a consumer wanting that should derive
+it from `level`/`controls` (the FHEM module's multi-dimmer handling already
+does this).
+
 The `controls` array is the canonical, cloud-derived per-channel state: one entry
 per fixture control, named by its control type, with the raw `value` (0–255) and,
 for `temperature`, the resolved `kelvin` plus its `min`/`max` bounds. Consumers
@@ -819,6 +829,10 @@ used to address controls in `POST /api/units/:id/state`) is the canonical,
 cloud-derived per-channel state that the FHEM integration uses to name readings
 generically. The legacy `vertical`, `colorTemp`, `cctMin`, and `cctMax` fields
 remain for compatibility and appear only for units that support them.
+
+`on`/`online` here and in `unit_state` below are the device's own flags bits
+(since API 1.3) — see the `on`/`online` note under `GET /api/units` above,
+which applies identically to both WebSocket messages.
 
 `api_version_major`/`api_version_minor` are the ESP↔FHEM interface version
 (see [Interface versioning](#interface-versioning-esp--fhem)).
@@ -1261,6 +1275,8 @@ rationale: `docs/konzept-versionierung.md` (issue #29).
 |---|---|
 | 1.0 | Initial versioned interface |
 | 1.1 | `POST /api/units/:id/state` (generic atomic full-state write) and the optional `name` field in every `controls` entry (hello, `unit_state`, `GET /api/units`) — FHEM uses both to drive multi-dimmer fixtures (e.g. Oligo Grace Uplight/Downlight) per channel |
+| 1.2 | Optional BLE connect diagnostics in `GET /api/status`: `last_disconnect_reason_name` alongside the numeric reason, plus `last_connect_phase`/`last_connect_rc` while the link is down |
+| 1.3 | `on` (`GET /api/units`, `hello`, `unit_state`) is now the Casambi unit's own flags bit, read verbatim from the 0x06 status broadcast, instead of a firmware-side `level > 0` heuristic — field name/type/shape unchanged, only its source; the old heuristic misreported both `on` and `online` for a unit that had just gone offline (stale/stuck-on state), see `docs/captures/2026-08-04-0x06-framing/` |
 
 -----
 

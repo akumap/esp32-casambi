@@ -10,7 +10,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <atomic>
-#include "packet_parse.h"   // UnitStateInfo, OperationEcho, pure parser core
+#include "packet_parse.h"   // UnitStateInfo, UnitStateRecord, OperationEcho, pure parser core
 
 // ============================================================================
 // OPERATION CODES (outgoing)
@@ -54,8 +54,9 @@ enum class DataPacketType : uint8_t {
 // ============================================================================
 // PARSED DATA STRUCTURES
 // ============================================================================
-// UnitStateInfo and OperationEcho live in packet_parse.h (pure header, shared
-// with the host-side parser tests) and are re-exported via the include above.
+// UnitStateInfo, UnitStateRecord and OperationEcho live in packet_parse.h
+// (pure header, shared with the host-side parser tests) and are re-exported
+// via the include above.
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -109,11 +110,12 @@ void rgbToHS(uint8_t r, uint8_t g, uint8_t b, uint16_t& hue, uint8_t& sat);
 
 /**
  * Parse a 0x06 status broadcast packet (unit state change event).
- * @param data  Decrypted payload (starting AFTER the type byte)
- * @param len   Length of payload
- * @param states Output vector (empty unless true is returned)
+ * @param data    Decrypted payload (starting AFTER the type byte)
+ * @param len     Length of payload
+ * @param records Output vector (empty unless true is returned) — protocol-
+ *                level records, no fixture semantics applied
  */
-bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitStateInfo>& states);
+bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitStateRecord>& records);
 
 /**
  * Parse a 0x07 operation echo packet (operations from other controllers).
