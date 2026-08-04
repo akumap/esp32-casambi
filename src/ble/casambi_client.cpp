@@ -1319,18 +1319,10 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
     switch (packetType) {
         case 0x06: {
-            // Unit state change event — one record per changed unit. The
-            // protocol-level parser returns UnitStateRecord (raw state[],
-            // flags-derived on/online — see packet_parse.h); adapted here to
-            // the legacy 3-field positional view (UnitStateInfo) that
-            // _applyUnitStates still consumes pending the generic fixture-
-            // driven bit-offset decode (state_codec::decodeControl).
+            // Unit state change event — one record per changed unit.
             std::vector<UnitStateRecord> records;
             if (parseStatusBroadcast(payload, payloadLen, records)) {
-                std::vector<UnitStateInfo> states;
-                states.reserve(records.size());
-                for (const auto& r : records) states.push_back(toUnitStateInfo(r));
-                _applyUnitStates(states);
+                _applyUnitStates(records);
             } else if (bleDebugEnabled) {
                 hexDump("BLE: Unparsed 0x06 payload", payload, payloadLen);
             }
@@ -1366,9 +1358,25 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 Serial.printf("BLE: <<< Unit state (0x08) %d bytes\n", payloadLen);
                 hexDump("BLE: 0x08", payload, payloadLen);
             }
+            // Pair-list format carries no flags byte at all — synthesize a
+            // minimal single-byte UnitStateRecord (on = level>0, online =
+            // true, the same values this speculative/never-observed path
+            // always used) so it funnels through the one state-application
+            // path instead of duplicating _applyUnitStates for it.
             std::vector<UnitStateInfo> states;
             if (parseUnitStateUpdate(payload, payloadLen, states)) {
-                _applyUnitStates(states);
+                std::vector<UnitStateRecord> records;
+                records.reserve(states.size());
+                for (const auto& s : states) {
+                    UnitStateRecord r;
+                    r.unitId    = s.unitId;
+                    r.on        = s.on;
+                    r.online    = s.online;
+                    r.stateLen  = 1;
+                    r.state[0]  = s.level;
+                    records.push_back(r);
+                }
+                _applyUnitStates(records);
             }
             break;
         }
@@ -1529,21 +1537,22 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 }
 
 // ============================================================================
-// STATE APPLICATION — generic capability-based aux interpretation
+// STATE APPLICATION — generic fixture-driven bit-offset decode
 // ============================================================================
 
-void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
-    for (const auto& state : states) {
-        CasambiUnit* unit = _config->getUnitById(state.unitId);
+void CasambiClient::_applyUnitStates(const std::vector<UnitStateRecord>& records) {
+    for (const auto& record : records) {
+        CasambiUnit* unit = _config->getUnitById(record.unitId);
+        uint8_t level0 = (record.stateLen >= 1) ? record.state[0] : 0;
 
         if (!unit) {
             if (casambiDebugEnabled) {
                 Serial.printf("Casambi: State for unknown unit %d (level=%d)\n",
-                              state.unitId, state.level);
+                              record.unitId, level0);
             }
             // Fire callback even for unknown units
             if (_unitStateCallback) {
-                _unitStateCallback(state.unitId, state.level, state.online);
+                _unitStateCallback(record.unitId, level0, record.online, record.on);
             }
             continue;
         }
@@ -1557,45 +1566,46 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
         // getConnectedAddress()/lockedCopy(); re-taking would deadlock).
         if (g_configMutex) xSemaphoreTake(g_configMutex, portMAX_DELAY);
 
-        // Update basic state
-        if (state.hasLevel) {
-            unit->on = state.on;
-            unit->online = state.online;
-            unit->level = state.level;
-        }
+        // on/online: the device's own flags bits 0/1, passed through verbatim
+        // — NOT re-derived from level. See packet_parse.h's UnitStateRecord
+        // header comment for what is and is not hardware-verified about them.
+        unit->on     = record.on;
+        unit->online = record.online;
+        unit->level  = level0;
 
-        // Map the positional state bytes to the unit's controls by BIT OFFSET —
-        // the authoritative, cloud-driven interpretation. The parser fills the
-        // bytes positionally (byte 0 = level, byte 1 = aux1 in .vertical, byte 2
-        // = aux2 in .colorTemp); the fixture control at offset N*8 tells us what
-        // that byte MEANS (e.g. aux1 is vertical on unit 7 but temperature on
-        // unit 5). Each control's decoded value is stored for the generic API.
+        // Raw state kept verbatim regardless of fixture presence, so unknown/
+        // future controls stay inspectable without a parser change.
+        unit->rawStateLen = record.stateLen;
+        memcpy(unit->rawState, record.state, record.stateLen);
+
+        // Map the raw state to the unit's controls by BIT OFFSET, over the
+        // full state_len (1-16 bytes) — not just the first 3 — via the same
+        // decode primitive the SetState encoder mirrors (state_codec.h).
         if (unit->hasFixture && !unit->controls.empty()) {
-            // colorTemp is uint16_t in UnitStateInfo but only ever carries a
-            // single 0x06 state byte here — narrow explicitly to silence -Wnarrowing.
-            const uint8_t stateBytes[3] = { state.level, state.vertical,
-                                            static_cast<uint8_t>(state.colorTemp) };
-            const bool    present[3]    = { state.hasLevel, state.hasVertical, state.hasColorTemp };
             for (UnitControl& c : unit->controls) {
-                uint8_t idx = c.offset / 8;               // 8-bit byte-aligned controls
-                if (idx >= 3 || !present[idx]) continue;
-                c.value = stateBytes[idx];
-                if      (c.typeName == "vertical")    unit->vertical  = c.value;
-                else if (c.typeName == "temperature") unit->colorTemp = c.value;
+                uint16_t value = 0;
+                if (statecodec::decodeControl(record.state, record.stateLen,
+                                              c.offset, c.length, value)
+                    != statecodec::DECODE_OK) {
+                    continue;   // unsupported layout or control past state_len
+                }
+                c.value = value;
+                if      (c.typeName == "vertical")    unit->vertical  = static_cast<uint8_t>(value);
+                else if (c.typeName == "temperature") unit->colorTemp = static_cast<uint8_t>(value);
                 // "dimmer" is already reflected in unit->level above.
             }
         }
         // Fallback for units without a fixture definition: the old positional
-        // heuristic driven by the capability flags.
-        else if (state.hasVertical && state.hasColorTemp) {
-            unit->vertical  = state.vertical;
-            unit->colorTemp = state.colorTemp;
+        // heuristic (state byte 1 = vertical or CCT, byte 2 = CCT).
+        else if (record.stateLen >= 3) {
+            unit->vertical  = record.state[1];
+            unit->colorTemp = record.state[2];
         }
-        else if (state.hasVertical) {
+        else if (record.stateLen >= 2) {
             if (unit->hasCCT && !unit->hasVertical) {
-                unit->colorTemp = state.vertical;   // the single aux is CCT
+                unit->colorTemp = record.state[1];   // the single aux is CCT
             } else {
-                unit->vertical  = state.vertical;   // vertical (or unknown → vertical)
+                unit->vertical  = record.state[1];   // vertical (or unknown → vertical)
             }
         }
 
@@ -1605,10 +1615,11 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
         // control type and annotated with its byte position (b<n>). Shown for
         // either debug flag so it also appears with `debug ble on`.
         if (casambiDebugEnabled || bleDebugEnabled) {
-            Serial.printf("Casambi: Unit [%d] '%s' %s%s",
+            Serial.printf("Casambi: Unit [%d] '%s' %s%s priority=%d",
                           unit->deviceId, unit->name.c_str(),
                           unit->on ? "ON" : "OFF",
-                          state.online ? "" : " OFFLINE");
+                          record.online ? "" : " OFFLINE",
+                          record.priority);
             if (unit->hasFixture && !unit->controls.empty()) {
                 for (const UnitControl& c : unit->controls) {
                     Serial.printf(" %s(b%u)=%u", c.typeName.c_str(), c.offset / 8, c.value);
@@ -1630,7 +1641,7 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateInfo>& states) {
 
         // Fire callback
         if (_unitStateCallback) {
-            _unitStateCallback(state.unitId, state.level, state.online);
+            _unitStateCallback(record.unitId, unit->level, record.online, record.on);
         }
     }
 }

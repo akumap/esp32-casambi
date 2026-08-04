@@ -156,21 +156,6 @@ struct UnitStateRecord {
           stateLen(0), state(), paddingLen(0), padding() {}
 };
 
-// Adapter for callers still consuming the legacy 3-field positional view
-// (level/vertical/colorTemp at state bytes 0/1/2) pending the generic
-// fixture-driven bit-offset decode. `on`/`online` are the record's own flags
-// bits verbatim — no level-derived re-interpretation.
-inline UnitStateInfo toUnitStateInfo(const UnitStateRecord& r) {
-    UnitStateInfo info;
-    info.unitId = r.unitId;
-    info.on     = r.on;
-    info.online = r.online;
-    if (r.stateLen >= 1) { info.level     = r.state[0]; info.hasLevel     = true; }
-    if (r.stateLen >= 2) { info.vertical  = r.state[1]; info.hasVertical  = true; }
-    if (r.stateLen >= 3) { info.colorTemp = r.state[2]; info.hasColorTemp = true; }
-    return info;
-}
-
 /**
  * Parsed operation echo from incoming packets
  */

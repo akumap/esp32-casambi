@@ -80,13 +80,22 @@ struct CasambiUnit {
     uint8_t vertical;        // Current vertical value 0-255 (if hasVertical)
     uint8_t colorTemp;       // Current color temp 0-255 normalized (if hasCCT)
 
+    // Raw per-unit state blob from the most recent 0x06 record, verbatim —
+    // kept regardless of fixture presence so unknown/future controls stay
+    // inspectable without a parser change (see packet_parse.h's
+    // UnitStateRecord). 16 == UNIT_STATE_MAX_LEN in packet_parse.h,
+    // duplicated here rather than included: cloud/ does not depend on ble/.
+    uint8_t rawState[16];
+    uint8_t rawStateLen;
+
     CasambiUnit() : deviceId(0), type(0), uuid(""), address(""),
                     name(""), firmware(""),
                     controls(), stateLength(0), hasFixture(false),
                     numChannels(1), hasCCT(false), hasVertical(false),
                     cctMinKelvin(0), cctMaxKelvin(0),
                     online(false), on(false), level(0),
-                    vertical(127), colorTemp(0) {}
+                    vertical(127), colorTemp(0),
+                    rawState(), rawStateLen(0) {}
 
     // The control descriptor for a given cloud type name (case-insensitive),
     // or nullptr. Lets the decode/API map a state byte to its named control.

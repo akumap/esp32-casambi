@@ -60,6 +60,7 @@ struct WsEvent {
     uint8_t unitId;    // UnitState
     uint8_t level;     // UnitState
     bool online;       // UnitState
+    bool on;           // UnitState — device's own flags bit, NOT (level > 0)
     bool connected;    // ConnectionState
     int8_t reason;     // ConnectionState: DisconnectReason as int (0 = n/a)
 };
@@ -169,8 +170,9 @@ public:
      * @param unitId  Casambi unit ID
      * @param level   Brightness 0-255
      * @param online  Whether the unit is reachable
+     * @param on      Device's own on-flag (flags bit 0), not (level > 0)
      */
-    void broadcastUnitState(uint8_t unitId, uint8_t level, bool online);
+    void broadcastUnitState(uint8_t unitId, uint8_t level, bool online, bool on);
 
     /**
      * Broadcast a BLE connection state change to all WebSocket clients.

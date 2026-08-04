@@ -58,8 +58,10 @@ const char* disconnectReasonName(DisconnectReason reason);
 // CALLBACK TYPES
 // ============================================================================
 
-// Called when a unit state changes (from incoming data packets)
-using UnitStateCallback = std::function<void(uint8_t unitId, uint8_t level, bool online)>;
+// Called when a unit state changes (from incoming data packets). `on`/
+// `online` are the device's own flags bits, passed through verbatim (see
+// packet_parse.h's UnitStateRecord) — not a level-derived re-interpretation.
+using UnitStateCallback = std::function<void(uint8_t unitId, uint8_t level, bool online, bool on)>;
 
 // Called when connection state changes
 using ConnectionStateCallback = std::function<void(ConnectionState newState, DisconnectReason reason)>;
@@ -372,9 +374,9 @@ private:
     void _handleDataNotification(uint8_t* data, size_t len);
 
     /**
-     * Apply parsed unit states to NetworkConfig and fire callbacks
+     * Apply parsed unit state records to NetworkConfig and fire callbacks
      */
-    void _applyUnitStates(const std::vector<struct UnitStateInfo>& states);
+    void _applyUnitStates(const std::vector<struct UnitStateRecord>& records);
 };
 
 #endif // CASAMBI_CLIENT_H

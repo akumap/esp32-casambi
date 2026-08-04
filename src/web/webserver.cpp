@@ -567,7 +567,7 @@ void CasambiWebServer::_sendHello(AsyncWebSocketClient* client) {
     if (client) client->close();
 }
 
-void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online) {
+void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool online, bool on) {
     if (!_ws || !_broadcastQueue) return;
 
     // Runs on the BLE notification task: post the raw event only — no JSON,
@@ -580,13 +580,14 @@ void CasambiWebServer::broadcastUnitState(uint8_t unitId, uint8_t level, bool on
     ev.unitId = unitId;
     ev.level  = level;
     ev.online = online;
+    ev.on     = on;
     if (xQueueSend(_broadcastQueue, &ev, 0) != pdTRUE) {
         _resyncNeeded = true;
         _wsDropCount++;
         WEB_LOG("WS: broadcast queue full, dropped unit_state id=%d (resync scheduled)\n", unitId);
     } else {
-        WEB_LOG("WS: queued unit_state id=%d level=%d online=%d\n",
-                unitId, level, online);
+        WEB_LOG("WS: queued unit_state id=%d level=%d online=%d on=%d\n",
+                unitId, level, online, on);
     }
 }
 
@@ -618,7 +619,7 @@ void CasambiWebServer::_sendWsEvent(const WsEvent& ev) {
         doc["id"]     = ev.unitId;
         doc["level"]  = ev.level;
         doc["online"] = ev.online;
-        doc["on"]     = (ev.level > 0);
+        doc["on"]     = ev.on;   // device's own flags bit, not (level > 0)
 
         // Enrich with the unit's aux state. Read under g_configMutex so the
         // fields form one consistent snapshot with the BLE task's writes
