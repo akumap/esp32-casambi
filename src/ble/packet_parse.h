@@ -1,5 +1,6 @@
 /**
- * Pure BLE data-packet parsing core.
+ * Pure BLE parsing core: the handshake device-info record and the data
+ * packets (0x06/0x07/0x08).
  *
  * Deliberately free of Arduino dependencies (only the C++ standard library)
  * so the exact parsing logic the firmware runs can be exercised by host-side
@@ -7,7 +8,22 @@
  * The firmware-facing wrappers in packet.cpp add debug logging and the
  * partial/malformed counters around these functions.
  *
- * Parsing is TOLERANT-BUT-HONEST, three-state:
+ * ENDIANNESS — the protocol mixes both, per layer. Getting this wrong is
+ * silent (the affected fields are diagnostics), so the rule is written down
+ * here and every multi-byte field below states which layer it belongs to:
+ *
+ *   Transport layer  — LITTLE-endian: the 4-byte packet counter in the packet
+ *                      header and in the nonce (docs B.7/B.8), and the
+ *                      AES-CTR block counter.
+ *   Handshake + operation layer — BIG-endian: the device-info record
+ *                      (unit ID, flags — casambi-bt's `>BHH16s`, docs B.4)
+ *                      and the operation header (flags, origin, target —
+ *                      docs B.9/D.4, byte-identical to casambi-bt).
+ *
+ * docs/casambi-protokoll-referenz.md D.6 tabulates every multi-byte field
+ * with the evidence for its byte order.
+ *
+ * The data-packet parsers below are three-state, TOLERANT-BUT-HONEST:
  *
  *   Complete  — the whole payload was consumed and understood.
  *   Partial   — a well-formed prefix was parsed and IS returned; the rest of
@@ -93,6 +109,86 @@ struct OperationEcho {
 };
 
 namespace packetparse {
+
+// ============================================================================
+// HANDSHAKE — device-info record
+// ============================================================================
+/*
+ * The first GATT read on the auth characteristic, before any encryption:
+ *
+ *   Byte 0:      type = 0x01
+ *   Byte 1:      version — LOW NIBBLE is the protocol version, the upper bits
+ *                are undecoded flags
+ *   Byte 2:      MTU
+ *   Byte 3-4:    unit ID  (uint16, BIG-endian)
+ *   Byte 5-6:    flags    (uint16, BIG-endian)
+ *   Byte 7-22:   nonce (16 bytes) — the base for every later packet nonce
+ *
+ * Both 16-bit fields are big-endian, matching casambi-bt's
+ * `struct.unpack_from(">BHH16s", firstResp, 2)` (docs B.4) and the outgoing
+ * operation header. Reading the unit ID little-endian produced values like
+ * 2816 (= 0x0B00) where the network's real unit ID is 11 (= 0x000B) — every
+ * observed value decoded to a real unit ID once read big-endian (issue #49).
+ *
+ * The version byte likewise carries more than the version: protocol v11 is
+ * reported as 0x2B, i.e. version 11 in the low nibble plus an undecoded 0x2
+ * in the upper bits. Comparing the whole byte against the configured version
+ * made every single connection log a bogus mismatch ("device reports 43,
+ * config has 11"). casambi-bt papers over the same byte with a special case
+ * for 0x2B; masking is the same fix generalised. The mask is the narrowest
+ * one consistent with the observation — should a network ever report a
+ * version >= 16 it would need widening, hence `versionRaw` is kept so the
+ * undecoded bits stay visible instead of being silently dropped.
+ *
+ * Not three-state: the record is a fixed layout with no optional tail, so
+ * there is no "understood prefix" worth keeping — it parses or it does not.
+ */
+
+constexpr size_t  DEVICE_INFO_HEADER_LEN  = 7;
+constexpr size_t  DEVICE_INFO_NONCE_LEN   = 16;   // == NONCE_SIZE in config.h
+constexpr size_t  DEVICE_INFO_MIN_LEN     = DEVICE_INFO_HEADER_LEN + DEVICE_INFO_NONCE_LEN;
+constexpr uint8_t DEVICE_INFO_TYPE        = 0x01;
+constexpr uint8_t DEVICE_INFO_VERSION_MASK = 0x0F;
+
+struct DeviceInfo {
+    uint8_t  type;
+    uint8_t  version;      // protocol version — byte 1 with the flag bits masked off
+    uint8_t  versionRaw;   // byte 1 verbatim, so the undecoded upper bits stay visible
+    uint8_t  mtu;
+    uint16_t unitId;       // BIG-endian
+    uint16_t flags;        // BIG-endian
+    const uint8_t* nonce;  // into the caller's buffer, DEVICE_INFO_NONCE_LEN bytes
+
+    DeviceInfo() : type(0), version(0), versionRaw(0), mtu(0),
+                   unitId(0), flags(0), nonce(nullptr) {}
+};
+
+enum class DeviceInfoStatus : uint8_t {
+    Ok,
+    TooShort,    // fewer than DEVICE_INFO_MIN_LEN bytes (a 0-byte GATT read is the common case)
+    WrongType,   // byte 0 != 0x01 — not a device-info record
+};
+
+// `out` is only filled for Ok; `out.nonce` then points into `data`, so it
+// stays valid exactly as long as the caller's buffer does.
+inline DeviceInfoStatus parseDeviceInfo(const uint8_t* data, size_t len,
+                                        DeviceInfo& out) {
+    if (data == nullptr || len < DEVICE_INFO_MIN_LEN) return DeviceInfoStatus::TooShort;
+    if (data[0] != DEVICE_INFO_TYPE)                  return DeviceInfoStatus::WrongType;
+
+    out.type       = data[0];
+    out.versionRaw = data[1];
+    out.version    = static_cast<uint8_t>(data[1] & DEVICE_INFO_VERSION_MASK);
+    out.mtu        = data[2];
+    out.unitId     = static_cast<uint16_t>((data[3] << 8) | data[4]);
+    out.flags      = static_cast<uint16_t>((data[5] << 8) | data[6]);
+    out.nonce      = data + DEVICE_INFO_HEADER_LEN;
+    return DeviceInfoStatus::Ok;
+}
+
+// ============================================================================
+// DATA PACKETS
+// ============================================================================
 
 enum class ParseStatus : uint8_t {
     Complete,   // whole payload consumed and understood, output filled

@@ -30,6 +30,103 @@ void setUp(void) {
 void tearDown(void) {}
 
 // ---------------------------------------------------------------------------
+// Handshake device-info record (issue #49)
+//
+// Both 16-bit fields are big-endian. The little-endian reading these tests
+// guard against decoded unit ID 11 (bytes 00 0b) as 2816 and logged a bogus
+// protocol-version mismatch on every single connection.
+// ---------------------------------------------------------------------------
+
+using packetparse::DeviceInfo;
+using packetparse::DeviceInfoStatus;
+
+// Builds a well-formed record: type 0x01, version byte, mtu, unitId BE,
+// flags BE, then a 16-byte nonce with recognisable content.
+static std::vector<uint8_t> makeDeviceInfo(uint8_t versionByte, uint8_t mtu,
+                                           uint16_t unitId, uint16_t flags) {
+    std::vector<uint8_t> p = {
+        0x01,
+        versionByte,
+        mtu,
+        static_cast<uint8_t>(unitId >> 8), static_cast<uint8_t>(unitId & 0xFF),
+        static_cast<uint8_t>(flags  >> 8), static_cast<uint8_t>(flags  & 0xFF),
+    };
+    for (uint8_t i = 0; i < packetparse::DEVICE_INFO_NONCE_LEN; i++) {
+        p.push_back(static_cast<uint8_t>(0xA0 + i));
+    }
+    return p;
+}
+
+// The capture from the issue: protocol v11 reports version byte 0x2B and the
+// gateway is unit 11, on the wire as 00 0b.
+void test_devinfo_v11_unit11(void) {
+    auto pkt = makeDeviceInfo(0x2B, 20, 11, 0x0000);
+    DeviceInfo info;
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::Ok,
+                      packetparse::parseDeviceInfo(pkt.data(), pkt.size(), info));
+    TEST_ASSERT_EQUAL(11, info.version);        // was 43 (the whole byte)
+    TEST_ASSERT_EQUAL(0x2B, info.versionRaw);   // undecoded flag bits kept
+    TEST_ASSERT_EQUAL(20, info.mtu);
+    TEST_ASSERT_EQUAL(11, info.unitId);         // was 2816 (0x0B00, byte-swapped)
+    TEST_ASSERT_EQUAL(0x0000, info.flags);
+    TEST_ASSERT_EQUAL(0xA0, info.nonce[0]);
+    TEST_ASSERT_EQUAL(0xAF, info.nonce[15]);
+}
+
+// Both 16-bit fields must byte-swap, not just the unit ID — they come from the
+// same `>HH` field group.
+void test_devinfo_fields_are_big_endian(void) {
+    auto pkt = makeDeviceInfo(0x0B, 23, 0x0102, 0x0304);
+    DeviceInfo info;
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::Ok,
+                      packetparse::parseDeviceInfo(pkt.data(), pkt.size(), info));
+    TEST_ASSERT_EQUAL(0x0102, info.unitId);
+    TEST_ASSERT_EQUAL(0x0304, info.flags);
+}
+
+// A version byte without flag bits must survive the mask unchanged.
+void test_devinfo_plain_version_unmasked(void) {
+    auto pkt = makeDeviceInfo(0x0A, 20, 7, 0);
+    DeviceInfo info;
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::Ok,
+                      packetparse::parseDeviceInfo(pkt.data(), pkt.size(), info));
+    TEST_ASSERT_EQUAL(10, info.version);
+    TEST_ASSERT_EQUAL(0x0A, info.versionRaw);
+}
+
+// The nonce must be the 16 bytes AFTER the 7-byte header — an off-by-one here
+// would break every packet nonce, i.e. the whole session.
+void test_devinfo_nonce_offset(void) {
+    auto pkt = makeDeviceInfo(0x2B, 20, 11, 0);
+    DeviceInfo info;
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::Ok,
+                      packetparse::parseDeviceInfo(pkt.data(), pkt.size(), info));
+    TEST_ASSERT_EQUAL_PTR(pkt.data() + packetparse::DEVICE_INFO_HEADER_LEN, info.nonce);
+}
+
+// One byte short of the minimum, and the 0-byte GATT read that is the common
+// failure in the field.
+void test_devinfo_too_short(void) {
+    auto pkt = makeDeviceInfo(0x2B, 20, 11, 0);
+    pkt.pop_back();
+    DeviceInfo info;
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::TooShort,
+                      packetparse::parseDeviceInfo(pkt.data(), pkt.size(), info));
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::TooShort,
+                      packetparse::parseDeviceInfo(pkt.data(), 0, info));
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::TooShort,
+                      packetparse::parseDeviceInfo(nullptr, 64, info));
+}
+
+void test_devinfo_wrong_type(void) {
+    auto pkt = makeDeviceInfo(0x2B, 20, 11, 0);
+    pkt[0] = 0x02;   // the key-exchange type, not device info
+    DeviceInfo info;
+    TEST_ASSERT_EQUAL(DeviceInfoStatus::WrongType,
+                      packetparse::parseDeviceInfo(pkt.data(), pkt.size(), info));
+}
+
+// ---------------------------------------------------------------------------
 // 0x06 status broadcast
 // ---------------------------------------------------------------------------
 
@@ -473,6 +570,13 @@ void test_06_golden_multiunit_snapshot(void) {
 
 int main(int argc, char** argv) {
     UNITY_BEGIN();
+
+    RUN_TEST(test_devinfo_v11_unit11);
+    RUN_TEST(test_devinfo_fields_are_big_endian);
+    RUN_TEST(test_devinfo_plain_version_unmasked);
+    RUN_TEST(test_devinfo_nonce_offset);
+    RUN_TEST(test_devinfo_too_short);
+    RUN_TEST(test_devinfo_wrong_type);
 
     RUN_TEST(test_06_single_simple_record);
     RUN_TEST(test_06_offline_source);
