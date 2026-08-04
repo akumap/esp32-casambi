@@ -10,7 +10,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <atomic>
-#include "packet_parse.h"   // UnitStateInfo, UnitStateRecord, OperationEcho, pure parser core
+#include "packet_parse.h"   // UnitStateInfo, UnitStateRecord, InvocationFrame, pure parser core
 
 // ============================================================================
 // OPERATION CODES (outgoing)
@@ -36,7 +36,7 @@ enum class DataPacketType : uint8_t {
     AuthSuccess     = 0x05,  // Authentication accepted
     AuthReject      = 0x06,  // Authentication rejected (auth context only)
     StatusBroadcast = 0x06,  // Unit state change event, one record per changed unit (data context)
-    OperationEcho   = 0x07,  // Echo of operations from other controllers
+    Invocation      = 0x07,  // Stream of INVOCATION frames (button/input events — see packet_parse.h)
     UnitState       = 0x08,  // Individual unit state update (not yet observed in practice)
     NetworkState    = 0x09,  // Full network state snapshot
     TimeSync        = 0x0A,  // Time synchronization
@@ -54,7 +54,7 @@ enum class DataPacketType : uint8_t {
 // ============================================================================
 // PARSED DATA STRUCTURES
 // ============================================================================
-// UnitStateInfo, UnitStateRecord and OperationEcho live in packet_parse.h
+// UnitStateInfo, UnitStateRecord and InvocationFrame live in packet_parse.h
 // (pure header, shared with the host-side parser tests) and are re-exported
 // via the include above.
 
@@ -118,9 +118,9 @@ void rgbToHS(uint8_t r, uint8_t g, uint8_t b, uint16_t& hue, uint8_t& sat);
 bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitStateRecord>& records);
 
 /**
- * Parse a 0x07 operation echo packet (operations from other controllers).
+ * Parse a 0x07 payload as a stream of INVOCATION frames (button/input events).
  */
-bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo);
+bool parseInvocationStream(const uint8_t* data, size_t len, std::vector<InvocationFrame>& frames);
 
 /**
  * Parse a 0x08 unit state update packet.

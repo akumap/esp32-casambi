@@ -25,12 +25,12 @@ using packetparse::ParseDiag;
 // flags/framing ambiguity, so it keeps the older, simpler struct.
 static std::vector<UnitStateRecord> records;
 static std::vector<UnitStateInfo> states;
-static OperationEcho echo;
+static std::vector<InvocationFrame> frames;
 
 void setUp(void) {
     records.clear();
     states.clear();
-    echo = OperationEcho();
+    frames.clear();
 }
 void tearDown(void) {}
 
@@ -346,73 +346,133 @@ void test_06_too_short_rejected(void) {
 }
 
 // ---------------------------------------------------------------------------
-// 0x07 operation echo
+// 0x07 INVOCATION frame stream
 // ---------------------------------------------------------------------------
 
-// Build a well-formed echo: header declares `declared`, buffer carries `actual`
-// payload bytes.
-static std::vector<uint8_t> makeEcho(uint16_t declared, size_t actual,
-                                     uint8_t opcode = 1,
-                                     uint8_t targetId = 9, uint8_t targetType = 0x01) {
+// Build one well-formed INVOCATION frame (9-byte header + optional
+// originHandle + payload).
+static std::vector<uint8_t> makeInvocationFrame(uint8_t opcode,
+                                                uint8_t targetId = 9, uint8_t targetType = 0x01,
+                                                uint16_t origin = 1, uint16_t age = 0,
+                                                bool hasOriginHandle = false, uint8_t originHandle = 0,
+                                                const std::vector<uint8_t>& payload = {}) {
     std::vector<uint8_t> pkt;
-    uint16_t flags = (uint16_t)((5u << 11) | (declared & 0x07FF));
-    pkt.push_back((flags >> 8) & 0xFF);
-    pkt.push_back(flags & 0xFF);
+    uint16_t target = (uint16_t)(((uint16_t)targetId << 8) | targetType);
+    uint16_t flags = (uint16_t)((payload.size() & 0x003F) | (hasOriginHandle ? 0x0200 : 0));
+    pkt.push_back((flags >> 8) & 0xFF);  pkt.push_back(flags & 0xFF);
     pkt.push_back(opcode);
-    pkt.push_back(0); pkt.push_back(1);        // origin
-    pkt.push_back(targetId); pkt.push_back(targetType);
-    pkt.push_back(0); pkt.push_back(0);        // reserved
-    for (size_t i = 0; i < actual; i++) pkt.push_back((uint8_t)(0x40 + i));
+    pkt.push_back((origin >> 8) & 0xFF); pkt.push_back(origin & 0xFF);
+    pkt.push_back((target >> 8) & 0xFF); pkt.push_back(target & 0xFF);
+    pkt.push_back((age >> 8) & 0xFF);    pkt.push_back(age & 0xFF);
+    if (hasOriginHandle) pkt.push_back(originHandle);
+    for (uint8_t b : payload) pkt.push_back(b);
     return pkt;
 }
 
-void test_07_exact_length_ok(void) {
-    auto pkt = makeEcho(2, 2);
+void test_07_single_frame_exact_length_ok(void) {
+    auto pkt = makeInvocationFrame(1, 9, 0x01, 1, 0, false, 0, {0x40, 0x41});
     TEST_ASSERT_EQUAL(ParseStatus::Complete,
-                      packetparse::parseOperationEcho(pkt.data(), pkt.size(), echo));
-    TEST_ASSERT_EQUAL(1, echo.opcode);
-    TEST_ASSERT_EQUAL(9, echo.targetId);
-    TEST_ASSERT_EQUAL(0x01, echo.targetType);
-    TEST_ASSERT_EQUAL(2, echo.payload.size());
-    TEST_ASSERT_EQUAL(0x40, echo.payload[0]);
+                      packetparse::parseInvocationStream(pkt.data(), pkt.size(), frames));
+    TEST_ASSERT_EQUAL(1, frames.size());
+    TEST_ASSERT_EQUAL(1, frames[0].opcode);
+    TEST_ASSERT_EQUAL(9, frames[0].targetId());
+    TEST_ASSERT_EQUAL(0x01, frames[0].targetType());
+    TEST_ASSERT_EQUAL(2, frames[0].payloadLen);
+    TEST_ASSERT_EQUAL(0x40, frames[0].payload[0]);
+    TEST_ASSERT_FALSE(frames[0].hasOriginHandle);
 }
 
 void test_07_empty_payload_ok(void) {
-    auto pkt = makeEcho(0, 0);
+    auto pkt = makeInvocationFrame(1);
     TEST_ASSERT_EQUAL(ParseStatus::Complete,
-                      packetparse::parseOperationEcho(pkt.data(), pkt.size(), echo));
-    TEST_ASSERT_TRUE(echo.payload.empty());
+                      packetparse::parseInvocationStream(pkt.data(), pkt.size(), frames));
+    TEST_ASSERT_EQUAL(1, frames.size());
+    TEST_ASSERT_EQUAL(0, frames[0].payloadLen);
 }
 
-// Declared length > received payload stays Malformed: the packet arrived
-// MAC-verified, so our length-field interpretation does not fit it — a
-// truncated operation payload must not be acted on (was: copy what is there
-// and report success).
-void test_07_declared_longer_rejected(void) {
-    auto pkt = makeEcho(5, 2);
-    TEST_ASSERT_EQUAL(ParseStatus::Malformed,
-                      packetparse::parseOperationEcho(pkt.data(), pkt.size(), echo));
-    TEST_ASSERT_TRUE(echo.payload.empty());
+// The critical case from the protocol write-up: flags=0x0204 means
+// hasOriginHandle=true, payloadLen=4 — NOT declaredLen=516, which the OLD
+// `flags & 0x07FF` reading (superseded by this parser) would have produced.
+void test_07_origin_handle_flags_0x0204_regression(void) {
+    auto pkt = makeInvocationFrame(1, 9, 0x01, 1, 0, true, 0x77, {0x10, 0x11, 0x12, 0x13});
+    TEST_ASSERT_EQUAL(0x02, pkt[0]);
+    TEST_ASSERT_EQUAL(0x04, pkt[1]);
+
+    TEST_ASSERT_EQUAL(ParseStatus::Complete,
+                      packetparse::parseInvocationStream(pkt.data(), pkt.size(), frames));
+    TEST_ASSERT_EQUAL(1, frames.size());
+    TEST_ASSERT_TRUE(frames[0].hasOriginHandle);
+    TEST_ASSERT_EQUAL(0x77, frames[0].originHandle);
+    TEST_ASSERT_EQUAL(4, frames[0].payloadLen);
+    TEST_ASSERT_EQUAL(0x10, frames[0].payload[0]);
 }
 
-// TOLERANCE: extra bytes beyond the declared length are dropped (Partial) —
-// a newer protocol revision may append fields after the payload.
-void test_07_trailing_bytes_partial(void) {
-    auto pkt = makeEcho(1, 3);
-    ParseDiag diag;
-    TEST_ASSERT_EQUAL(ParseStatus::Partial,
-                      packetparse::parseOperationEcho(pkt.data(), pkt.size(), echo, &diag));
-    TEST_ASSERT_EQUAL(1, echo.payload.size());   // exactly the declared length
-    TEST_ASSERT_EQUAL(0x40, echo.payload[0]);
-    TEST_ASSERT_EQUAL(10, diag.offset);          // 9-byte header + 1 declared
+// A 0x07 payload is a STREAM of frames back to back, not one frame.
+void test_07_multi_frame_ok(void) {
+    auto a = makeInvocationFrame(1, 9, 0x01, 1, 100, false, 0, {0xAA});
+    auto b = makeInvocationFrame(2, 10, 0x02, 2, 200, true, 0x55, {0xBB, 0xCC});
+    auto c = makeInvocationFrame(3, 11, 0x04, 3, 300, false, 0, {});
+    std::vector<uint8_t> pkt;
+    pkt.insert(pkt.end(), a.begin(), a.end());
+    pkt.insert(pkt.end(), b.begin(), b.end());
+    pkt.insert(pkt.end(), c.begin(), c.end());
+
+    TEST_ASSERT_EQUAL(ParseStatus::Complete,
+                      packetparse::parseInvocationStream(pkt.data(), pkt.size(), frames));
+    TEST_ASSERT_EQUAL(3, frames.size());
+
+    TEST_ASSERT_EQUAL(1, frames[0].opcode);
+    TEST_ASSERT_EQUAL(1, frames[0].payloadLen);
+    TEST_ASSERT_FALSE(frames[0].hasOriginHandle);
+
+    TEST_ASSERT_EQUAL(2, frames[1].opcode);
+    TEST_ASSERT_EQUAL(2, frames[1].payloadLen);
+    TEST_ASSERT_TRUE(frames[1].hasOriginHandle);
+    TEST_ASSERT_EQUAL(0x55, frames[1].originHandle);
+
+    TEST_ASSERT_EQUAL(3, frames[2].opcode);
+    TEST_ASSERT_EQUAL(0, frames[2].payloadLen);
 }
 
 void test_07_header_truncated_rejected(void) {
-    auto pkt = makeEcho(0, 0);
+    auto pkt = makeInvocationFrame(1);
     TEST_ASSERT_EQUAL(ParseStatus::Malformed,
-                      packetparse::parseOperationEcho(pkt.data(), 8, echo));
+                      packetparse::parseInvocationStream(pkt.data(), 8, frames));
+    TEST_ASSERT_TRUE(frames.empty());
     TEST_ASSERT_EQUAL(ParseStatus::Malformed,
-                      packetparse::parseOperationEcho(pkt.data(), 0, echo));
+                      packetparse::parseInvocationStream(pkt.data(), 0, frames));
+    TEST_ASSERT_TRUE(frames.empty());
+}
+
+// A truncated SECOND frame after >=1 good frame is Partial — the good frame
+// is kept, the truncated tail is dropped (same tolerant-but-honest contract
+// as 0x06).
+void test_07_truncated_second_frame_partial(void) {
+    auto a = makeInvocationFrame(1, 9, 0x01, 1, 0, false, 0, {0xAA, 0xBB});
+    auto b = makeInvocationFrame(2, 10, 0x02, 2, 0, false, 0, {0xCC, 0xCC, 0xCC});
+    std::vector<uint8_t> pkt(a);
+    pkt.insert(pkt.end(), b.begin(), b.begin() + 5);   // only part of b's header
+
+    ParseDiag diag;
+    TEST_ASSERT_EQUAL(ParseStatus::Partial,
+                      packetparse::parseInvocationStream(pkt.data(), pkt.size(), frames, &diag));
+    TEST_ASSERT_EQUAL(1, frames.size());
+    TEST_ASSERT_EQUAL(1, frames[0].opcode);
+    TEST_ASSERT_EQUAL(a.size(), diag.offset);
+}
+
+// Trailing bytes too short to hold another frame header are tolerated and
+// dropped (Partial), not treated as an error.
+void test_07_trailing_bytes_partial(void) {
+    auto a = makeInvocationFrame(1, 9, 0x01, 1, 0, false, 0, {0xAA});
+    std::vector<uint8_t> pkt(a);
+    pkt.push_back(0xFF); pkt.push_back(0xFF); pkt.push_back(0xFF);
+
+    ParseDiag diag;
+    TEST_ASSERT_EQUAL(ParseStatus::Partial,
+                      packetparse::parseInvocationStream(pkt.data(), pkt.size(), frames, &diag));
+    TEST_ASSERT_EQUAL(1, frames.size());
+    TEST_ASSERT_EQUAL(a.size(), diag.offset);
 }
 
 // ---------------------------------------------------------------------------
@@ -491,14 +551,9 @@ void test_fuzz_random_buffers(void) {
         if (st == ParseStatus::Malformed) TEST_ASSERT_TRUE(states.empty());
         else                              TEST_ASSERT_FALSE(states.empty());
 
-        st = packetparse::parseOperationEcho(buf, len, echo);
-        if (st == ParseStatus::Complete) {
-            TEST_ASSERT_EQUAL(len - 9, echo.payload.size());   // declared == actual
-        } else if (st == ParseStatus::Partial) {
-            TEST_ASSERT_TRUE(echo.payload.size() < len - 9);   // declared < actual
-        } else {
-            TEST_ASSERT_TRUE(echo.payload.empty());
-        }
+        st = packetparse::parseInvocationStream(buf, len, frames);
+        if (st == ParseStatus::Malformed) TEST_ASSERT_TRUE(frames.empty());
+        else                              TEST_ASSERT_FALSE(frames.empty());
     }
 }
 
@@ -547,6 +602,54 @@ void test_fuzz_truncated_and_mutated_valid_packets(void) {
         ParseStatus st = packetparse::parseStatusBroadcast(buf, baseLen, records);
         if (st == ParseStatus::Malformed) TEST_ASSERT_TRUE(records.empty());
         else                              TEST_ASSERT_FALSE(records.empty());
+    }
+}
+
+// Same treatment for 0x07: build a well-formed two-frame INVOCATION packet
+// (frame 1 has no originHandle, frame 2 does — exercises both frame lengths),
+// then truncate at every cut point and mutate single bytes. Frame boundaries
+// lie at offsets 11 (end of frame 1) and 22 (end of frame 2, full length).
+void test_fuzz_07_truncated_and_mutated_valid_packets(void) {
+    auto f1 = makeInvocationFrame(1, 9, 0x01, 1, 0, false, 0, {0xAA, 0xBB});
+    auto f2 = makeInvocationFrame(2, 10, 0x02, 2, 50, true, 0x55, {0xCC});
+    std::vector<uint8_t> base(f1);
+    base.insert(base.end(), f2.begin(), f2.end());
+    const size_t baseLen = base.size();
+    TEST_ASSERT_EQUAL(11, f1.size());
+    TEST_ASSERT_EQUAL(11, f2.size());
+    TEST_ASSERT_EQUAL(22, baseLen);
+
+    TEST_ASSERT_EQUAL(ParseStatus::Complete,
+                      packetparse::parseInvocationStream(base.data(), baseLen, frames));
+    TEST_ASSERT_EQUAL(2, frames.size());
+
+    // Cuts at 0-10 land inside frame 1's own header/payload — nothing usable
+    // (Malformed). A cut exactly at 11 is a clean frame boundary (Complete,
+    // 1 frame). Cuts at 12-21 land inside frame 2 — frame 1 is kept (Partial).
+    for (size_t cut = 0; cut < baseLen; cut++) {
+        ParseStatus st = packetparse::parseInvocationStream(base.data(), cut, frames);
+        if (cut == 11) {
+            TEST_ASSERT_EQUAL(ParseStatus::Complete, st);
+            TEST_ASSERT_EQUAL(1, frames.size());
+        } else if (cut <= 10) {
+            TEST_ASSERT_EQUAL(ParseStatus::Malformed, st);
+            TEST_ASSERT_TRUE(frames.empty());
+        } else {
+            TEST_ASSERT_EQUAL(ParseStatus::Partial, st);
+            TEST_ASSERT_EQUAL(1, frames.size());
+        }
+    }
+
+    // Single-byte mutations: whatever the outcome, the contract must hold —
+    // Malformed is empty, everything else carries only fully-parsed frames.
+    uint32_t seed = 0xFACEFEED;
+    uint8_t buf[64];
+    for (int iter = 0; iter < 5000; iter++) {
+        memcpy(buf, base.data(), baseLen);
+        buf[lcg(seed) % baseLen] = (uint8_t)(lcg(seed) >> 24);
+        ParseStatus st = packetparse::parseInvocationStream(buf, baseLen, frames);
+        if (st == ParseStatus::Malformed) TEST_ASSERT_TRUE(frames.empty());
+        else                              TEST_ASSERT_FALSE(frames.empty());
     }
 }
 
@@ -744,11 +847,13 @@ int main(int argc, char** argv) {
     RUN_TEST(test_06_golden_online_to_offline_transition_unit3);
     RUN_TEST(test_06_golden_organic_multirecord);
 
-    RUN_TEST(test_07_exact_length_ok);
+    RUN_TEST(test_07_single_frame_exact_length_ok);
     RUN_TEST(test_07_empty_payload_ok);
-    RUN_TEST(test_07_declared_longer_rejected);
-    RUN_TEST(test_07_trailing_bytes_partial);
+    RUN_TEST(test_07_origin_handle_flags_0x0204_regression);
+    RUN_TEST(test_07_multi_frame_ok);
     RUN_TEST(test_07_header_truncated_rejected);
+    RUN_TEST(test_07_truncated_second_frame_partial);
+    RUN_TEST(test_07_trailing_bytes_partial);
 
     RUN_TEST(test_08_pairs_ok);
     RUN_TEST(test_08_odd_trailing_byte_partial);
@@ -757,6 +862,7 @@ int main(int argc, char** argv) {
 
     RUN_TEST(test_fuzz_random_buffers);
     RUN_TEST(test_fuzz_truncated_and_mutated_valid_packets);
+    RUN_TEST(test_fuzz_07_truncated_and_mutated_valid_packets);
 
     return UNITY_END();
 }
