@@ -636,7 +636,7 @@ Dispatch nach dem ersten Klartextbyte (`_handleDataNotification`):
 
 | Typ | casambi-bt (B.10) | esp32-casambi |
 |---|---|---|
-| 0x06 | UnitState (bit-genau) | Status-Broadcast, control-gesteuert per Byte-Offset `[≈]` |
+| 0x06 | UnitState (bit-genau) | Status-Broadcast, `[=]` gleiches Framing (D.5.1), control-gesteuert per Byte-Offset `[≈]` |
 | 0x07 | **Switch-Event** | Operation-Echo, **nur Diagnose** `[Δ]` |
 | 0x08 | — | UnitState-Update (Paar- oder 0x06-Format) `[+]` |
 | 0x09 | ignoriert | P09-Revisions-/Szenen-Tracker (Debug) `[Δ]` |
@@ -653,37 +653,95 @@ Dispatch nach dem ersten Klartextbyte (`_handleDataNotification`):
   fehlgedeutetes Switch-Event soll keinen falschen Level injizieren können. Ein
   echter Switch-/Sensor-Parser (casambi-bt-Port) folgt erst mit einem Mitschnitt.
 
-**D.5.1 Record-Format bei Typ 0x06.** Beide lesen Byte 0 = ID, Byte 1 = Flags,
-aber Byte 2 verschieden:
+**D.5.1 Record-Format bei Typ 0x06 — inzwischen an casambi-bt angeglichen.**
+Ursprünglich divergierten beide Implementierungen bei Byte 2: casambi-bt liest
+`stateLen=(b2>>4)+1`/`prio=b2&15`, esp32-casambi behandelte dasselbe Byte als
+Ad-hoc-„Capability" (oberes Nibble = Aux-Zahl, unteres Nibble `0x00`/`0x03` mit
+Sonderfall für ein festes `0x80`-Konstantbyte bei `cap==0x03` exakt). Für alle
+bis dahin beobachteten Bytemuster errechneten beide Lesarten zufällig dieselbe
+Satzlänge (für `cap=0x23` z. B. übereinstimmend 6 Byte — die
+„malformed/ein-Byte-zu-kurz"-Annahme aus Issue #34 traf in **keiner** der
+beiden zu) — die **Semantik** war dennoch verschieden, insbesondere bei
+`online`.
 
-| | casambi-bt | esp32-casambi |
+Zwei gezielte Mitschnitte (Build 2026-08-04, `debug parse on`+`debug ble on`):
+ein manueller Sweep über 9 Units/5 Fixture-Typen mit vollem
+Dimmer-/Vertical-/Temperatur-Wertebereich, sowie ein zweiter Mitschnitt mit
+echtem Netzstrom-Aus/-Ein — die eine Situation, die in keinem bisherigen
+Capture vorkam. Ergebnis über 56 reale Records: **0 abweichende Satzlängen**
+zwischen beiden Lesarten. Die Firmware wurde daraufhin auf das dokumentierte
+Framing umgestellt (`src/ble/packet_parse.h`, `UnitStateRecord`); die alte
+Capability-Heuristik ist entfernt. Rohdaten und Analyse:
+`docs/captures/2026-08-04-0x06-framing/`.
+
+| | casambi-bt | esp32-casambi (jetzt) |
 |---|---|---|
-| Byte 2 | `stateLen=(b2>>4)+1`, `prio=b2&15` | **Capability**: oberes Nibble = Aux-Zahl, unteres `0x00`/`0x03` |
-| Optionalbytes | `flags & 4/8/16` (je +1, unbekannt) | `0x80`-Byte nur bei `cap==0x03`; Prev-Level bei `flags & 0x10` |
-| online | `flags & 2` | `(flags & 0x0F) == 0` → offline `[Δ]` |
-| Padding | `(flags>>6)&3` | — |
+| Byte 2 | `stateLen=(b2>>4)+1`, `prio=b2&15` | `[=]` identisch |
+| Optionalbytes | `flags & 4/8/16` (con/sid/extra, je +1) | `[=]` identisch |
+| `on` | `flags & 1` | `[=]` identisch — verbatim durchgereicht, keine `level`-Herleitung mehr |
+| `online` | `flags & 2` | `[=]` identisch |
+| Padding | `(flags>>6)&3` | `[=]` identisch |
 
-Für `cap=0x23` errechnen **beide** dieselbe Satzlänge von 6 Byte — die
-„malformed/ein-Byte-zu-kurz"-Annahme aus Issue #34 trifft in **keiner** der
-beiden Implementierungen zu.
+**Was hardwareverifiziert ist und was nicht** (über alle Captures, historisch
+und neu):
 
-**D.5.2 Zustands-Semantik.** `[≈]` Die Protokollschicht (`parseStatusBroadcast`)
-extrahiert die State-Bytes weiter positionsbasiert (`level`, `aux1`, `aux2`);
-die **Bedeutung** wird im Unit-Modell (`_applyUnitStates`) **generisch aus den
-Fixture-Controls** zugeordnet: State-Byte `n` → Control mit `offset = n·8`, und
-dessen `typeName` (dimmer/vertical/temperature/…) bestimmt Ziel und Benennung.
-Damit ist die feste „aux1→vertical"-Annahme aufgehoben (aux1 ist z. B.
-temperature auf Unit 5, vertical auf Unit 7). Jeder Control-Wert wird für die
-generische API gespeichert. Sub-Byte-Felder (RGB/XY) werden noch nicht
-bit-entpackt — im aktuellen Bestand kommen sie nicht vor.
+- `priority` (Byte 2, unteres Nibble) war **immer 3** — unabhängig von
+  Fixture-Typ, Änderungsquelle oder Online/Offline-Übergang. Ob der Wert je
+  variiert, ist auf diesem Netz nicht beobachtbar; implementiert ist trotzdem
+  der volle 0–15-Bereich, nicht nur der beobachtete Wert.
+- `con` (Flag-Bit 2) kam nur bei Single-Dimmer-Fixtures (Typ 1422) vor, stets
+  mit Wert `0x80` — exakt an der Stelle/mit dem Wert, den die alte Heuristik
+  bereits als „Konstantbyte" überspringen ließ. `sid` (Bit 3) wurde nie gesetzt
+  beobachtet. Ob beide unabhängig voneinander auftreten können, ist offen.
+- Padding (Bits 6–7) war in allen Captures 0.
+- `on`/`online` waren in **jedem** der 56 Records identisch — auch bei den
+  beiden echten Offline-Übergängen im zweiten Mitschnitt. Bit 0 trägt auf
+  diesem Netz also keine Information über Bit 1 hinaus; insbesondere
+  spiegelt es NICHT „Leuchte gerade dunkel" (beim expliziten Dimmen auf 0
+  blieb das `on`-Bit gesetzt, solange die Unit online war).
+- **Aber:** die alte `online`-Heuristik (`flags`-unteres-Nibble ≠ 0) ist
+  nachweislich falsch bei echten Offline-Übergängen — zwei Fälle im zweiten
+  Mitschnitt (`flags=0x04`, `0x14`) hatten ein nichtnullwertiges unteres
+  Nibble, obwohl die Unit gerade stromlos wurde; die bitgenaue Lesart meldet
+  dort korrekt `online=false`. Das alte `on` (`level>0`) trug in denselben
+  Fällen den zuletzt bekannten, nicht mehr gültigen Helligkeitswert weiter.
+  Die Umstellung behebt also einen echten, reproduzierbaren Fehler, nicht nur
+  eine Dokumentationsdivergenz.
+
+**Bewusste Entscheidung: keine Semantik-Interpretation in der Firmware.**
+`on`/`online` werden unverändert durchgereicht — ob z. B. „on aber level=0"
+für ein Dashboard als „an" oder „aus" gilt, entscheidet die Anwendungsschicht
+(FHEM o. ä.), nicht diese Firmware. FHEMs `CasambiUnit_UpdateFromState` hat für
+Mehrkanal-Dimmer bereits eine eigene „irgendein Kanal > 0"-Herleitung; diese
+bleibt unverändert.
+
+**D.5.2 Zustands-Semantik.** `[=]` Die Protokollschicht (`parseStatusBroadcast`)
+liefert seit der Umstellung den vollen, unausgewerteten State-Blob
+(`UnitStateRecord::state`, 1–16 Byte je nach `state_len`) statt der früheren
+3 positionsbasierten Felder (`level`/`aux1`/`aux2`); die **Bedeutung** wird im
+Unit-Modell (`_applyUnitStates`) weiterhin **generisch aus den
+Fixture-Controls** zugeordnet, jetzt aber per Bit-Offset über den kompletten
+Blob (`state_codec::decodeControl`, nicht mehr nur die ersten 3 Byte): State-Byte
+`n` → Control mit `offset = n·8`, und dessen `typeName`
+(dimmer/vertical/temperature/…) bestimmt Ziel und Benennung. Damit ist sowohl
+die feste „aux1→vertical"-Annahme aufgehoben (aux1 ist z. B. temperature auf
+Unit 5, vertical auf Unit 7) als auch die alte 3-Byte-Grenze — eine Fixture
+mit mehr als 3 Controls verliert keine Byte mehr. Jeder Control-Wert wird für
+die generische API gespeichert; der komplette Roh-Blob bleibt zusätzlich pro
+Unit erhalten (`CasambiUnit::rawState`/`rawStateLen`), damit unbekannte/
+zukünftige Controls ohne Parser-Änderung inspizierbar sind. Sub-Byte-Felder
+(RGB/XY) werden noch nicht bit-entpackt — im aktuellen Bestand kommen sie
+nicht vor.
 
 > **Stand der Angleichung.** Umgesetzt: `/fixture/{id}`-Abruf (D.1) mit
 > Speicherung + Persistenz der Controls (offset/length/min/max/stateLength),
-> **control-gesteuerte, cloud-abgeleitete Dekodierung** (`_applyUnitStates`),
-> **generische API** (`controls`-Array je Unit) und **FHEM**-Readings, deren
-> Namen aus den Cloud-Control-Typen stammen. Golden-Vector-Tests
-> (`test/test_packet_parse`) frieren die Occhio-Captures byte-für-byte ein.
-> Ebenfalls umgesetzt: der **generische Schreibpfad** über `SetState` (D.4) —
+> **control-gesteuerte, cloud-abgeleitete Dekodierung** (`_applyUnitStates`)
+> jetzt über den vollen State-Blob statt nur 3 Byte, **generische API**
+> (`controls`-Array je Unit) und **FHEM**-Readings, deren Namen aus den
+> Cloud-Control-Typen stammen. Golden-Vector-Tests (`test/test_packet_parse`)
+> frieren sowohl die historischen Occhio-Captures als auch die neuen
+> Mehrfach-Fixture-/Offline-Captures byte-für-byte ein. Ebenfalls umgesetzt:
+> der **generische Schreibpfad** über `SetState` (D.4) —
 > `POST /api/units/:id/state` adressiert Controls per Name und schreibt den
 > kompletten State-Blob atomar; FHEM bedient Mehrkanal-Dimmer (z. B. Oligo
 > Grace Uplight/Downlight) darüber ohne fixture-spezifischen Code. Offen nur
@@ -699,6 +757,11 @@ bit-entpackt — im aktuellen Bestand kommen sie nicht vor.
 - Version-11-Handshake (`0x2B`) ist nur „durchgewinkt", nicht verstanden.
 - Switch-Event-Parsing (Typ 7) ist stark reverse-engineert (Button-Formeln,
   feste Zustandsbyte-Position) und mit vielen `TODO` versehen.
-- Optionale Bytes im Unit-State-Record (`flags & 4/8/16`) sind unbekannt.
+- Optionale Bytes im Unit-State-Record (`flags & 4/8/16`, con/sid/extra):
+  Position und Länge sind jetzt implementiert und für `con`/`extra`
+  hardwarebeobachtet (s. D.5.1), aber ihr **Inhalt** bleibt uninterpretiert;
+  `sid` wurde nie gesetzt beobachtet. `priority` (Byte 2, unteres Nibble) war
+  in jedem Capture 3 — ob der Wert je variiert, ist offen. Padding wurde nie
+  beobachtet.
 - Network-Config (Typ 9), `managerKey`/`visitorKey` für Classic-Netze und
   weitere Netzwerkfelder werden nicht geparst.

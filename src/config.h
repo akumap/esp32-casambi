@@ -89,8 +89,18 @@
 //      `last_disconnect_reason_name` alongside the numeric reason, plus
 //      `last_connect_phase` / `last_connect_rc` while the link is down —
 //      compatible extension, older clients ignore all three.
+// 1.3: `on` (GET /api/units, hello, unit_state) is now the Casambi unit's own
+//      flags bit 0, read verbatim from the 0x06 status broadcast, instead of
+//      a firmware-side `level > 0` heuristic — field name/type/JSON shape is
+//      unchanged, only its source. Verified against 56 real captures across
+//      5 fixture types (docs/captures/2026-08-04-0x06-framing/): flags bit 0
+//      was indistinguishable from `online` (bit 1) in every one of them, so
+//      this firmware makes no claim about "is the light currently glowing" —
+//      a consumer wanting that should derive it from `level`/`controls`
+//      (which FHEM's multi-dimmer path already does; see
+//      CasambiUnit_UpdateFromState in 98_CasambiUnit.pm).
 #define FHEM_API_VERSION_MAJOR    1
-#define FHEM_API_VERSION_MINOR    2
+#define FHEM_API_VERSION_MINOR    3
 
 // Minimum Casambi unit firmware version (the numeric part of "Evolution/X.Y")
 #define MIN_UNIT_FIRMWARE_VERSION 48.0f
