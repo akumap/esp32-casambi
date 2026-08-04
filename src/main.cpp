@@ -72,7 +72,9 @@ static unsigned long lastConnectionCheck = 0;
 // ============================================================================
 
 void setup() {
-    Serial.begin(115200);
+    // Matches platformio.ini's monitor_speed — the two must be changed
+    // together, upload_speed (flashing) is independent of this.
+    Serial.begin(1500000);
     delay(1000);
 
     g_configMutex = xSemaphoreCreateMutex();
