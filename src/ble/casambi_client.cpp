@@ -514,8 +514,19 @@ bool CasambiClient::sendKeepalive() {
         return false;
     }
 
-    if (bleDebugEnabled) {
+    if (bleDebugEnabled || parseDebugEnabled) {
+        // The response is a complete encrypted packet (4-byte counter header +
+        // plaintext + 16-byte CMAC) that this function otherwise only measures.
+        // It is the one place where protocol bytes arrive and are discarded
+        // unread — and with a typical 25-byte response the plaintext is a type
+        // byte plus 4 bytes, i.e. exactly the shape an undecoded timestamp or
+        // counter field would have. Dump it so it can be analysed at all;
+        // decoding it needs the same decrypt path as a notification and a
+        // capture to check the result against (see the 0x0A note in
+        // _handleDataNotification and docs D.6).
         Serial.printf("BLE: Keepalive OK (%d bytes)\n", value.length());
+        hexDump("BLE: Keepalive response (undecoded)",
+                (const uint8_t*)value.data(), value.length());
     }
     _lastNotificationTime = millis();
     return true;

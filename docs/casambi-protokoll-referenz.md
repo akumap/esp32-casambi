@@ -741,7 +741,20 @@ Nachziehung nirgends ein plausibleres Ergebnis geliefert:
   (README, „Untested Features"). Ohne RGB-Leuchte bleibt das offen; die
   Änderung wäre hier nicht „nachgezogen", sondern eine zweite Vermutung.
 
-**0x0A/0x0C waren nicht prüfbar** — und das war der eigentliche Befund: beide
+**Die aussichtsreichste Fundstelle ist die Keepalive-Antwort.** `sendKeepalive()`
+liest per GATT von der Auth-Characteristic und prüft nur die **Länge** —
+typisch 25 Byte, also ein vollständiges verschlüsseltes Paket (4 Byte
+Zähler-Header + Klartext + 16 Byte CMAC), mithin **1 Byte Typ + 4 Byte
+Nutzlast**. Das ist die einzige Stelle der Firmware, an der Protokollbytes
+ankommen und ungelesen verworfen werden — und ein 4-Byte-Feld ist genau die
+Form, in der sich die Endianness-Frage stellt. Die Bytes werden jetzt unter
+`debug ble on`/`debug parse on` gedumpt. Sie zu **entschlüsseln** würde denselben
+Pfad wie eine Notification brauchen (`data[0:4] ‖ basisnonce[4:16]`); ob die
+Zähler-/Richtungskonvention einer Read-Antwort dieselbe ist, ist ungeprüft —
+schlägt der CMAC fehl, wäre das folgenlos, aber es ist eine eigene Änderung mit
+eigenem Risiko und braucht zuerst einen Mitschnitt.
+
+**0x0A/0x0C als Notification waren nicht prüfbar** — beide
 Typen wurden zwar erkannt, ihre Payload aber als einzige **nie ausgegeben**
 (der `default`-Zweig dumpt jeden wirklich unbekannten Typ, diese beiden nicht).
 Damit ließ sich kein Mitschnitt nehmen, mit dem die Frage überhaupt zu
@@ -750,6 +763,12 @@ zusätzlich die beiden Lesarten eines führenden 32-Bit-Felds gegen die
 naheliegende Hypothese „Unix-Epoch" aus und markiert die plausible. Ein
 einziger Mitschnitt entscheidet die Frage dann. **Angewendet wird nichts** —
 die Uhrzeit der Firmware kommt aus NTP.
+
+In einem 100-s-Mitschnitt am realen Netz (Build 2026-08-04, `debug parse on` +
+`debug ble on`) trat **kein einziges 0x0A oder 0x0C als Notification** auf;
+gesehen wurden nur 0x06-Broadcasts und der Keepalive-**Read**. Der 0x0C-Zweig
+in `_handleDataNotification` ist damit möglicherweise toter Code — die
+Keepalive-Antwort kommt nicht über den Notification-Pfad.
 
 ---
 
