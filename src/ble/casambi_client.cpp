@@ -1319,9 +1319,17 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
     switch (packetType) {
         case 0x06: {
-            // Unit state change event — one record per changed unit
-            std::vector<UnitStateInfo> states;
-            if (parseStatusBroadcast(payload, payloadLen, states)) {
+            // Unit state change event — one record per changed unit. The
+            // protocol-level parser returns UnitStateRecord (raw state[],
+            // flags-derived on/online — see packet_parse.h); adapted here to
+            // the legacy 3-field positional view (UnitStateInfo) that
+            // _applyUnitStates still consumes pending the generic fixture-
+            // driven bit-offset decode (state_codec::decodeControl).
+            std::vector<UnitStateRecord> records;
+            if (parseStatusBroadcast(payload, payloadLen, records)) {
+                std::vector<UnitStateInfo> states;
+                states.reserve(records.size());
+                for (const auto& r : records) states.push_back(toUnitStateInfo(r));
                 _applyUnitStates(states);
             } else if (bleDebugEnabled) {
                 hexDump("BLE: Unparsed 0x06 payload", payload, payloadLen);
