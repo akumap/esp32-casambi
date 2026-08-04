@@ -514,8 +514,19 @@ bool CasambiClient::sendKeepalive() {
         return false;
     }
 
-    if (bleDebugEnabled) {
+    if (bleDebugEnabled || parseDebugEnabled) {
+        // The response is a complete encrypted packet (4-byte counter header +
+        // plaintext + 16-byte CMAC) that this function otherwise only measures.
+        // It is the one place where protocol bytes arrive and are discarded
+        // unread — and with a typical 25-byte response the plaintext is a type
+        // byte plus 4 bytes, i.e. exactly the shape an undecoded timestamp or
+        // counter field would have. Dump it so it can be analysed at all;
+        // decoding it needs the same decrypt path as a notification and a
+        // capture to check the result against (see the 0x0A note in
+        // _handleDataNotification and docs D.6).
         Serial.printf("BLE: Keepalive OK (%d bytes)\n", value.length());
+        hexDump("BLE: Keepalive response (undecoded)",
+                (const uint8_t*)value.data(), value.length());
     }
     _lastNotificationTime = millis();
     return true;
@@ -716,48 +727,56 @@ bool CasambiClient::_readDeviceInfo() {
 
     unsigned long readStart = millis();
     std::string value = _authChar->readValue();
-    // 7 header bytes (type, version, mtu, unitId x2, flags x2) + 16-byte nonce
-    if (value.length() < 7 + NONCE_SIZE) {
+    const uint8_t* data = (const uint8_t*)value.data();
+
+    // Layout and endianness live in packet_parse.h (host-tested, issue #49).
+    packetparse::DeviceInfo info;
+    packetparse::DeviceInfoStatus st =
+        packetparse::parseDeviceInfo(data, value.length(), info);
+
+    if (st == packetparse::DeviceInfoStatus::TooShort) {
         // A 0-byte read is the common case here and means the GATT read itself
         // failed (link dropped mid-read, or the peer refused it) — print the
         // rc and whatever bytes did arrive instead of just the length.
         int rc = _bleClient ? _bleClient->getLastError() : 0;
         Serial.printf("BLE: Invalid device info: got %d bytes after %lu ms, expected >= %d "
                       "(rc=%d '%s', link=%s)\n",
-                      (int)value.length(), millis() - readStart, 7 + NONCE_SIZE,
+                      (int)value.length(), millis() - readStart,
+                      (int)packetparse::DEVICE_INFO_MIN_LEN,
                       rc, bleRcText(rc), isBLEConnected() ? "up" : "down");
         if (value.length() > 0) {
-            hexDump("BLE: Device info (short)", (const uint8_t*)value.data(), value.length());
+            hexDump("BLE: Device info (short)", data, value.length());
         }
         return false;
     }
 
-    const uint8_t* data = (const uint8_t*)value.data();
-
-    uint8_t type = data[0];
-    uint8_t version = data[1];
-
-    if (type != 0x01) {
-        Serial.printf("BLE: Unexpected type: 0x%02x (expected 0x01)\n", type);
+    if (st == packetparse::DeviceInfoStatus::WrongType) {
+        Serial.printf("BLE: Unexpected type: 0x%02x (expected 0x%02x)\n",
+                      data[0], packetparse::DEVICE_INFO_TYPE);
         hexDump("BLE: Device info", data, value.length());
         return false;
     }
 
-    if (version != _config->protocolVersion) {
+    if (info.version != _config->protocolVersion) {
         // Not fatal, but it explains later auth rejections: the keys were
         // derived for the version the cloud config was downloaded with.
-        Serial.printf("BLE: Protocol version mismatch: device reports %d, config has %d "
-                      "(continuing; run 'refresh' if authentication fails)\n",
-                      version, _config->protocolVersion);
+        // The raw byte comes along because only its low nibble is the version
+        // — the upper bits are an undecoded flag field (v11 reports 0x2B).
+        Serial.printf("BLE: Protocol version mismatch: device reports %d (raw 0x%02x), "
+                      "config has %d (continuing; run 'refresh' if authentication fails)\n",
+                      info.version, info.versionRaw, _config->protocolVersion);
     }
 
-    _mtu = data[2];
-    _unitId = data[3] | (data[4] << 8);
-    _flags = data[5] | (data[6] << 8);
-    memcpy(_nonce, data + 7, NONCE_SIZE);
+    _mtu = info.mtu;
+    _unitId = info.unitId;
+    _flags = info.flags;
+    static_assert(packetparse::DEVICE_INFO_NONCE_LEN == NONCE_SIZE,
+                  "device-info nonce length must match the crypto NONCE_SIZE");
+    memcpy(_nonce, info.nonce, NONCE_SIZE);
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: MTU=%d, UnitID=%d, Flags=0x%04x\n", _mtu, _unitId, _flags);
+        Serial.printf("BLE: MTU=%d, UnitID=%d, Flags=0x%04x, version=%d (raw 0x%02x)\n",
+                      _mtu, _unitId, _flags, info.version, info.versionRaw);
         hexDump("BLE: Device nonce", _nonce, NONCE_SIZE);
     }
 
@@ -1260,6 +1279,14 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
     }
 }
 
+// Does a 32-bit field look like a Unix timestamp (2020-01-01 .. 2100-01-01)?
+// Used only to tell the two endian readings of an UNDECODED field apart in
+// diagnostic output — never to accept a value. The lower bound is the same
+// "NTP has set the clock" threshold main.cpp uses.
+static bool plausibleEpoch(uint32_t v) {
+    return v >= 1577836800u && v < 4102444800u;
+}
+
 void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
     if (len < CMAC_SIZE + 5) {
         if (bleDebugEnabled) {
@@ -1513,15 +1540,45 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         }
 
         case 0x0A: {
-            if (bleDebugEnabled) {
-                Serial.println("BLE: <<< Time sync (0x0A)");
+            // TimeSync — recognised, never decoded. Until now the payload was
+            // not even printed, so the one thing needed to decode it (a
+            // capture) could not be taken: 0x0A and 0x0C were the only known
+            // types whose bytes never reached the log, while the `default`
+            // branch below dumps every truly unknown type. Dump them.
+            //
+            // The endianness of any multi-byte field in here is genuinely
+            // open: this protocol uses BOTH (packet_parse.h) — little-endian
+            // on the transport layer, big-endian on the handshake/operation
+            // layer. So offer both readings of a leading 32-bit field against
+            // the obvious hypothesis for a time telegram, a Unix epoch. A
+            // plausible date on exactly one side settles it from a single
+            // capture. Diagnostic only: nothing here is applied to any state,
+            // and the device clock is not used by the firmware (time comes
+            // from NTP, see net/time_sync).
+            if (bleDebugEnabled || parseDebugEnabled) {
+                Serial.printf("BLE: <<< Time sync (0x0A) %u bytes\n", (unsigned)payloadLen);
+                hexDump("BLE: 0x0A", payload, payloadLen);
+            }
+            if (parseDebugEnabled && payloadLen >= 4) {
+                uint32_t be = ((uint32_t)payload[0] << 24) | ((uint32_t)payload[1] << 16) |
+                              ((uint32_t)payload[2] <<  8) |  (uint32_t)payload[3];
+                uint32_t le = ((uint32_t)payload[3] << 24) | ((uint32_t)payload[2] << 16) |
+                              ((uint32_t)payload[1] <<  8) |  (uint32_t)payload[0];
+                Serial.printf("P0A leading u32 (unverified hypothesis: unix epoch): "
+                              "BE=%u%s LE=%u%s\n",
+                              be, plausibleEpoch(be) ? " <- plausible" : "",
+                              le, plausibleEpoch(le) ? " <- plausible" : "");
             }
             break;
         }
 
         case 0x0C: {
-            if (bleDebugEnabled) {
-                Serial.println("BLE: <<< Keepalive (0x0C)");
+            // Keepalive — recognised, payload never decoded. Same reasoning as
+            // 0x0A: dump the bytes so a capture is possible at all. Observed
+            // so far only as a response to our own GATT-read keepalive.
+            if (bleDebugEnabled || parseDebugEnabled) {
+                Serial.printf("BLE: <<< Keepalive (0x0C) %u bytes\n", (unsigned)payloadLen);
+                hexDump("BLE: 0x0C", payload, payloadLen);
             }
             break;
         }

@@ -524,7 +524,8 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
 | Paket-Typ 8/0A/0C | — | UnitState-Update / TimeSync / Keepalive `[+]` |
 | Paket-Typ 9 | ignoriert | P09-Revisions-Tracker dekodiert `[+]` |
 | 0x06-online | `flags & 2` | `(flags & 0x0F) == 0` `[Δ]` |
-| Geräteinfo unit/flags | Big-Endian | Little-Endian (nur Debug) `[Δ]` |
+| Geräteinfo unit/flags | Big-Endian | Big-Endian `[=]` (bis #49: Little-Endian) |
+| Geräteinfo-Version | Sonderfall für `0x2B` | untere 4 Bit maskiert `[≈]` |
 | CMAC | Bibliothek (`cryptography`) | eigene RFC-4493-Impl + Selbsttest `[+]` |
 
 ### D.1 Cloud (HTTPS/REST)
@@ -569,11 +570,22 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
   SECP256R1, Transportschlüssel-Ableitung (Reverse → SHA-256 → XOR-Faltung),
   Public-Key-Austausch (`0x02 ‖ X ‖ Y ‖ 0x01`), `0x03`-Ack, Auth-Digest und
   Auth-Paket (`counter ‖ 0x04 ‖ key.id ‖ digest`) — alles identisch.
-- `[Δ]` **Geräteinfo-Endianness:** `unitId`/`flags` werden **little-endian**
-  gelesen (`_readDeviceInfo`), casambi-bt liest sie big-endian (B.4). Folgenlos —
-  beide Felder dienen nur dem Debug, die 16 Nonce-Bytes sind identisch.
-- `[Δ]` **Version-11-Sonderfall (`0x2B`)** wird nicht gesondert behandelt; die
-  Firmware warnt nur bei Versions-Mismatch und macht weiter (Ergebnis gleich).
+- `[=]` **Geräteinfo-Endianness:** `unitId`/`flags` werden **big-endian**
+  gelesen, wie casambi-bt (B.4). Die Firmware las beide Felder bis Issue #49
+  little-endian; das lieferte für Unit 11 (auf dem Draht `00 0b`) den Wert
+  2816. Betroffen war nur die Diagnose (beide Felder werden sonst nirgends
+  verwendet, die 16 Nonce-Bytes waren immer identisch) — deshalb fiel es
+  jahrelang nicht auf. Layout und Endianness liegen jetzt als reiner Parser in
+  `packet_parse.h` (`parseDeviceInfo`, host-getestet in `test_packet_parse`).
+- `[≈]` **Version-11-Sonderfall (`0x2B`):** Byte 1 trägt die Protokollversion
+  nur in den **unteren 4 Bit**, darüber stehen undekodierte Flags
+  (`0x2B` = Flags `0x2` + Version 11). Die Firmware maskiert mit `0x0F` statt
+  casambi-bts Sonderfall für den konkreten Wert `0x2B` — dieselbe Korrektur,
+  allgemeiner. Vorher verglich sie das ganze Byte und meldete bei **jedem**
+  Connect einen Versions-Mismatch „device reports 43, config has 11". Das rohe
+  Byte wird weiter mitgeloggt (`versionRaw`), damit die undekodierten oberen
+  Bits sichtbar bleiben. Die Maske ist die engste zur Beobachtung passende
+  Annahme; ein Netz mit Version ≥ 16 würde sie sprengen.
 - `[+]` Wartet nach dem eigenen Public Key aktiv auf die `0x03`-Ack-Notification,
   bevor authentisiert wird.
 - `[+]` **Gateway-Auswahl per RSSI-Re-Roll** und **Keepalive per GATT-Read** auf
@@ -640,8 +652,8 @@ Dispatch nach dem ersten Klartextbyte (`_handleDataNotification`):
 | 0x07 | **Switch-Event** | Operation-Echo, **nur Diagnose** `[Δ]` |
 | 0x08 | — | UnitState-Update (Paar- oder 0x06-Format) `[+]` |
 | 0x09 | ignoriert | P09-Revisions-/Szenen-Tracker (Debug) `[Δ]` |
-| 0x0A | — | TimeSync (nur geloggt) `[+]` |
-| 0x0C | — | Keepalive (nur geloggt) `[+]` |
+| 0x0A | — | TimeSync — undekodiert, Payload wird gedumpt `[+]` |
+| 0x0C | — | Keepalive — undekodiert, Payload wird gedumpt `[+]` |
 
 - `[Δ]` **Typ 7 ist der gewichtigste Unterschied:** casambi-bt deutet ihn als
   Schalter-/Sensor-Ereignis (B.12), die Firmware dekodiert ihn als **Echo einer
@@ -747,6 +759,74 @@ nicht vor.
 > Grace Uplight/Downlight) darüber ohne fixture-spezifischen Code. Offen nur
 > noch: bit-genaues Entpacken/Kodieren von Sub-Byte-Controls (RGB/XY) und
 > Homebridge-Mappings für neue Control-Typen.
+
+### D.6 Endianness — Gesamtübersicht
+
+Anlass: Issue #49. Da das Protokoll **beide** Byte-Reihenfolgen verwendet und
+ein Fehlgriff hier lautlos bleibt (die betroffenen Felder waren reine
+Diagnose), hier alle Mehrbyte-Felder der Firmware auf einen Blick. Die Regel
+dahinter: **Transportschicht little-endian, Handshake- und Operationsschicht
+big-endian.**
+
+| Feld | Stelle | Reihenfolge | Beleg |
+|---|---|---|---|
+| Paketzähler (4 B, Header + Nonce) | `_sendOperation`, `_getNonce`, `_handleAuth-/DataNotification` | LE | B.7/B.8; Auth funktioniert |
+| AES-CTR-Blockzähler (Byte 12–15) | `encryption.cpp` | LE | B.8 |
+| ECDH-Public-Key X/Y (je 32 B) | `key_exchange.cpp` | LE (reversed) | B.5; Handshake funktioniert |
+| Geräteinfo `unitId`, `flags` | `parseDeviceInfo` | **BE** | casambi-bt `>BHH16s` (B.4); #49 |
+| Operation `flags`, `origin`, `target` (aus) | `_buildOperation` | BE | D.4, byte-identisch zu casambi-bt |
+| Operation `flags`, `target` (ein, 0x07) | `parseOperationEcho` | BE | Symmetrie zum Sendeformat — **unbelegt**, s. u. |
+| `SetColor` Hue (2 B) | `setUnitColor` | LE | D.4, nicht gegengeprüft |
+| `SetState` 16-Bit-Controls | `state_codec.h` | LE | analog Hue; **kein** 16-Bit-Control bisher beobachtet |
+
+**Ergebnis der Prüfung auf weitere Fundstellen.** Außer der Geräteinfo hat die
+Nachziehung nirgends ein plausibleres Ergebnis geliefert:
+
+- **Transport und Krypto** sind durch den funktionierenden Handshake bewiesen —
+  eine falsche Reihenfolge hätte dort nie eine Authentisierung zugelassen.
+- **Ausgehende Operationen** sind byte-identisch zu casambi-bt (D.4) und auf
+  Hardware verifiziert.
+- **0x06/0x08/0x09** enthalten überhaupt kein Mehrbyte-Feld: 0x06/0x08 sind
+  Byte-Ströme, 0x09 besteht aus 3-Byte-Records mit einzeln gedeuteten Bytes.
+  Hier gibt es nichts zu drehen.
+- **0x07 eingehend** hat zwar BE-Felder, aber die Deutung als „Operation-Echo"
+  ist selbst unbelegt (D.5) und es wird kein Zustand angewendet. Eine
+  Endianness-Änderung wäre Raten auf einer ungeprüften Grundstruktur — erst mit
+  einem echten Mitschnitt sinnvoll.
+- **`SetColor` / `state_codec`** sind LE per Analogieschluss. Beide sind auf
+  Hardware nicht gegengeprüft, aber es existiert auch kein Gegenbeleg: kein
+  bisher gesehenes Fixture hat ein 16-Bit-Control, und RGB ist ungetestet
+  (README, „Untested Features"). Ohne RGB-Leuchte bleibt das offen; die
+  Änderung wäre hier nicht „nachgezogen", sondern eine zweite Vermutung.
+
+**Die aussichtsreichste Fundstelle ist die Keepalive-Antwort.** `sendKeepalive()`
+liest per GATT von der Auth-Characteristic und prüft nur die **Länge** —
+typisch 25 Byte, also ein vollständiges verschlüsseltes Paket (4 Byte
+Zähler-Header + Klartext + 16 Byte CMAC), mithin **1 Byte Typ + 4 Byte
+Nutzlast**. Das ist die einzige Stelle der Firmware, an der Protokollbytes
+ankommen und ungelesen verworfen werden — und ein 4-Byte-Feld ist genau die
+Form, in der sich die Endianness-Frage stellt. Die Bytes werden jetzt unter
+`debug ble on`/`debug parse on` gedumpt. Sie zu **entschlüsseln** würde denselben
+Pfad wie eine Notification brauchen (`data[0:4] ‖ basisnonce[4:16]`); ob die
+Zähler-/Richtungskonvention einer Read-Antwort dieselbe ist, ist ungeprüft —
+schlägt der CMAC fehl, wäre das folgenlos, aber es ist eine eigene Änderung mit
+eigenem Risiko und braucht zuerst einen Mitschnitt.
+
+**0x0A/0x0C als Notification waren nicht prüfbar** — beide
+Typen wurden zwar erkannt, ihre Payload aber als einzige **nie ausgegeben**
+(der `default`-Zweig dumpt jeden wirklich unbekannten Typ, diese beiden nicht).
+Damit ließ sich kein Mitschnitt nehmen, mit dem die Frage überhaupt zu
+beantworten wäre. Beide dumpen jetzt ihre Bytes; für 0x0A gibt `debug parse on`
+zusätzlich die beiden Lesarten eines führenden 32-Bit-Felds gegen die
+naheliegende Hypothese „Unix-Epoch" aus und markiert die plausible. Ein
+einziger Mitschnitt entscheidet die Frage dann. **Angewendet wird nichts** —
+die Uhrzeit der Firmware kommt aus NTP.
+
+In einem 100-s-Mitschnitt am realen Netz (Build 2026-08-04, `debug parse on` +
+`debug ble on`) trat **kein einziges 0x0A oder 0x0C als Notification** auf;
+gesehen wurden nur 0x06-Broadcasts und der Keepalive-**Read**. Der 0x0C-Zweig
+in `_handleDataNotification` ist damit möglicherweise toter Code — die
+Keepalive-Antwort kommt nicht über den Notification-Pfad.
 
 ---
 

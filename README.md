@@ -1009,8 +1009,8 @@ The controller is designed for 24/7 unattended operation:
 |0x07|Operation Echo / Switch Event (from other controllers)|**Diagnostic only** — decoded and logged, but no state applied. The operation-echo reading is an unverified inference (conflicts with casambi-bt's switch-event reading) and never observed on the wire; real changes always arrive as 0x06|
 |0x08|Unit State Update                               |Parsed via `parseUnitStateUpdate()`                                                              |
 |0x09|Mesh Topology                                   |Experimental parser — `[0x80+nodeId][metric][quality]` triplets; IDs map to units/groups/scenes  |
-|0x0A|Time Sync                                       |Recognized                                            |
-|0x0C|Keepalive                                       |Recognized                                            |
+|0x0A|Time Sync                                       |Recognized, payload **not decoded** — the bytes are dumped with `debug ble on`/`debug parse on` so a capture can be taken; `debug parse on` additionally prints both endian readings of a leading 32-bit field against the "Unix epoch" hypothesis. Nothing is applied (the clock comes from NTP)|
+|0x0C|Keepalive                                       |Recognized, payload **not decoded** — bytes dumped for capture           |
 
 **Outgoing Operation Packets:**
 
