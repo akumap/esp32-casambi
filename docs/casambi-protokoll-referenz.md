@@ -477,6 +477,73 @@ Nachrichtentypen `> 0x80` gelten als ungültig → Resync (ein Byte weiter suche
 Ergebnis je Ereignis (`SwitchEvent`): `message_type`, `button`, `unit_id`,
 `action`, `event`, `flags`, `extra_data`.
 
+### B.12a Firmware-Modell: INVOCATION-Frame-Stream (Typ 7, ungetestet)
+
+**Status: experimentell, UNVERIFIZIERT.** 0x07 wurde auf dem Referenznetzwerk
+noch nie beobachtet — es gibt keinen einzigen Mitschnitt, weder für dieses
+Modell noch für B.12. Die Firmware implementiert seit diesem Änderungssatz
+(`src/ble/packet_parse.h::parseInvocationStream`) trotzdem ein Modell, das
+strukturell **der obigen B.12-Theorie widerspricht**: statt eines 3-Byte-
+Nachrichtenheaders mit Resync bei ungültigem `message_type` liest es den
+0x07-Payload als Stream von INVOCATION-Frames mit **9-Byte-Header**:
+
+```
+Byte 0-1: flags, BIG-endian
+           Bits 0-5 (0x003F): payloadLen (0-63)
+           Bit 9    (0x0200): hasOriginHandle — 1 zusätzliches Byte folgt
+Byte 2:   opcode
+Byte 3-4: origin, BIG-endian
+Byte 5-6: target, BIG-endian — (id<<8)|type, wie encodeTarget() im Sendepfad
+Byte 7-8: age, BIG-endian
+[originHandle]        — nur falls hasOriginHandle
+payload[payloadLen]   — 0-63 Byte
+```
+
+Frame-Länge = 9 + hasOriginHandle + payloadLen; mehrere Frames folgen direkt
+aufeinander bis der Payload erschöpft ist.
+
+**Warum dieses Modell trotz fehlender Verifikation implementiert wurde:**
+
+- Die 6-Bit-Payloadlänge (max. 63 Byte) deckt sich mit der bereits in B.9
+  dokumentierten Notiz zum AUSGEHENDEN Operation-Paket ("payload: max. 63
+  Byte") — unabhängig von der Quelle ein Indiz für diese Maske.
+- Beobachtung auf dem Referenznetzwerk: beim Schalten von Leuchten über die
+  Casambi/Occhio-App erscheinen ausschließlich 0x06-Telegramme, nie 0x07. Der
+  ESP ist als BLE-Central nur mit einem Mesh-Knoten verbunden; App-Operationen
+  würden dort nur als "Echo" auftauchen, wenn 0x07 generisch jede Operation
+  jedes Controllers spiegelt. Dass das nie passiert, spricht gegen die alte
+  "Operation-Echo"-Lesart und **für** eine Bindung von 0x07 (eingehend) an
+  physische Eingabe-Hardware (Taster/Sensoren) — worin B.12 und dieses Modell
+  übereinstimmen, obwohl sie im Byte-Layout inkompatibel sind.
+
+**Button-Stream** (`targetType() == 0x06`, `opcode` 29-36 = ButtonEvent0..7):
+`buttonIndex = opcode - 29`; `payload[0]`: Bit 7 = pressed, Bits 3-6 = `p`,
+Bits 0-2 = `s`. Nur für Index 0-3 ist ein Label beobachtet/dokumentiert:
+`BUTTON_LABELS = {4, 1, 2, 3}`; Index 4-7 bleiben ungelabelt (kein Raten).
+
+**NotifyInput-Stream** (`targetType() == 0x12`, `opcode` 64-71 =
+NotifyInput0..7): `inputIndex = opcode - 64`; `payload[0]` = `inputCode`,
+`payload[1] & 0x07` = `channel`; ab 4 Payload-Byte zusätzlich ein
+Little-Endian `value16` aus `payload[2..3]`. Code-Tabelle:
+
+| Code | Bedeutung |
+|---|---|
+| 0x01 | Press |
+| 0x02 | Release |
+| 0x09 | Hold |
+| 0x0C | Release after hold |
+| sonst | unbekannt (Raw) |
+
+**Konflikt mit B.12 (casambi-bt):** Die beiden Theorien können nicht
+gleichzeitig für dieselben Bytes stimmen (3-Byte- vs. 9-Byte-Header). Da 0x07
+nie capturet wurde, ist keine von beiden bestätigt. Die Firmware behandelt
+0x07 daher weiterhin **nur diagnostisch/über Callbacks**
+(`CasambiClient::setInputEventCallback`/`setRawInvocationCallback`,
+`_applyInvocationFrames` in `casambi_client.cpp`) — es wird **niemals**
+`_applyUnitStates` aus 0x07-Daten aufgerufen, genau wie zuvor unter der
+Operation-Echo-Lesart. Ein echter Taster-/Sensor-Mitschnitt ist nötig, bevor
+eines der beiden Modelle (oder ein drittes) als bestätigt gelten kann.
+
 ### B.13 Network-Config (Typ 9)
 
 casambi-bt **parst Typ 9 nicht** und ignoriert ihn bewusst: Es wird angenommen,
@@ -520,7 +587,7 @@ ausschließlich in der **Beschaffung der Fähigkeiten** (Cloud) und der
 | Fähigkeits-Quelle | `GET /fixture/{id}` → Controls | `GET /fixture/{id}` → Controls; Mode-String-Heuristik nur als Fallback `[≈]` |
 | Cloud-Revision | inkrementell (`revision`, `UPTODATE`) | `revision=0`, immer Vollabruf `[Δ]` |
 | Zustands-Dekodierung | bit-genau (offset/length) | control-gesteuert per Byte-Offset (offset/8); Sub-Byte noch offen `[≈]` |
-| Paket-Typ 7 | Switch-/Sensor-Event | Operation-Echo, nur Diagnose (kein State) `[Δ]` |
+| Paket-Typ 7 | Switch-/Sensor-Event (B.12) | INVOCATION-Frame-Stream (B.12a), nur Diagnose/Callbacks (kein State) `[Δ]` |
 | Paket-Typ 8/0A/0C | — | UnitState-Update / TimeSync / Keepalive `[+]` |
 | Paket-Typ 9 | ignoriert | P09-Revisions-Tracker dekodiert `[+]` |
 | 0x06-online | `flags & 2` | `(flags & 0x0F) == 0` `[Δ]` |
@@ -649,21 +716,27 @@ Dispatch nach dem ersten Klartextbyte (`_handleDataNotification`):
 | Typ | casambi-bt (B.10) | esp32-casambi |
 |---|---|---|
 | 0x06 | UnitState (bit-genau) | Status-Broadcast, `[=]` gleiches Framing (D.5.1), control-gesteuert per Byte-Offset `[≈]` |
-| 0x07 | **Switch-Event** | Operation-Echo, **nur Diagnose** `[Δ]` |
+| 0x07 | **Switch-Event** (3-Byte-Header, B.12) | INVOCATION-Frame-Stream (9-Byte-Header, B.12a), **nur Diagnose/Callbacks** `[Δ]` |
 | 0x08 | — | UnitState-Update (Paar- oder 0x06-Format) `[+]` |
 | 0x09 | ignoriert | P09-Revisions-/Szenen-Tracker (Debug) `[Δ]` |
 | 0x0A | — | TimeSync — undekodiert, Payload wird gedumpt `[+]` |
 | 0x0C | — | Keepalive — undekodiert, Payload wird gedumpt `[+]` |
 
 - `[Δ]` **Typ 7 ist der gewichtigste Unterschied:** casambi-bt deutet ihn als
-  Schalter-/Sensor-Ereignis (B.12), die Firmware dekodiert ihn als **Echo einer
-  Operation** (gleiche Struktur wie eine ausgehende Operation). Diese Deutung ist
-  eine unbelegte Symmetrie-Annahme aus dem Sende-Format und wurde nie gegen ein
-  echtes eingehendes 0x07 verifiziert (im Netz nie beobachtet). Die Firmware
-  **wendet daraus bewusst keinen Zustand mehr an** (nur Dekodieren/Loggen +
-  `malformed07`-Zähler) — jede reale Änderung kommt ohnehin als 0x06, und ein
-  fehlgedeutetes Switch-Event soll keinen falschen Level injizieren können. Ein
-  echter Switch-/Sensor-Parser (casambi-bt-Port) folgt erst mit einem Mitschnitt.
+  Schalter-/Sensor-Ereignis mit 3-Byte-Nachrichtenheader (B.12). Die Firmware
+  dekodierte ihn ursprünglich als **Echo einer Operation** (gleiche Struktur
+  wie eine ausgehende Operation, 11-Bit-Payloadlänge) — eine unbelegte
+  Symmetrie-Annahme, die nie gegen ein echtes eingehendes 0x07 verifiziert
+  wurde (im Netz nie beobachtet). Seit diesem Änderungssatz implementiert die
+  Firmware stattdessen ein detaillierteres, ebenfalls unverifiziertes Modell
+  (B.12a: 9-Byte-Header, Button-/NotifyInput-Frames, 6-Bit-Payloadlänge), das
+  strukturell mit B.12 kollidiert, inhaltlich aber mit B.12 übereinstimmt,
+  dass 0x07 an physische Eingabe-Hardware gebunden ist, nicht an beliebige
+  Operationen. Die Firmware **wendet daraus weiterhin bewusst keinen Zustand
+  an** (nur Klassifizieren/Loggen/Callbacks + `malformed07`-Zähler) — jede
+  reale Änderung kommt ohnehin als 0x06, und ein fehlgedeutetes Ereignis soll
+  keinen falschen Level injizieren können. Ein echter Taster-/Sensor-Mitschnitt
+  ist nötig, bevor eines der beiden Modelle als bestätigt gelten kann.
 
 **D.5.1 Record-Format bei Typ 0x06 — inzwischen an casambi-bt angeglichen.**
 Ursprünglich divergierten beide Implementierungen bei Byte 2: casambi-bt liest
@@ -775,7 +848,7 @@ big-endian.**
 | ECDH-Public-Key X/Y (je 32 B) | `key_exchange.cpp` | LE (reversed) | B.5; Handshake funktioniert |
 | Geräteinfo `unitId`, `flags` | `parseDeviceInfo` | **BE** | casambi-bt `>BHH16s` (B.4); #49 |
 | Operation `flags`, `origin`, `target` (aus) | `_buildOperation` | BE | D.4, byte-identisch zu casambi-bt |
-| Operation `flags`, `target` (ein, 0x07) | `parseOperationEcho` | BE | Symmetrie zum Sendeformat — **unbelegt**, s. u. |
+| INVOCATION `flags`, `opcode`, `origin`, `target`, `age` (ein, 0x07) | `parseInvocationStream` | BE | B.12a — **unbelegt**, s. u. |
 | `SetColor` Hue (2 B) | `setUnitColor` | LE | D.4, nicht gegengeprüft |
 | `SetState` 16-Bit-Controls | `state_codec.h` | LE | analog Hue; **kein** 16-Bit-Control bisher beobachtet |
 
@@ -789,10 +862,10 @@ Nachziehung nirgends ein plausibleres Ergebnis geliefert:
 - **0x06/0x08/0x09** enthalten überhaupt kein Mehrbyte-Feld: 0x06/0x08 sind
   Byte-Ströme, 0x09 besteht aus 3-Byte-Records mit einzeln gedeuteten Bytes.
   Hier gibt es nichts zu drehen.
-- **0x07 eingehend** hat zwar BE-Felder, aber die Deutung als „Operation-Echo"
-  ist selbst unbelegt (D.5) und es wird kein Zustand angewendet. Eine
-  Endianness-Änderung wäre Raten auf einer ungeprüften Grundstruktur — erst mit
-  einem echten Mitschnitt sinnvoll.
+- **0x07 eingehend** hat zwar BE-Felder, aber die Deutung als INVOCATION-Frame
+  (B.12a, wie zuvor als „Operation-Echo") ist selbst unbelegt (D.5) und es
+  wird kein Zustand angewendet. Eine Endianness-Änderung wäre Raten auf einer
+  ungeprüften Grundstruktur — erst mit einem echten Mitschnitt sinnvoll.
 - **`SetColor` / `state_codec`** sind LE per Analogieschluss. Beide sind auf
   Hardware nicht gegengeprüft, aber es existiert auch kein Gegenbeleg: kein
   bisher gesehenes Fixture hat ein 16-Bit-Control, und RGB ist ungetestet

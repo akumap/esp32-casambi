@@ -172,15 +172,39 @@ struct UnitStateRecord {
           stateLen(0), state(), paddingLen(0), padding() {}
 };
 
+// Upper bounds on an INVOCATION frame per the documented wire framing:
+// payloadLen is a 6-bit field (flags & 0x003F), so 0-63 bytes.
+constexpr size_t INVOCATION_HEADER_LEN      = 9;
+constexpr size_t INVOCATION_MAX_PAYLOAD_LEN = 63;
+
 /**
- * Parsed operation echo from incoming packets
+ * One INVOCATION frame from an incoming 0x07 payload, which is a STREAM of
+ * zero or more of these back to back — not a single record (see the header
+ * comment above for why the previous single-frame "operation echo" reading
+ * is superseded). `targetType()`/`targetId()` decode `target` exactly like
+ * the OUTGOING operation encoder's `encodeTarget()` (packet.h) — see the
+ * header comment for whether that symmetry actually holds here.
  */
-struct OperationEcho {
-    uint8_t opcode;
+struct InvocationFrame {
+    uint16_t flags;
+    uint8_t  opcode;
+    uint16_t origin;
     uint16_t target;
-    uint8_t targetType;    // TARGET_TYPE_*
-    uint8_t targetId;
-    std::vector<uint8_t> payload;
+    uint16_t age;
+
+    bool    hasOriginHandle;   // flags bit 0x0200
+    uint8_t originHandle;      // valid iff hasOriginHandle
+
+    uint8_t payloadLen;                             // flags & 0x003F, 0-63
+    uint8_t payload[INVOCATION_MAX_PAYLOAD_LEN];    // payload[0..payloadLen-1] valid
+
+    InvocationFrame()
+        : flags(0), opcode(0), origin(0), target(0), age(0),
+          hasOriginHandle(false), originHandle(0),
+          payloadLen(0), payload() {}
+
+    uint8_t targetType() const { return static_cast<uint8_t>(target & 0x00FF); }
+    uint8_t targetId()   const { return static_cast<uint8_t>((target >> 8) & 0x00FF); }
 };
 
 namespace packetparse {
@@ -368,48 +392,90 @@ inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
 }
 
 /**
- * Parse a 0x07 operation echo.
- * Structure (after type byte):
- *   [flags:2 BE, low 11 bits = payload length] [opcode:1] [origin:2 BE]
- *   [target:2 BE] [reserved:2] [payload...]
- * Exactly the DECLARED payload length is used. Extra trailing bytes beyond it
- * are tolerated and dropped (Partial) — a newer protocol revision may append
- * fields. A payload SHORTER than declared is Malformed: the packet arrived
- * MAC-verified, so the length-field interpretation does not fit this packet,
- * and a truncated operation payload must not be acted on.
+ * Parse a 0x07 payload as a STREAM of INVOCATION frames (zero or more, back
+ * to back) — not a single "operation echo" record. This supersedes an
+ * earlier reading that treated 0x07 as one frame with an 11-bit payload
+ * length (`flags & 0x07FF`) taken by symmetry with the OUTGOING operation
+ * encoder (docs B.9). That symmetry assumption is UNVERIFIED and now
+ * believed wrong: 0x07 has never been observed on the reference network at
+ * all (no captures exist), and it directly conflicts with an alternative,
+ * equally unverified theory documented in docs/casambi-protokoll-referenz.md
+ * B.12 (ported from casambi-bt), which reads incoming 0x07 as a stream of
+ * switch/sensor events framed with a 3-byte-per-message header — structurally
+ * incompatible with the 9-byte header below. Neither theory can be confirmed
+ * without a real capture; this parser implements the newer, more detailed
+ * INVOCATION-frame theory (see docs B.12a) because it is internally more
+ * consistent (its payload-length field agrees with the "payload: max. 63
+ * byte" note already documented for the OUTGOING operation packet, B.9) and
+ * because it explains an empirical observation: operating lights via the
+ * Casambi/Occhio app produces only 0x06 traffic, never 0x07 — consistent
+ * with 0x07 (incoming) being tied to physical button/sensor input rather
+ * than being a generic echo of any operation, since the app is not a
+ * physical switch.
+ *
+ * Per-frame structure (9-byte header, then optional/variable tail):
+ *   Byte 0-1: flags, BIG-endian
+ *              Bits 0-5:  payloadLen (0-63)
+ *              Bit  9 (0x0200): hasOriginHandle — 1 extra byte present
+ *              other bits: undecoded
+ *   Byte 2:   opcode
+ *   Byte 3-4: origin, BIG-endian
+ *   Byte 5-6: target, BIG-endian — decode via targetType()/targetId()
+ *   Byte 7-8: age, BIG-endian
+ *   [originHandle]         — present iff hasOriginHandle
+ *   payload[payloadLen]    — 0-63 bytes
+ *
+ * Frame length = 9 + has_origin_handle + payloadLen. A critical regression
+ * this framing must get right: flags=0x0204 means hasOriginHandle=true,
+ * payloadLen=4 — the OLD `flags & 0x07FF` reading would instead compute
+ * declaredLen=516 and reject or misparse the packet.
+ *
+ * Same tolerant-but-honest contract as 0x06 (see the file header comment):
+ * Complete when the whole payload is consumed as whole frames, Partial when
+ * a truncated trailing frame is dropped after >=1 good frame, Malformed when
+ * nothing usable was parsed at all.
  */
-inline ParseStatus parseOperationEcho(const uint8_t* data, size_t len,
-                                      OperationEcho& echo,
-                                      ParseDiag* diag = nullptr) {
+inline ParseStatus parseInvocationStream(const uint8_t* data, size_t len,
+                                         std::vector<InvocationFrame>& frames,
+                                         ParseDiag* diag = nullptr) {
     using namespace detail;
-    echo.payload.clear();
+    frames.clear();
 
-    if (len < 9) {
-        setDiag(diag, 0, "header truncated (need 9 bytes)");
-        return ParseStatus::Malformed;
+    if (len < INVOCATION_HEADER_LEN) {
+        return stop(frames, diag, 0, "packet shorter than one invocation header");
     }
 
-    uint16_t flags = (uint16_t)((data[0] << 8) | data[1]);
-    size_t declaredLen = flags & 0x07FF;
-    size_t actualLen   = len - 9;
+    size_t offset = 0;
+    while (offset < len) {
+        if (offset + INVOCATION_HEADER_LEN > len) {
+            return stop(frames, diag, offset, "trailing bytes (no room for a frame header)");
+        }
 
-    if (declaredLen > actualLen) {
-        setDiag(diag, 9, "payload shorter than declared");
-        return ParseStatus::Malformed;
+        InvocationFrame f;
+        f.flags = (uint16_t)((data[offset] << 8) | data[offset + 1]);
+        f.payloadLen = static_cast<uint8_t>(f.flags & 0x003F);
+        f.hasOriginHandle = (f.flags & 0x0200) != 0;
+
+        size_t frameLen = INVOCATION_HEADER_LEN + (f.hasOriginHandle ? 1 : 0) + f.payloadLen;
+        if (offset + frameLen > len) {
+            return stop(frames, diag, offset, "truncated invocation frame");
+        }
+
+        f.opcode = data[offset + 2];
+        f.origin = (uint16_t)((data[offset + 3] << 8) | data[offset + 4]);
+        f.target = (uint16_t)((data[offset + 5] << 8) | data[offset + 6]);
+        f.age    = (uint16_t)((data[offset + 7] << 8) | data[offset + 8]);
+
+        size_t pos = offset + INVOCATION_HEADER_LEN;
+        if (f.hasOriginHandle) f.originHandle = data[pos++];
+        for (uint8_t i = 0; i < f.payloadLen; i++) f.payload[i] = data[pos + i];
+
+        frames.push_back(f);
+        offset += frameLen;
     }
 
-    echo.opcode = data[2];
-    echo.target = (uint16_t)((data[5] << 8) | data[6]);
-    echo.targetId = (echo.target >> 8) & 0xFF;
-    echo.targetType = echo.target & 0xFF;
-    if (declaredLen > 0) {
-        echo.payload.assign(data + 9, data + 9 + declaredLen);
-    }
-
-    if (declaredLen < actualLen) {
-        setDiag(diag, 9 + declaredLen, "trailing bytes beyond declared payload");
-        return ParseStatus::Partial;
-    }
+    // The loop exits only at offset == len (every over-run stops above), so
+    // the payload was consumed exactly as whole frames.
     return ParseStatus::Complete;
 }
 

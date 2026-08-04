@@ -53,7 +53,8 @@ CasambiClient::CasambiClient(NetworkConfig* config)
       _connectedAddress(""), _connectTime(0), _lastNotificationTime(0),
       _totalReceivedPackets(0), _lastDisconnectReason(DisconnectReason::None),
       _lastDisconnectSource("-"), _lastConnectPhase("idle"), _lastConnectRc(0), _lastRssi(0),
-      _unitStateCallback(nullptr), _connStateCallback(nullptr) {
+      _unitStateCallback(nullptr), _connStateCallback(nullptr),
+      _inputEventCallback(nullptr), _rawInvocationCallback(nullptr) {
     memset(_nonce, 0, NONCE_SIZE);
     _mutex    = xSemaphoreCreateMutex();
     _encMutex = xSemaphoreCreateMutex();
@@ -1357,25 +1358,22 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         }
 
         case 0x07: {
-            // Incoming 0x07 — DIAGNOSTIC ONLY, no state is applied.
+            // Incoming 0x07 — DIAGNOSTIC/CALLBACK ONLY, no unit state is applied.
             //
-            // Reading 0x07 as an "operation echo" is an unvalidated inference
-            // from the OUTGOING operation format; it conflicts with casambi-bt
-            // (which decodes incoming 0x07 as switch/sensor events) and has never
-            // been observed on the wire here. Any real state change also arrives
-            // as a 0x06, so acting on 0x07 would at best be redundant and at
-            // worst inject a bogus level from a mis-read switch event. We
-            // therefore decode it only for visibility and the malformed07 counter
-            // and deliberately do NOT call _applyUnitStates. Revisit with a real
+            // Reading 0x07 as a stream of INVOCATION frames (button/NotifyInput
+            // events) is an UNVERIFIED theory — it has never been observed on
+            // the wire here (no captures exist) and conflicts with an equally
+            // unverified alternative in docs/casambi-protokoll-referenz.md B.12
+            // (casambi-bt's 3-byte-header SwitchEvent framing). Any real state
+            // change also arrives as a 0x06, so acting on 0x07 would at best be
+            // redundant and at worst inject a bogus level from a mis-decoded
+            // frame. We therefore only classify/dedup for the input-event and
+            // raw-frame callbacks (and the malformed07/partial07 counters) and
+            // deliberately do NOT call _applyUnitStates. Revisit with a real
             // capture (add a Casambi switch/sensor) before acting on 0x07.
-            OperationEcho echo;
-            if (parseOperationEcho(payload, payloadLen, echo) && casambiDebugEnabled) {
-                Serial.printf("Casambi: 0x07 (diagnostic) %s %s[%d]",
-                              opcodeName(echo.opcode),
-                              targetTypeName(echo.targetType),
-                              echo.targetId);
-                if (!echo.payload.empty()) Serial.printf(" payload[0]=%d", echo.payload[0]);
-                Serial.println();
+            std::vector<InvocationFrame> frames;
+            if (parseInvocationStream(payload, payloadLen, frames)) {
+                _applyInvocationFrames(frames);
             }
             break;
         }
@@ -1700,6 +1698,39 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateRecord>& records
         if (_unitStateCallback) {
             _unitStateCallback(record.unitId, unit->level, record.online, record.on);
         }
+    }
+}
+
+// ============================================================================
+// INVOCATION FRAME APPLICATION — diagnostic/callback only, see case 0x07 above
+// ============================================================================
+
+void CasambiClient::_applyInvocationFrames(const std::vector<InvocationFrame>& frames) {
+    if (_rawInvocationCallback) {
+        for (const auto& frame : frames) {
+            _rawInvocationCallback(frame);
+        }
+    }
+
+    std::vector<invocation_events::CasambiInputEvent> events;
+    invocation_events::decodeInvocationEvents(frames, _invocationDedupTable, events);
+
+    if (casambiDebugEnabled) {
+        for (const auto& ev : events) {
+            Serial.printf("Casambi: 0x07 input event unit=%d index=%d label=%d type=%d",
+                          ev.unitId, ev.index, ev.label, static_cast<int>(ev.type));
+            if (ev.isButtonStream) {
+                Serial.printf(" pressed=%d p=%d s=%d", ev.pressed, ev.p, ev.s);
+            } else {
+                Serial.printf(" code=0x%02x channel=%d", ev.inputCode, ev.channel);
+                if (ev.hasValue16) Serial.printf(" value16=%d", ev.value16);
+            }
+            Serial.println();
+        }
+    }
+
+    for (const auto& ev : events) {
+        if (_inputEventCallback) _inputEventCallback(ev);
     }
 }
 

@@ -128,17 +128,17 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
 }
 
 // ============================================================================
-// 0x07 - Operation Echo Parsing
+// 0x07 - INVOCATION Frame Stream Parsing
 // ============================================================================
 
-bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
+bool parseInvocationStream(const uint8_t* data, size_t len, std::vector<InvocationFrame>& frames) {
     // PARSE output → `debug parse`.
     if (parseDebugEnabled) {
         hexDump("PARSE 0x07 raw", data, len);
     }
 
     packetparse::ParseDiag diag;
-    packetparse::ParseStatus st = packetparse::parseOperationEcho(data, len, echo, &diag);
+    packetparse::ParseStatus st = packetparse::parseInvocationStream(data, len, frames, &diag);
     if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed07++;
         if (parseDebugEnabled) {
@@ -150,18 +150,25 @@ bool parseOperationEcho(const uint8_t* data, size_t len, OperationEcho& echo) {
     if (st == packetparse::ParseStatus::Partial) {
         g_parseStats.partial07++;
         if (parseDebugEnabled) {
-            Serial.printf("PARSE 0x07: partial — %s at offset %u\n",
-                          diag.reason, (unsigned)diag.offset);
+            Serial.printf("PARSE 0x07: partial — %u frame(s) applied, tail dropped at offset %u: %s\n",
+                          (unsigned)frames.size(), (unsigned)diag.offset, diag.reason);
         }
     }
 
-    if (parseDebugEnabled) {
-        Serial.printf("PARSE 0x07: op=%s(%d) target=%s[%d] payload=%d bytes\n",
-                      opcodeName(echo.opcode), echo.opcode,
-                      targetTypeName(echo.targetType), echo.targetId,
-                      echo.payload.size());
-        if (!echo.payload.empty()) {
-            hexDump("  payload", echo.payload.data(), echo.payload.size(), 16);
+    if (parseDebugEnabled && !frames.empty()) {
+        Serial.printf("PARSE 0x07: %d frame(s)\n", frames.size());
+        for (const auto& f : frames) {
+            Serial.printf("  op=%s(%d) target=%s[%d] origin=%d age=%d payload=%d bytes",
+                          opcodeName(f.opcode), f.opcode,
+                          targetTypeName(f.targetType()), f.targetId(),
+                          f.origin, f.age, f.payloadLen);
+            if (f.hasOriginHandle) {
+                Serial.printf(" originHandle=%d", f.originHandle);
+            }
+            Serial.println();
+            if (f.payloadLen > 0) {
+                hexDump("    payload", f.payload, f.payloadLen, 16);
+            }
         }
     }
 

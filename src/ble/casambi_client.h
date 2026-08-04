@@ -16,6 +16,8 @@
 #include "../cloud/network_config.h"
 #include "../crypto/encryption.h"
 #include "../crypto/key_exchange.h"
+#include "packet_parse.h"      // InvocationFrame
+#include "invocation_events.h" // CasambiInputEvent, EventDedupTable
 
 // NimBLE types are an implementation detail of src/ble/ — forward-declare here
 // and include <NimBLEDevice.h> only in the .cpp so the BLE stack does not leak
@@ -65,6 +67,17 @@ using UnitStateCallback = std::function<void(uint8_t unitId, uint8_t level, bool
 
 // Called when connection state changes
 using ConnectionStateCallback = std::function<void(ConnectionState newState, DisconnectReason reason)>;
+
+// Called for each classified button/NotifyInput event decoded from an
+// incoming 0x07 INVOCATION frame stream, after dedup — see
+// invocation_events.h. UNVERIFIED (see packet_parse.h's parseInvocationStream
+// doc comment): 0x07 has never been observed on the reference network.
+using InputEventCallback = std::function<void(const invocation_events::CasambiInputEvent&)>;
+
+// Called for EVERY frame in an incoming 0x07 stream, classified or not —
+// full-fidelity access for diagnostics/analysis of unrecognized opcodes,
+// with no dedup applied.
+using RawInvocationCallback = std::function<void(const InvocationFrame&)>;
 
 // ============================================================================
 // CASAMBI BLE CLIENT
@@ -189,6 +202,19 @@ public:
      */
     void setConnectionStateCallback(ConnectionStateCallback cb) { _connStateCallback = cb; }
 
+    /**
+     * Set callback for classified, deduplicated button/NotifyInput events
+     * decoded from incoming 0x07 INVOCATION frames. UNVERIFIED, see
+     * invocation_events.h.
+     */
+    void setInputEventCallback(InputEventCallback cb) { _inputEventCallback = cb; }
+
+    /**
+     * Set callback for every raw INVOCATION frame from an incoming 0x07
+     * stream, classified or not, no dedup applied.
+     */
+    void setRawInvocationCallback(RawInvocationCallback cb) { _rawInvocationCallback = cb; }
+
     // ========================================================================
     // CONTROL FUNCTIONS
     // ========================================================================
@@ -266,6 +292,10 @@ private:
     // Callbacks
     UnitStateCallback _unitStateCallback;
     ConnectionStateCallback _connStateCallback;
+    InputEventCallback _inputEventCallback;
+    RawInvocationCallback _rawInvocationCallback;
+    // Dedup state for decodeInvocationEvents() — persists across 0x07 packets.
+    invocation_events::EventDedupTable _invocationDedupTable;
 
     // ========================================================================
     // CONNECTION FLOW
@@ -377,6 +407,13 @@ private:
      * Apply parsed unit state records to NetworkConfig and fire callbacks
      */
     void _applyUnitStates(const std::vector<struct UnitStateRecord>& records);
+
+    /**
+     * Classify/dedup an incoming 0x07 INVOCATION frame stream and fire the
+     * raw + input-event callbacks. Never touches NetworkConfig/unit state —
+     * see the parseInvocationStream doc comment in packet_parse.h for why.
+     */
+    void _applyInvocationFrames(const std::vector<InvocationFrame>& frames);
 };
 
 #endif // CASAMBI_CLIENT_H

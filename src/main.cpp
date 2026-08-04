@@ -215,6 +215,33 @@ void setup() {
                 }
             );
 
+            // Set up 0x07 INVOCATION event callbacks — DEBUG LOGGING ONLY, no
+            // WebSocket/REST exposure. 0x07 has never been observed on this
+            // network (see packet_parse.h's parseInvocationStream doc
+            // comment); this is diagnostic visibility only, pending a real
+            // capture, same spirit as the previous "0x07 diagnostic" logging.
+            casambiClient->setInputEventCallback(
+                [](const invocation_events::CasambiInputEvent& ev) {
+                    if (!casambiDebugEnabled) return;
+                    Serial.printf("CALLBACK: 0x07 input event unit=%d index=%d label=%d type=%d",
+                                  ev.unitId, ev.index, ev.label, static_cast<int>(ev.type));
+                    if (ev.isButtonStream) {
+                        Serial.printf(" pressed=%d p=%d s=%d", ev.pressed, ev.p, ev.s);
+                    } else {
+                        Serial.printf(" code=0x%02x channel=%d", ev.inputCode, ev.channel);
+                        if (ev.hasValue16) Serial.printf(" value16=%d", ev.value16);
+                    }
+                    Serial.println();
+                }
+            );
+            casambiClient->setRawInvocationCallback(
+                [](const InvocationFrame& frame) {
+                    if (!casambiDebugEnabled) return;
+                    Serial.printf("CALLBACK: 0x07 raw frame op=%d target=0x%04x origin=%d age=%d payload=%d bytes\n",
+                                  frame.opcode, frame.target, frame.origin, frame.age, frame.payloadLen);
+                }
+            );
+
             // Auto-connect if enabled
             if (networkConfig.autoConnectEnabled && networkConfig.autoConnectAddress.length() > 0) {
                 Serial.printf("Auto-connecting to %s...\n", networkConfig.autoConnectAddress.c_str());
