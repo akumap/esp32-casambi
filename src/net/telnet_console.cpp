@@ -172,7 +172,10 @@ void TelnetConsole::_handleLine() {
             _outCursor = consoleRingOldestAvailable();
             EventLog::log(LOG_INFO, "Telnet: login from %s",
                           _client.remoteIP().toString().c_str());
-            _client.print("\r\nWelcome. Type 'help' for commands.\r\n> ");
+            // 'exit' is advertised here rather than in cmdHelp(): that help
+            // text is shared with the serial console, where there is no
+            // session to leave.
+            _client.print("\r\nWelcome. Type 'help' for commands, 'exit' to disconnect.\r\n> ");
         } else {
             _loginAttempts++;
             EventLog::log(LOG_WARN, "Telnet: failed login attempt %u from %s",
@@ -190,6 +193,19 @@ void TelnetConsole::_handleLine() {
 
     if (line.length() == 0) {
         _client.print("> ");
+        return;
+    }
+    if (line == "exit" || line == "quit") {
+        // Telnet-only, and handled before handleCommand() on purpose: there is
+        // nothing to exit on the serial console, so this never reaches the
+        // shared command table. Without it the only ways out are killing the
+        // client or waiting out the idle timeout -- and since just one session
+        // is allowed at a time (E6), a session nobody can close cleanly blocks
+        // the next login from another machine.
+        _client.print("Bye.\r\n");
+        EventLog::log(LOG_INFO, "Telnet: logout from %s",
+                      _client.remoteIP().toString().c_str());
+        _endSession();
         return;
     }
     if (line == "setup" || line.startsWith("wifi set")) {

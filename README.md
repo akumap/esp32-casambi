@@ -265,10 +265,23 @@ unencrypted Telnet connection:
 Password: <apiToken>   # SHA-256("casambi-api:" + <casambi-network-password>), lowercase hex
 ```
 
-Save the computed token in the PuTTY session profile so you only type it
-once. Three failed attempts close the connection. Only one session is
-allowed at a time — a second connection attempt is refused while one is
-active.
+Compute it once — this is the string to type at the prompt, verbatim:
+
+```bash
+printf 'casambi-api:%s' '<casambi-network-password>' | sha256sum | cut -d' ' -f1
+```
+
+Save the result in the PuTTY session profile so you only type it once. Three
+failed attempts close the connection. Only one session is allowed at a time —
+a second connection attempt is refused while one is active.
+
+**Leaving the session:** type `exit` (or `quit`). Both are Telnet-only and do
+not appear in `help`, which is shared with the serial console. This matters
+because of the single-session limit: without a clean logout the slot stays
+taken until the idle timeout expires or the client's disconnect is noticed,
+which blocks the next login from another machine. Note that `plink` has no
+Telnet escape character (the classic `telnet` client's `Ctrl+]` is a feature
+of that client, not of the protocol), so `exit` is the only in-band way out.
 
 ```
 telnet status              - Show whether the console is listening, whether a
@@ -279,6 +292,7 @@ telnet timeout <seconds>   - Idle timeout before an inactive session is closed
                              an overnight capture. Measured from the last
                              complete command line, not the last byte — a
                              client's own Telnet keepalive does not reset it.
+exit | quit                - Close the Telnet session (Telnet console only)
 ```
 
 -----
