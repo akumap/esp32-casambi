@@ -23,6 +23,7 @@
 #define NET_TELNET_CONSOLE_H
 
 #include <WiFi.h>
+#include "../config.h"   // TELNET_PORT, TELNET_LINE_MAX_LEN
 #include "telnet_line.h"
 
 class TelnetConsole {
