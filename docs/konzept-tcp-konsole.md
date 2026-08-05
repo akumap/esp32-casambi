@@ -271,6 +271,51 @@ Ablauf: Verbindung → `IAC WILL ECHO` + `IAC WILL SGA` → Prompt `Password:`
 danach Verbindung schließen. Nach erfolgreichem Login: Scrollback-Replay,
 Banner mit Build-Nummer, dann Prompt.
 
+### 4.6 Idle-Timeout und Liveness
+
+Der Timeout hat zwei Zwecke: die Sitzung eines vergessenen Logins beenden und
+— wichtiger — den **einzigen Session-Slot** (E6) freiräumen, wenn der Client
+ohne FIN verschwindet (Laptop-Deckel zu, WLAN weg). Eine halboffene
+TCP-Verbindung erkennt das Gerät sonst nie und man sperrt sich selbst aus.
+
+Die beiden Zwecke werden **getrennt** gelöst, damit `timeout 0` gefahrlos ist:
+
+**Timeout** = Zeit seit der letzten **vollständig empfangenen Kommandozeile**.
+Diese Definition ist nicht beliebig:
+
+- *Nicht* „seit dem letzten empfangenen Byte": PuTTY kann eigene Keepalives
+  senden (Einstellung *Connection → Seconds between keepalives*, verschickt
+  Telnet-NOPs, um NAT-Zustände offenzuhalten). Die würden den Timer dauerhaft
+  zurücksetzen — der Mechanismus wäre wirkungslos, ohne dass es auffällt.
+- *Nicht* „kein Verkehr in beide Richtungen": Dann hielte zwar ein
+  Nacht-Mitschnitt sich selbst am Leben, aber eine 15-minütige Ruhephase des
+  Geräts um 3 Uhr würde die Aufzeichnung mittendrin und unbemerkt abbrechen.
+  Eingabe-basiert plus ein bewusst gesetztes `0` ist vorhersagbar.
+
+**Liveness** = unabhängig vom Timeout. lwIP-Keepalive auf dem Socket
+(`SO_KEEPALIVE` + `TCP_KEEPIDLE/INTVL/CNT` via `setsockopt`; ob in der
+IDF-Konfiguration dieses Builds aktiv, ist bei der Umsetzung zu prüfen),
+ersatzweise ein `IAC NOP` alle 60 s vom Gerät aus — für den Client unsichtbar,
+läuft aber bei totem Peer in einen TCP-Fehler und gibt den Slot frei. Damit
+bleibt der Slot auch bei abgeschaltetem Timeout selbstheilend.
+
+Bedienung, im Stil der vorhandenen Kommandos (`debug …`, `wifi …`,
+`ntp status`):
+
+```
+telnet status              # Timeout, aktive Session, verworfene Bytes
+telnet timeout <sekunden>  # 0 = aus, sonst 60..86400
+```
+
+Persistiert als Feld in `NetworkConfig`, wie die Debug-Flags
+(`network_config.h:181-186`, `config_store.cpp:101-104`). **Wichtig:** der neue
+Wert muss in die Merge-Liste `network_config.h:266-271` aufgenommen werden,
+sonst setzt der nächste Cloud-`refresh` ihn still zurück — dieselbe Fußangel,
+die dort bereits für die sechs Debug-Flags bedacht wurde.
+
+Auf der Laptop-Seite braucht es für lange Mitschnitte nichts Zusätzliches:
+PuTTY → *Session → Logging → All session output* schreibt direkt in eine Datei.
+
 ## 5. Entscheidungen (die zuvor offenen Fragen)
 
 | # | Frage | Entscheidung | Begründung |
@@ -280,12 +325,15 @@ Banner mit Build-Nummer, dann Prompt.
 | **E3** | Setup-Wizard über Telnet? | **gesperrt** — `setup` und `wifi set` antworten über Telnet mit „nur über die serielle Konsole verfügbar" | Erspart den kompletten Umbau der fünf blockierenden Eingabepfade (1.3). Kein realer Verlust: geflasht wird ohnehin per USB, die Erstprovisionierung läuft über das SoftAP-Portal. `wifi set` würde zusätzlich die eigene Session unter den Füßen wegreißen. Und beide geben Zugangsdaten aus — über Klartext-Telnet ein echtes Leck (`serial_console.cpp:744-748` maskiert `wifi set` heute nur im Kommando-Echo, nicht die Wizard-Ausgabe). |
 | **E4** | Echo selbst negotiieren oder PuTTY-Einstellungen dokumentieren? | **selbst negotiieren** (`WILL ECHO`, `WILL SGA`), Gerät echot Zeichen inkl. Backspace | PuTTY steht per Default auf „Local echo/line editing: Auto"; ohne Negotiation tippt man zeichenweise und blind. Ausschlaggebend ist aber die Passworteingabe: Echo gezielt *nicht* zu senden geht nur, wenn das Gerät die Echo-Hoheit hat. Die PuTTY-Doku-Variante („Local echo auf Force on") kommt zusätzlich ins README als Fallback für Clients, die nicht negotiieren. |
 | **E5** | Scrollback-Ringpuffer ja/nein, wie groß? | **ja, 4 KB, statisch alloziert** | Kein optionales Beiwerk, sondern der Mechanismus, der auch Cross-Task-Sicherheit und Backpressure löst (4.2). **Statisch** ist der Punkt: statisches RAM ist reichlich frei (59 572 B von 532 480 B belegt), der Heap ist die knappe Ressource — ein `static uint8_t[4096]` kostet dort **nichts**. |
-| **E6** | Mehrere gleichzeitige Sessions? | **eine**, weitere Verbindungen werden mit Hinweis abgewiesen | Sonst konkurrieren zwei Bediener um blockierende Kommandos wie `connect`. Dazu Idle-Timeout (Vorschlag 15 min) und Schließen der Session bei Reboot-Kommandos. |
+| **E6** | Mehrere gleichzeitige Sessions? | **eine**, weitere Verbindungen werden mit Hinweis abgewiesen | Sonst konkurrieren zwei Bediener um blockierende Kommandos wie `connect`. Session wird bei Reboot-Kommandos geschlossen. |
+| **E6a** | Idle-Timeout fest oder konfigurierbar? | **konfigurierbar und abschaltbar**: `telnet timeout <s>`, Default 900, `0` = aus; persistiert in `NetworkConfig` | Lange Mitschnitte über Nacht sind ein reales Szenario, bei dem stundenlang nichts getippt wird. Gemessen wird die Zeit seit der letzten **Kommandozeile**, nicht seit dem letzten Byte (PuTTY-Keepalives würden den Timer sonst dauerhaft zurücksetzen) und nicht „kein Verkehr in beide Richtungen" (eine Ruhephase des Geräts würde den Mitschnitt still abbrechen). Details und Begründung in 4.6. |
+| **E6b** | Was ersetzt den Timeout bei `0`? | **Keepalive/`IAC NOP` als eigenständige Liveness-Prüfung** | Der Timeout räumt auch den einzigen Session-Slot frei, wenn der Client ohne FIN verschwindet. Ohne Ersatz würde `timeout 0` bedeuten, dass ein zugeklappter Laptop das Gerät dauerhaft blockiert. Getrennt gelöst ⇒ `timeout 0` ist gefahrlos. |
 | **E7** | Verhalten bei totem Client | **nie blockieren**, ältestes verwerfen, Drop-Zähler ausgeben | Ein blockierendes `client.write()` im loop-Task ist bei 45 s WDT ein Reboot — das einzige Szenario, in dem diese Erweiterung die Gerätestabilität gefährdet. |
 | **E8** | Port und Aktivierung | **Port 23**, Server startet **nur, wenn ein Token vorhanden ist** | Port 23 ist PuTTYs Telnet-Default. Die Kopplung an den Token ist eine Sicherheitsentscheidung: `webserver.cpp:281` behandelt „kein Passwort gespeichert" als *Auth aus* — für die REST-API vertretbar, für eine Konsole mit `clearconfig`/`restart` **nicht**. Ohne Token bleibt der Port also zu, auch im Setup-Modus. |
 | **E9** | API-Versionierung | **kein Bump** von `FHEM_API_VERSION_MAJOR/MINOR` | Telnet ist kein REST-/WebSocket-Wire-Format; die Regel in CLAUDE.md und `config.h` greift nicht. README-Abschnitt + Eintrag in der Feature-Übersicht sind trotzdem fällig. |
 | **E10** | Wo lebt die Parser-Logik? | eigener Header `src/net/telnet_line.h` + `test/test_telnet_line` | Repo-Konvention: Arduino-freie Logik wird host-testbar ausgelagert (CLAUDE.md, „Conventions"). IAC-Filter und Zeilenzerlegung sind genau das. |
 | **E11** | Challenge-Response statt Klartext-Token? | **zurückgestellt** | Nonce + `HMAC(token, nonce)` wäre nicht replaybar und kryptografisch solide — aber in PuTTY nicht von Hand tippbar. Man bräuchte ein Helferskript auf dem Laptop und verlöre damit das Standardtool, also den ganzen Zweck. Als spätere Ausbaustufe notiert, falls das Bedrohungsmodell sich ändert. |
+| **E12** | mDNS-Service `_telnet._tcp` registrieren? | **nein** | Zu trennen: die *Namensauflösung* `casambi-xxxx.local` kommt aus `MDNS.begin()` (`time_sync.cpp:38`), existiert bereits und ist alles, was PuTTY braucht. Eine *Service-Ankündigung* (PTR/SRV/TXT, wie `addService("http","tcp",80)` in Zeile 40-43) macht das Gerät zusätzlich in Dienst-Browsern (`avahi-browse -a`, Bonjour Browser, Finder) auffindbar. PuTTY durchsucht kein mDNS — der praktische Gewinn ist null, während der Eintrag jedem LAN-Gerät aktiv mitteilt, dass hier eine administrative Konsole auf Port 23 lauscht. `setup_portal.cpp:233` zeigt denselben Gedanken: bei offenem Portal werden Hostname/MAC/IP bewusst nicht ausgegeben. **Mittelweg**, falls Auffindbarkeit später doch gewünscht ist: TXT-Record `telnet=23` am bestehenden HTTP-Service statt eines eigenen Eintrags. |
 
 ## 6. Aufwand und Risiken
 
@@ -294,7 +342,9 @@ Banner mit Build-Nummer, dann Prompt.
 | Neues Modul `net/telnet_console.*` | ~250–350 Zeilen |
 | Parser-Header + Host-Tests | ~80 + ~120 Zeilen |
 | Mechanischer Rename `Serial.print` → `Console.print` | 662 Zeilen in 16 Dateien, reiner Rename |
-| Einhängen in `loop()`, mDNS-Service (`_telnet._tcp`, `net/time_sync.cpp:35`) | wenige Zeilen |
+| Einhängen in `loop()`, Kommandos `telnet status` / `telnet timeout` | wenige Zeilen |
+| Timeout-Feld in `NetworkConfig` + `config_store` + Merge-Liste (E6a) | wenige Zeilen, leicht zu vergessen |
+| mDNS | keine Änderung (E12) |
 | README-Abschnitt (Bedienung, PuTTY-Einstellungen, Token-Ermittlung) | — |
 | **Heap zur Laufzeit** | Listen-Socket + 1 Client ≈ wenige KB lwIP; Ringpuffer 0 (statisch) |
 | **Flash** | unkritisch (1,48 MiB frei im `huge_app`-Layout) |
@@ -328,7 +378,15 @@ Nachschau ab.
    erscheint nach dem Fortsetzen.
 5. **Sperren** — `setup` und `wifi set` über Telnet ⇒ Hinweis, keine Ausführung;
    dieselben Kommandos seriell ⇒ unverändert funktionsfähig.
-6. **Regression seriell** — kompletter Kommando-Durchlauf über `/dev/ttyUSB0`
+6. **Idle-Timeout** — mit kurzem Testwert (`telnet timeout 60`): Session fällt
+   ohne Eingabe weg; mit aktivierten PuTTY-Keepalives fällt sie **trotzdem**
+   weg (beweist, dass auf Kommandozeilen und nicht auf Bytes gemessen wird);
+   bei laufender Ausgabe fällt sie ebenfalls weg. `telnet timeout 0` ⇒ Session
+   überlebt eine Nacht. Wert überlebt Reboot **und** einen `refresh`.
+7. **Session-Slot** — Client hart abschießen (Netzwerkkabel/WLAN aus, kein FIN)
+   bei `timeout 0`: Slot wird durch Keepalive/NOP wieder frei, neue Verbindung
+   ist möglich.
+8. **Regression seriell** — kompletter Kommando-Durchlauf über `/dev/ttyUSB0`
    nach dem Rename (Verfahren siehe CLAUDE.md, „Serial monitor").
-7. **Stabilität** — `scripts/stress_test.py` mit offener Telnet-Session, um
+9. **Stabilität** — `scripts/stress_test.py` mit offener Telnet-Session, um
    Wechselwirkung mit async_tcp und Heap zu prüfen.
