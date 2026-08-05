@@ -214,10 +214,22 @@ Das löst gleichzeitig:
 2. **Backpressure ohne Watchdog-Risiko** — liest der Client nicht mehr (Laptop
    zugeklappt, halbtote Session), läuft das TCP-Fenster voll. Ein blockierendes
    `client.write()` würde den loop-Task anhalten; bei 45 s WDT ist das ein
-   Reboot. Der Drainer schreibt nur, solange `availableForWrite()` Platz
-   meldet, und **verwirft** bei Überlauf die ältesten Daten, statt zu warten.
-   Ein Drop-Zähler wird beim nächsten erfolgreichen Schreiben als
+   Reboot. Der Drainer prüft vor jedem Chunk mit einem **`select()` mit
+   Timeout 0** auf dem Socket-Descriptor, ob überhaupt gesendet werden kann,
+   und **verwirft** bei Überlauf die ältesten Daten, statt zu warten. Ein
+   Drop-Zähler wird beim nächsten erfolgreichen Schreiben als
    `[… N Bytes verworfen …]` ausgegeben, damit stille Lücken erkennbar sind.
+
+   > **Nicht `availableForWrite()` verwenden.** `WiFiClient` überschreibt die
+   > Methode auf dem ESP32-Arduino-Core nicht, erbt also die Default-
+   > Implementierung aus `Print`, die konstant **0** liefert. Ein Gate der Form
+   > `if (availableForWrite() > 0)` sendet damit *nie* — das hat in der ersten
+   > Fassung sämtliche Kommandoausgabe verschluckt (Banner, Echo und Prompt
+   > waren weiterhin sichtbar, weil sie direkt geschrieben werden und nicht
+   > durch den Ringpuffer laufen) und zugleich die Liveness-Probe aus E6b
+   > stillgelegt. Zusätzlich wird der **Rückgabewert von `write()`** ausgewertet
+   > und der Cursor über den nicht gesendeten Rest zurückgesetzt, damit ein
+   > Teilschreibvorgang nichts verliert.
 3. **Scrollback beim Login** — der Client bekommt beim Verbinden einen
    Lese-Index auf den ältesten noch gültigen Eintrag statt auf das Pufferende.
    Damit sieht man die letzten ~4 KB Ausgabe *vor* dem Login. Auf einem Gerät,

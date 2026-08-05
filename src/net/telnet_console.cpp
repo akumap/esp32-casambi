@@ -4,12 +4,41 @@
 
 #include "telnet_console.h"
 
+#include <sys/select.h>
+
 #include "../config.h"
 #include "../app_state.h"
 #include "../console_out.h"
 #include "../crypto/api_token.h"
 #include "../log/event_log.h"
 #include "../serial_console.h"
+
+namespace {
+
+// True when the socket can accept at least one byte RIGHT NOW.
+//
+// Deliberately not WiFiClient::availableForWrite(): WiFiClient does not
+// override it on the ESP32 Arduino core, so it inherits Print's default
+// implementation, which unconditionally returns 0. Gating a send on
+// "availableForWrite() > 0" therefore never sends anything -- that bug
+// silently swallowed ALL command output over telnet (the banner, echo and
+// prompt still appeared because those are written straight to the client and
+// never went through the gated path), and it disabled the E6b liveness probe
+// the same way.
+//
+// A zero-timeout select() answers the question the gate was actually asking,
+// and answers it without ever waiting -- which is the point: the loop task
+// must never stall on a client that stopped reading (E7 / watchdog).
+bool socketWritable(int fd) {
+    if (fd < 0) return false;
+    fd_set wset;
+    FD_ZERO(&wset);
+    FD_SET(fd, &wset);
+    struct timeval tv = {0, 0};   // poll, never block
+    return select(fd + 1, nullptr, &wset, nullptr, &tv) > 0 && FD_ISSET(fd, &wset);
+}
+
+}  // namespace
 
 TelnetConsole::TelnetConsole()
     : _server(TELNET_PORT), _parser(_lineBuf, sizeof(_lineBuf)) {}
@@ -58,7 +87,7 @@ void TelnetConsole::loop() {
     if (millis() - _lastNopMs > TELNET_NOP_INTERVAL_MS) {
         _lastNopMs = millis();
         static const uint8_t nop[] = {255, 241};  // IAC NOP
-        if (_client.availableForWrite() >= (int)sizeof(nop)) {
+        if (socketWritable(_client.fd())) {
             _client.write(nop, sizeof(nop));
         }
     }
@@ -167,29 +196,41 @@ void TelnetConsole::_handleLine() {
 void TelnetConsole::_drainOutput() {
     if (_state != State::Authenticated) return;  // nothing leaks pre-auth
 
-    // Never ask the socket for more than it can currently accept — a
-    // blocking client.write() here would stall the loop task and, at worst,
-    // trip the watchdog (docs/konzept-tcp-konsole.md, 4.2 point 2 / E7).
-    // Checked BEFORE reading from the ring buffer, not after: consoleRingRead()
-    // advances the cursor by however much it copies out, so bytes read while
-    // the socket had no room would otherwise be silently lost -- read out of
-    // the ring buffer (cursor moved past them) but never actually sent, and
-    // not reported as dropped either, since that counter is only for bytes
-    // overwritten by the ring buffer itself.
-    int avail = _client.availableForWrite();
-    if (avail <= 0) return;
+    // Drain in chunks for as long as the socket keeps taking them, bounded so
+    // a chatty moment cannot monopolise this loop() iteration. A single chunk
+    // per iteration would not keep up: one 'status' or 'log' produces several
+    // kB at once, so the ring buffer would wrap before the client had seen it
+    // -- reported as dropped bytes, but lost all the same.
+    size_t budget = CONSOLE_RING_BUFFER_SIZE;
 
-    uint8_t buf[128];
-    size_t maxLen = ((size_t)avail < sizeof(buf)) ? (size_t)avail : sizeof(buf);
+    while (budget > 0) {
+        // Don't start a send the socket cannot take right now: a write() into
+        // a full send buffer stalls the loop task and, at worst, trips the
+        // watchdog (docs/konzept-tcp-konsole.md, 4.2 point 2 / E7).
+        if (!socketWritable(_client.fd())) return;
 
-    uint64_t dropped = 0;
-    size_t n = consoleRingRead(&_outCursor, buf, maxLen, &dropped);
-    if (dropped > 0) {
-        _totalDropped += dropped;
-        _client.printf("\r\n[%lu Bytes verworfen -- Client war zu langsam]\r\n",
-                       (unsigned long)dropped);
+        uint8_t buf[128];
+        uint64_t dropped = 0;
+        size_t n = consoleRingRead(&_outCursor, buf, sizeof(buf), &dropped);
+        if (dropped > 0) {
+            _totalDropped += dropped;
+            _client.printf("\r\n[%lu Bytes verworfen -- Client war zu langsam]\r\n",
+                           (unsigned long)dropped);
+        }
+        if (n == 0) return;   // ring buffer drained
+
+        // write() reports what the socket actually accepted (it sends with
+        // MSG_DONTWAIT under the hood), which can be less than requested even
+        // after select() said "writable". Rewind the cursor over the unsent
+        // tail so it is retried on the next loop() iteration --
+        // consoleRingRead() has already advanced the cursor past everything it
+        // copied out, so without this the remainder would be dropped on the
+        // floor, unsent and unreported.
+        size_t sent = _client.write(buf, n);
+        if (sent < n) {
+            _outCursor -= (n - sent);
+            return;           // socket full for now; continue next iteration
+        }
+        budget -= (budget < n) ? budget : n;
     }
-    if (n == 0) return;
-
-    _client.write(buf, n);  // n <= avail by construction, so this never blocks
 }
