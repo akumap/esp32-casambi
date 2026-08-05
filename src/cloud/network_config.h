@@ -185,6 +185,12 @@ struct NetworkConfig {
     bool heapDebugEnabled;
     bool cloudDebugEnabled;
 
+    // Idle-timeout for a connected telnet console session, in seconds (0 =
+    // disabled). Configurable via 'telnet timeout <seconds>'; a local runtime
+    // setting, not part of the cloud config — see preserveLocalSettings below
+    // and docs/konzept-tcp-konsole.md, decision E6a.
+    uint32_t telnetTimeoutSeconds;
+
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
                       protocolVersion(0), revision(0),
                       autoConnectEnabled(true), autoConnectAddress(""),
@@ -193,7 +199,8 @@ struct NetworkConfig {
                       bleDebugEnabled(false), casambiDebugEnabled(true),
                       webDebugEnabled(true),
                       parseDebugEnabled(false), heapDebugEnabled(false),
-                      cloudDebugEnabled(false) {}
+                      cloudDebugEnabled(false),
+                      telnetTimeoutSeconds(TELNET_TIMEOUT_DEFAULT_SECONDS) {}
 
     // Get the best key (highest role)
     CasambiKey* getBestKey() {
@@ -269,6 +276,7 @@ inline void preserveLocalSettings(const NetworkConfig& local, NetworkConfig& fre
     fresh.parseDebugEnabled   = local.parseDebugEnabled;
     fresh.heapDebugEnabled    = local.heapDebugEnabled;
     fresh.cloudDebugEnabled   = local.cloudDebugEnabled;
+    fresh.telnetTimeoutSeconds = local.telnetTimeoutSeconds;
 }
 
 // ============================================================================

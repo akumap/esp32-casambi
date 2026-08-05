@@ -27,6 +27,7 @@
 #include "app_state.h"
 #include "net/time_sync.h"
 #include "net/wifi_manager.h"
+#include "net/telnet_console.h"
 #include "ble/reconnect_supervisor.h"
 #include "diagnostics.h"
 #include "cloud_refresh.h"
@@ -38,6 +39,7 @@ CasambiClient* casambiClient = nullptr;
 CasambiAPIClient* apiClient = nullptr;
 CasambiWebServer* webServer = nullptr;
 SetupPortal* setupPortal = nullptr;
+TelnetConsole* telnetConsole = nullptr;
 
 // Guards the runtime-mutable NetworkConfig String fields (see config.h). All
 // writers run on the loop task; the async_tcp task copies under this mutex.
@@ -290,6 +292,15 @@ void setup() {
                     Console.printf("\nWeb API available at: http://%s/api\n", WiFi.localIP().toString().c_str());
                 }
                 startMDNS();
+
+                // Telnet console (docs/konzept-tcp-konsole.md). Only starts
+                // listening if a Casambi network password is stored — that
+                // password derives the login token (decision E8).
+                telnetConsole = new TelnetConsole();
+                if (telnetConsole->begin()) {
+                    Console.printf("Telnet console available at: telnet://%s\n",
+                                  WiFi.localIP().toString().c_str());
+                }
             }
 
             Console.println("\nReady. Type 'help' for commands.\n");
@@ -430,6 +441,13 @@ void loop() {
             delay(250);
             ESP.restart();
         }
+    }
+
+    // Telnet console housekeeping (accept/serve the single session, drain
+    // mirrored output). Dispatches commands via handleCommand() on this same
+    // loop task, same as the physical serial line above.
+    if (telnetConsole) {
+        telnetConsole->loop();
     }
 
     delay(10);

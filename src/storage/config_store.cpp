@@ -98,6 +98,9 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     // Casambi network password (reused by `refresh`)
     doc["casambiPassword"] = config.casambiPassword;
 
+    // Telnet console idle-timeout (seconds; 0 = disabled)
+    doc["telnetTimeoutSeconds"] = config.telnetTimeoutSeconds;
+
     // Debug settings (per category)
     doc["bleDebugEnabled"]     = config.bleDebugEnabled;
     doc["casambiDebugEnabled"] = config.casambiDebugEnabled;
@@ -396,6 +399,9 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     // Load saved Casambi network password (empty for configs from before
     // this field existed, in which case `refresh` will prompt for it)
     config.casambiPassword = doc["casambiPassword"] | "";
+
+    // Load telnet idle-timeout (default for configs predating this field)
+    config.telnetTimeoutSeconds = doc["telnetTimeoutSeconds"] | (uint32_t)TELNET_TIMEOUT_DEFAULT_SECONDS;
 
     // Load debug settings (with defaults for backward compatibility)
     config.bleDebugEnabled     = doc["bleDebugEnabled"]     | false;

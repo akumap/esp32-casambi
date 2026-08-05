@@ -38,6 +38,7 @@ class CasambiClient;
 class CasambiAPIClient;
 class CasambiWebServer;
 class SetupPortal;
+class TelnetConsole;
 
 // ---------------------------------------------------------------------------
 // Core objects (defined in main.cpp)
@@ -48,6 +49,7 @@ extern CasambiClient*    casambiClient;
 extern CasambiAPIClient* apiClient;
 extern CasambiWebServer* webServer;
 extern SetupPortal*      setupPortal;
+extern TelnetConsole*    telnetConsole;
 
 // Guards the runtime-mutable NetworkConfig String fields. Non-null after
 // setup(); the helpers below tolerate a null handle so early-boot callers

@@ -21,6 +21,7 @@
 #include "ble/reconnect_supervisor.h"
 #include "net/time_sync.h"
 #include "net/wifi_manager.h"
+#include "net/telnet_console.h"
 #include "diagnostics.h"
 #include "cloud_refresh.h"
 
@@ -154,13 +155,15 @@ static void cmdHelp() {
     Console.println("help          - Show this help");
     Console.println("status        - Show detailed status");
     Console.println("blediag       - BLE troubleshooting report (config, last connect phase, scan)");
-    Console.println("refresh       - Refresh config from Casambi cloud");
+    Console.println("refresh [password] - Refresh config from Casambi cloud");
     Console.println("clearconfig   - Clear configuration (factory reset)");
     Console.println("restart       - Restart ESP32");
     Console.println("log [n]       - Show newest n event-log entries (default 30)");
     Console.println("log clear     - Erase the event log");
     Console.println("ntp status    - Show NTP server and sync state");
     Console.println("ntp set <host|ip> - Set NTP server hostname or IP (UTC)");
+    Console.println("telnet status - Show telnet console status");
+    Console.println("telnet timeout <seconds> - Idle timeout (0 = disabled)");
     Console.println();
 
     if (!ConfigStore::hasValidConfig()) {
@@ -219,8 +222,14 @@ static void cmdHelp() {
     }
 }
 
-// 'refresh' — re-download the Casambi cloud configuration.
-static void cmdRefresh() {
+// 'refresh' / 'refresh <password>' — re-download the Casambi cloud
+// configuration. This command runs from both the serial and the telnet
+// console (net/telnet_console.cpp), and only the serial console can safely
+// block waiting for typed input — so bare 'refresh' must never block: it
+// uses the saved password whenever one is stored. A password argument
+// overrides the saved one without an interactive follow-up prompt (e.g.
+// after the Casambi cloud password changed).
+static void cmdRefresh(const String& args) {
     if (!ConfigStore::hasValidConfig()) {
         Console.println("No configuration found. Run 'setup' first.");
         return;
@@ -230,28 +239,30 @@ static void cmdRefresh() {
     Console.println("This will download fresh configuration from Casambi cloud.");
     Console.println("Your local settings (auto-connect, debug) will be preserved.\n");
 
-    // Get network password: reuse the saved one if present (just press
-    // Enter), or type a new one (e.g. after the password was changed).
-    String password = networkConfig.casambiPassword;
+    String password = args;
+    password.trim();
     if (password.length() > 0) {
+        Console.println("Using the given network password.");
+    } else if (networkConfig.casambiPassword.length() > 0) {
+        password = networkConfig.casambiPassword;
         Console.println("Using saved network password.");
-        Console.println("Press Enter to keep it, or type a new password:");
     } else {
+        // No password stored yet (a config predating the persisted-password
+        // field) and none given as an argument — this can only happen on the
+        // serial console; the telnet console never starts without a stored
+        // password (net/telnet_console.h, decision E8).
         Console.println("Enter your Casambi network password:");
-    }
-    Console.print("> ");
-    while (!Serial.available()) {
-        delay(10);
-        esp_task_wdt_reset();
-    }
-    String enteredPassword = Serial.readStringUntil('\n');
-    enteredPassword.trim();
-
-    if (enteredPassword.length() > 0) {
-        password = enteredPassword;
-    } else if (password.length() == 0) {
-        Console.println("Cancelled (no password available).");
-        return;
+        Console.print("> ");
+        while (!Serial.available()) {
+            delay(10);
+            esp_task_wdt_reset();
+        }
+        password = Serial.readStringUntil('\n');
+        password.trim();
+        if (password.length() == 0) {
+            Console.println("Cancelled (no password available).");
+            return;
+        }
     }
 
     // Schedule the refresh and reboot; the download runs early at the
@@ -312,6 +323,44 @@ static void cmdNtp(const String& cmd) {
             gmtime_r(&nowSec, &tmUtc);
             strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmUtc);
             Console.printf("Current UTC: %s\n", ts);
+        }
+    }
+}
+
+// 'telnet status' / 'telnet timeout <seconds>' — network console config
+// (docs/konzept-tcp-konsole.md, decision E6a).
+static void cmdTelnet(const String& cmd) {
+    String sub = cmd.length() > 6 ? cmd.substring(7) : "";
+    sub.trim();
+    if (sub.startsWith("timeout")) {
+        String arg = sub.substring(7);
+        arg.trim();
+        long secs;
+        if (!parseSerialInt(arg, 0, TELNET_TIMEOUT_MAX_SECONDS, secs)) {
+            Console.printf("Usage: telnet timeout <seconds>  (0 = disabled, max %d)\n",
+                          TELNET_TIMEOUT_MAX_SECONDS);
+            return;
+        }
+        networkConfig.telnetTimeoutSeconds = (uint32_t)secs;
+        ConfigStore::saveNetworkConfig(networkConfig);
+        if (secs == 0) {
+            Console.println("Telnet idle timeout disabled.");
+        } else {
+            Console.printf("Telnet idle timeout set to %ld s.\n", secs);
+        }
+    } else {
+        if (telnetConsole) {
+            Console.printf("Telnet console: listening on port %d\n", TELNET_PORT);
+            Console.printf("Session: %s\n", telnetConsole->sessionActive() ? "active" : "none");
+            Console.printf("Dropped bytes (slow client): %lu\n",
+                          (unsigned long)telnetConsole->droppedBytes());
+        } else {
+            Console.println("Telnet console: not started (no network password set, or WiFi not connected)");
+        }
+        if (networkConfig.telnetTimeoutSeconds == 0) {
+            Console.println("Idle timeout: disabled");
+        } else {
+            Console.printf("Idle timeout: %lu s\n", (unsigned long)networkConfig.telnetTimeoutSeconds);
         }
     }
 }
@@ -765,8 +814,8 @@ void handleCommand(const String& cmd) {
         delay(500);
         ESP.restart();
     }
-    else if (cmd == "refresh") {
-        cmdRefresh();
+    else if (cmd == "refresh" || cmd.startsWith("refresh ")) {
+        cmdRefresh(cmd.length() > 7 ? cmd.substring(8) : "");
     }
     else if (cmd == "clearconfig") {
         ConfigStore::clearAll();
@@ -780,6 +829,9 @@ void handleCommand(const String& cmd) {
     }
     else if (cmd.startsWith("ntp")) {
         cmdNtp(cmd);
+    }
+    else if (cmd.startsWith("telnet")) {
+        cmdTelnet(cmd);
     }
     else if (cmd == "setup") {
         if (apiClient) {
