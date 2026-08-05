@@ -6,6 +6,7 @@
  */
 
 #include "encryption.h"
+#include "../console_out.h"
 #include <mbedtls/aes.h>
 
 CasambiEncryption::CasambiEncryption(const uint8_t* key) {
@@ -24,11 +25,11 @@ bool CasambiEncryption::encryptThenMac(const uint8_t* packet, size_t pktLen,
     outLen = 0;
 
     if (pktLen < headerLen) {
-        Serial.println("Encrypt: Packet too small");
+        Console.println("Encrypt: Packet too small");
         return false;
     }
     if (outCap < pktLen + CMAC_SIZE) {
-        Serial.printf("Encrypt: Output buffer too small (%u < %u)\n",
+        Console.printf("Encrypt: Output buffer too small (%u < %u)\n",
                       (unsigned)outCap, (unsigned)(pktLen + CMAC_SIZE));
         return false;
     }
@@ -53,7 +54,7 @@ bool CasambiEncryption::decryptAndVerify(const uint8_t* packet, size_t pktLen,
     outLen = 0;
 
     if (pktLen < headerLen + CMAC_SIZE) {
-        Serial.println("Decrypt: Packet too small");
+        Console.println("Decrypt: Packet too small");
         return false;
     }
 
@@ -61,7 +62,7 @@ bool CasambiEncryption::decryptAndVerify(const uint8_t* packet, size_t pktLen,
     const size_t plainLen      = ciphertextLen - headerLen;
 
     if (outCap < plainLen) {
-        Serial.printf("Decrypt: Output buffer too small (%u < %u)\n",
+        Console.printf("Decrypt: Output buffer too small (%u < %u)\n",
                       (unsigned)outCap, (unsigned)plainLen);
         return false;
     }
@@ -81,18 +82,18 @@ bool CasambiEncryption::decryptAndVerify(const uint8_t* packet, size_t pktLen,
 
     if (mac_diff != 0) {
         if (bleDebugEnabled) {
-            Serial.println("Decrypt: CMAC verification failed!");
-            Serial.print("Expected: ");
-            for (size_t i = 0; i < 8; i++) Serial.printf("%02x ", receivedMac[i]);
-            Serial.print("\nComputed: ");
-            for (size_t i = 0; i < 8; i++) Serial.printf("%02x ", computedMac[i]);
-            Serial.println();
+            Console.println("Decrypt: CMAC verification failed!");
+            Console.print("Expected: ");
+            for (size_t i = 0; i < 8; i++) Console.printf("%02x ", receivedMac[i]);
+            Console.print("\nComputed: ");
+            for (size_t i = 0; i < 8; i++) Console.printf("%02x ", computedMac[i]);
+            Console.println();
         }
         return false;
     }
 
     if (bleDebugEnabled) {
-        Serial.println("Decrypt: CMAC verified OK");
+        Console.println("Decrypt: CMAC verified OK");
     }
 
     // AES-CTR is symmetric, so decrypt == encrypt.
@@ -247,7 +248,7 @@ bool CasambiEncryption::selfTestRFC4493() {
         uint8_t mac[CMAC_SIZE];
         enc._computeCMAC(M, v.len, mac);
         if (memcmp(mac, v.mac, CMAC_SIZE) != 0) {
-            Serial.printf("CMAC self-test FAILED for message length %u\n",
+            Console.printf("CMAC self-test FAILED for message length %u\n",
                           (unsigned)v.len);
             return false;
         }

@@ -12,6 +12,7 @@
 #include <time.h>
 #include <atomic>
 #include "config.h"
+#include "console_out.h"
 #include "cloud/network_config.h"
 #include "cloud/api_client.h"
 #include "storage/config_store.h"
@@ -83,27 +84,27 @@ void setup() {
         // helpers would deliberately run unlocked on a null mutex (see
         // configLock) — restart instead of running with undefined races.
         // (EventLog is not initialized yet, so Serial is all we have here.)
-        Serial.println("FATAL: config mutex creation failed - restarting");
+        Console.println("FATAL: config mutex creation failed - restarting");
         delay(1000);
         ESP.restart();
     }
 
-    Serial.println("\n================================");
-    Serial.println("  ESP32 Casambi Controller");
-    Serial.println("================================\n");
+    Console.println("\n================================");
+    Console.println("  ESP32 Casambi Controller");
+    Console.println("================================\n");
 
     // Initialize hardware watchdog timer
     esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);  // true = panic on timeout
     esp_task_wdt_add(NULL);  // Add current task (loopTask) to WDT
-    Serial.printf("Watchdog timer: %d seconds\n", WDT_TIMEOUT_SECONDS);
+    Console.printf("Watchdog timer: %d seconds\n", WDT_TIMEOUT_SECONDS);
 
     // Log initial heap
-    Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+    Console.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
     initHeapMonitor(ESP.getFreeHeap());
 
     // Initialize filesystem
     if (!ConfigStore::init()) {
-        Serial.println("ERROR: Failed to initialize storage");
+        Console.println("ERROR: Failed to initialize storage");
         return;
     }
 
@@ -118,23 +119,23 @@ void setup() {
     // Validate the AES-CMAC implementation against the RFC 4493 test vectors
     // once at boot. A failure here means the BLE crypto cannot be trusted.
     if (CasambiEncryption::selfTestRFC4493()) {
-        Serial.println("CMAC self-test: PASS (RFC 4493 vectors)");
+        Console.println("CMAC self-test: PASS (RFC 4493 vectors)");
     } else {
-        Serial.println("CMAC self-test: FAIL — BLE crypto is broken!");
+        Console.println("CMAC self-test: FAIL — BLE crypto is broken!");
         EventLog::log(LOG_ERROR, "CMAC self-test failed (RFC 4493)");
     }
 
     // Check if we have configuration
     if (ConfigStore::hasValidConfig()) {
-        Serial.println("Configuration found - entering operation mode");
+        Console.println("Configuration found - entering operation mode");
 
         // Load config
         if (ConfigStore::loadNetworkConfig(networkConfig)) {
-            Serial.printf("Network: %s\n", networkConfig.networkName.c_str());
-            Serial.printf("Protocol: v%d\n", networkConfig.protocolVersion);
-            Serial.printf("Units: %d\n", networkConfig.units.size());
-            Serial.printf("Groups: %d\n", networkConfig.groups.size());
-            Serial.printf("Scenes: %d\n", networkConfig.scenes.size());
+            Console.printf("Network: %s\n", networkConfig.networkName.c_str());
+            Console.printf("Protocol: v%d\n", networkConfig.protocolVersion);
+            Console.printf("Units: %d\n", networkConfig.units.size());
+            Console.printf("Groups: %d\n", networkConfig.groups.size());
+            Console.printf("Scenes: %d\n", networkConfig.scenes.size());
 
             checkCasambiVersions(networkConfig);
 
@@ -164,7 +165,7 @@ void setup() {
             // Confirm the stack actually came up, and with which identity — a
             // controller that failed to start is otherwise only noticeable
             // through connect attempts that all fail for no stated reason.
-            Serial.printf("BLE: stack initialized, own address %s, target gateway %s\n",
+            Console.printf("BLE: stack initialized, own address %s, target gateway %s\n",
                           NimBLEDevice::getAddress().toString().c_str(),
                           networkConfig.autoConnectAddress.length()
                               ? networkConfig.autoConnectAddress.c_str() : "(none configured)");
@@ -177,7 +178,7 @@ void setup() {
                 [](ConnectionState newState, DisconnectReason reason) {
                     if (newState == ConnectionState::None &&
                         reason != DisconnectReason::UserRequested) {
-                        Serial.printf("*** BLE connection lost (reason=%d/%s, source=%s, phase=%s) "
+                        Console.printf("*** BLE connection lost (reason=%d/%s, source=%s, phase=%s) "
                                       "- will auto-reconnect ***\n",
                                       static_cast<int>(reason), disconnectReasonName(reason),
                                       casambiClient->getLastDisconnectSource(),
@@ -208,7 +209,7 @@ void setup() {
             casambiClient->setUnitStateCallback(
                 [](uint8_t unitId, uint8_t level, bool online, bool on) {
                     if (casambiDebugEnabled) {
-                        Serial.printf("CALLBACK: Unit %d -> level=%d online=%d on=%d\n",
+                        Console.printf("CALLBACK: Unit %d -> level=%d online=%d on=%d\n",
                                       unitId, level, online, on);
                     }
                     if (webServer) {
@@ -225,33 +226,33 @@ void setup() {
             casambiClient->setInputEventCallback(
                 [](const invocation_events::CasambiInputEvent& ev) {
                     if (!casambiDebugEnabled) return;
-                    Serial.printf("CALLBACK: 0x07 input event unit=%d index=%d label=%d type=%d",
+                    Console.printf("CALLBACK: 0x07 input event unit=%d index=%d label=%d type=%d",
                                   ev.unitId, ev.index, ev.label, static_cast<int>(ev.type));
                     if (ev.isButtonStream) {
-                        Serial.printf(" pressed=%d p=%d s=%d", ev.pressed, ev.p, ev.s);
+                        Console.printf(" pressed=%d p=%d s=%d", ev.pressed, ev.p, ev.s);
                     } else {
-                        Serial.printf(" code=0x%02x channel=%d", ev.inputCode, ev.channel);
-                        if (ev.hasValue16) Serial.printf(" value16=%d", ev.value16);
+                        Console.printf(" code=0x%02x channel=%d", ev.inputCode, ev.channel);
+                        if (ev.hasValue16) Console.printf(" value16=%d", ev.value16);
                     }
-                    Serial.println();
+                    Console.println();
                 }
             );
             casambiClient->setRawInvocationCallback(
                 [](const InvocationFrame& frame) {
                     if (!casambiDebugEnabled) return;
-                    Serial.printf("CALLBACK: 0x07 raw frame op=%d target=0x%04x origin=%d age=%d payload=%d bytes\n",
+                    Console.printf("CALLBACK: 0x07 raw frame op=%d target=0x%04x origin=%d age=%d payload=%d bytes\n",
                                   frame.opcode, frame.target, frame.origin, frame.age, frame.payloadLen);
                 }
             );
 
             // Auto-connect if enabled
             if (networkConfig.autoConnectEnabled && networkConfig.autoConnectAddress.length() > 0) {
-                Serial.printf("Auto-connecting to %s...\n", networkConfig.autoConnectAddress.c_str());
+                Console.printf("Auto-connecting to %s...\n", networkConfig.autoConnectAddress.c_str());
                 if (casambiClient->connect(networkConfig.autoConnectAddress)) {
-                    Serial.println("Auto-connect successful!");
+                    Console.println("Auto-connect successful!");
                     bleNoteConnected();
                 } else {
-                    Serial.println("Auto-connect failed. Will retry automatically.");
+                    Console.println("Auto-connect failed. Will retry automatically.");
                     bleNoteConnectAttempt();
                 }
             }
@@ -259,7 +260,7 @@ void setup() {
             // Connect to WiFi after BLE is initialized
             if (wifiLoadCachedCredentials()) {
                 const WiFiCredentials& wifiCreds = wifiCachedCredentials();
-                Serial.printf("\nConnecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
+                Console.printf("\nConnecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
                 WiFi.mode(WIFI_STA);
                 WiFi.setAutoReconnect(true);  // Enable WiFi auto-reconnect
                 WiFi.begin(wifiCreds.ssid.c_str(), wifiCreds.password.c_str());
@@ -267,45 +268,45 @@ void setup() {
                 unsigned long start = millis();
                 while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
                     delay(100);
-                    Serial.print(".");
+                    Console.print(".");
                 }
-                Serial.println();
+                Console.println();
 
                 if (WiFi.status() == WL_CONNECTED) {
-                    Serial.printf("WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+                    Console.printf("WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
                     wifiNoteConnected();
                     syncTime();  // start NTP (UTC)
                 } else {
-                    Serial.println("WiFi connection failed - will retry in background");
+                    Console.println("WiFi connection failed - will retry in background");
                 }
             } else {
-                Serial.println("No WiFi credentials found - API will not be available");
+                Console.println("No WiFi credentials found - API will not be available");
             }
 
             // Start web server if WiFi connected
             if (WiFi.status() == WL_CONNECTED && casambiClient) {
                 webServer = new CasambiWebServer(casambiClient, &networkConfig);
                 if (webServer->begin()) {
-                    Serial.printf("\nWeb API available at: http://%s/api\n", WiFi.localIP().toString().c_str());
+                    Console.printf("\nWeb API available at: http://%s/api\n", WiFi.localIP().toString().c_str());
                 }
                 startMDNS();
             }
 
-            Serial.println("\nReady. Type 'help' for commands.\n");
+            Console.println("\nReady. Type 'help' for commands.\n");
         } else {
             // hasValidConfig() said a config existed, but loading it failed
             // (corrupt beyond both live and backup copies). Do NOT dead-end in a
             // half-initialised operation mode — fall through to the setup portal
             // so the device stays recoverable, and record why.
-            Serial.println("ERROR: Failed to load configuration - entering setup mode");
+            Console.println("ERROR: Failed to load configuration - entering setup mode");
             EventLog::log(LOG_ERROR, "Config load failed; falling back to setup portal");
             setupPortal = new SetupPortal();
             setupPortal->begin();
             apiClient = new CasambiAPIClient();
-            Serial.println("(Serial fallback: type 'setup' to use the wizard instead.)\n");
+            Console.println("(Serial fallback: type 'setup' to use the wizard instead.)\n");
         }
     } else {
-        Serial.println("No configuration found - entering setup mode");
+        Console.println("No configuration found - entering setup mode");
 
         // Primary path: open SoftAP + captive portal for browser-based setup.
         setupPortal = new SetupPortal();
@@ -313,7 +314,7 @@ void setup() {
 
         // Serial wizard remains available as a fallback ('setup' command).
         apiClient = new CasambiAPIClient();
-        Serial.println("(Serial fallback: type 'setup' to use the wizard instead.)\n");
+        Console.println("(Serial fallback: type 'setup' to use the wizard instead.)\n");
     }
 }
 
@@ -358,7 +359,7 @@ void loop() {
         if (millis() - lastKeepalive >= 30000) {
             lastKeepalive = millis();
             if (!casambiClient->sendKeepalive()) {
-                Serial.println("*** BLE keepalive failed, auto-reconnect will handle it ***");
+                Console.println("*** BLE keepalive failed, auto-reconnect will handle it ***");
             }
         }
     }
@@ -409,7 +410,7 @@ void loop() {
         // only schedules the refresh and reboots; the actual download runs early
         // at the next boot (race-free). Uses the stored password.
         if (webServer->consumeRefreshRequest()) {
-            Serial.println("\n*** Cloud refresh requested via API ***");
+            Console.println("\n*** Cloud refresh requested via API ***");
             requestCloudRefresh(networkConfig.casambiPassword);  // never returns
         }
 
@@ -425,7 +426,7 @@ void loop() {
         // async handler) so the HTTP response is flushed first. The short delay
         // gives the TCP task time to send the queued 200 before the reset.
         if (webServer->consumeRebootRequest()) {
-            Serial.println("\n*** Reboot requested via API ***");
+            Console.println("\n*** Reboot requested via API ***");
             delay(250);
             ESP.restart();
         }

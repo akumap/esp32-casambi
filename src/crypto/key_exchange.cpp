@@ -3,6 +3,7 @@
  */
 
 #include "key_exchange.h"
+#include "../console_out.h"
 #include <mbedtls/ecdh.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/entropy.h>
@@ -39,7 +40,7 @@ bool ECDHKeyExchange::generateKeyPair() {
     int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
                                      (const unsigned char*)pers, strlen(pers));
     if (ret != 0) {
-        Serial.printf("ECDH: RNG seed failed: %d\n", ret);
+        Console.printf("ECDH: RNG seed failed: %d\n", ret);
         mbedtls_ctr_drbg_free(&ctr_drbg);
         mbedtls_entropy_free(&entropy);
         return false;
@@ -48,7 +49,7 @@ bool ECDHKeyExchange::generateKeyPair() {
     // Setup SECP256R1 curve
     ret = mbedtls_ecp_group_load(&ctx->grp, MBEDTLS_ECP_DP_SECP256R1);
     if (ret != 0) {
-        Serial.printf("ECDH: Group load failed: %d\n", ret);
+        Console.printf("ECDH: Group load failed: %d\n", ret);
         mbedtls_ctr_drbg_free(&ctr_drbg);
         mbedtls_entropy_free(&entropy);
         return false;
@@ -58,7 +59,7 @@ bool ECDHKeyExchange::generateKeyPair() {
     ret = mbedtls_ecdh_gen_public(&ctx->grp, &ctx->d, &ctx->Q,
                                    mbedtls_ctr_drbg_random, &ctr_drbg);
     if (ret != 0) {
-        Serial.printf("ECDH: Key generation failed: %d\n", ret);
+        Console.printf("ECDH: Key generation failed: %d\n", ret);
         mbedtls_ctr_drbg_free(&ctr_drbg);
         mbedtls_entropy_free(&entropy);
         return false;
@@ -69,7 +70,7 @@ bool ECDHKeyExchange::generateKeyPair() {
 
     _keyPairGenerated = true;
     if (bleDebugEnabled) {
-        Serial.println("ECDH: Key pair generated");
+        Console.println("ECDH: Key pair generated");
     }
     return true;
 }
@@ -90,7 +91,7 @@ bool ECDHKeyExchange::setDevicePublicKey(const uint8_t* x, const uint8_t* y) {
     mbedtls_mpi_init(&x_mpi);
     ret = mbedtls_mpi_read_binary_le(&x_mpi, x, ECDH_KEY_SIZE);
     if (ret != 0) {
-        Serial.printf("ECDH: Failed to read X: %d\n", ret);
+        Console.printf("ECDH: Failed to read X: %d\n", ret);
         mbedtls_mpi_free(&x_mpi);
         mbedtls_ecp_point_free(&Qp);
         return false;
@@ -101,7 +102,7 @@ bool ECDHKeyExchange::setDevicePublicKey(const uint8_t* x, const uint8_t* y) {
     mbedtls_mpi_init(&y_mpi);
     ret = mbedtls_mpi_read_binary_le(&y_mpi, y, ECDH_KEY_SIZE);
     if (ret != 0) {
-        Serial.printf("ECDH: Failed to read Y: %d\n", ret);
+        Console.printf("ECDH: Failed to read Y: %d\n", ret);
         mbedtls_mpi_free(&x_mpi);
         mbedtls_mpi_free(&y_mpi);
         mbedtls_ecp_point_free(&Qp);
@@ -118,7 +119,7 @@ bool ECDHKeyExchange::setDevicePublicKey(const uint8_t* x, const uint8_t* y) {
     // Verify point is on curve
     ret = mbedtls_ecp_check_pubkey(&ctx->grp, &Qp);
     if (ret != 0) {
-        Serial.printf("ECDH: Invalid public key: %d\n", ret);
+        Console.printf("ECDH: Invalid public key: %d\n", ret);
         mbedtls_mpi_free(&x_mpi);
         mbedtls_mpi_free(&y_mpi);
         mbedtls_ecp_point_free(&Qp);
@@ -134,7 +135,7 @@ bool ECDHKeyExchange::setDevicePublicKey(const uint8_t* x, const uint8_t* y) {
 
     _deviceKeySet = true;
     if (bleDebugEnabled) {
-        Serial.println("ECDH: Device public key set");
+        Console.println("ECDH: Device public key set");
     }
     return true;
 }
@@ -169,7 +170,7 @@ std::vector<uint8_t> ECDHKeyExchange::deriveTransportKey() {
     std::vector<uint8_t> result(AES_KEY_SIZE, 0);
 
     if (!_keyPairGenerated || !_deviceKeySet || !_ecdh_context) {
-        Serial.println("ECDH: Cannot derive key - not ready");
+        Console.println("ECDH: Cannot derive key - not ready");
         return result;
     }
 
@@ -183,7 +184,7 @@ std::vector<uint8_t> ECDHKeyExchange::deriveTransportKey() {
                                            &ctx->Qp, &ctx->d,
                                            nullptr, nullptr);
     if (ret != 0) {
-        Serial.printf("ECDH: Compute shared secret failed: %d\n", ret);
+        Console.printf("ECDH: Compute shared secret failed: %d\n", ret);
         mbedtls_mpi_free(&shared_secret);
         return result;
     }
@@ -220,7 +221,7 @@ std::vector<uint8_t> ECDHKeyExchange::deriveTransportKey() {
     if (!secret_reversed.empty()) memset(secret_reversed.data(), 0, secret_reversed.size());
 
     if (bleDebugEnabled) {
-        Serial.println("ECDH: Transport key derived");
+        Console.println("ECDH: Transport key derived");
     }
     return result;
 }

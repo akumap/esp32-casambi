@@ -3,6 +3,7 @@
  */
 
 #include "event_log.h"
+#include "../console_out.h"
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <esp_system.h>
@@ -157,7 +158,7 @@ void EventLog::begin() {
             }
             xSemaphoreGive(_mutex);
         }
-        Serial.printf("EventLog: recovered %u unpersisted RTC entries from previous boot\n", count);
+        Console.printf("EventLog: recovered %u unpersisted RTC entries from previous boot\n", count);
     }
 
     // --- (Re)initialise RTC ring for this boot ---
@@ -210,14 +211,14 @@ void EventLog::log(uint8_t level, const char* fmt, ...) {
     if (n < LOG_MSG_MAX) memset(e.msg + n, 0, LOG_MSG_MAX - n);
 
     // Always echo to serial for live visibility.
-    Serial.printf("[LOG/%s] %.*s\n", levelName(level), n, buf);
+    Console.printf("[LOG/%s] %.*s\n", levelName(level), n, buf);
 
     // Without the mutex we must not touch the shared ring/file state at all:
     // a concurrent writer would corrupt the RTC indices and interleave file
     // appends (torn records). The serial echo above already happened; the
     // entry is lost from the persistent log in this (rare) case.
     if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
-        Serial.println("[LOG] dropped (mutex busy)");
+        Console.println("[LOG] dropped (mutex busy)");
         return;
     }
 
@@ -286,7 +287,7 @@ void EventLog::clear() {
     rtcLogPending = 0;
 
     if (locked) xSemaphoreGive(_mutex);
-    Serial.println("EventLog: cleared");
+    Console.println("EventLog: cleared");
 }
 
 // JSON-escape a message and write it (without surrounding quotes).

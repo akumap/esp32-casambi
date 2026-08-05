@@ -5,6 +5,7 @@
 #include "webserver.h"
 #include "dashboard.h"      // DASHBOARD_HTML — the status page served at GET /
 #include "../config.h"
+#include "../console_out.h"
 #include "../log/event_log.h"
 #include "../storage/config_store.h"
 #include "../ble/packet.h"   // packetParseStats() for /api/status diagnostics
@@ -31,7 +32,7 @@
 #  define WS_HAS_EXCEPTIONS 0
 #endif
 
-#define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
+#define WEB_LOG(...) do { if (webDebugEnabled) Console.printf(__VA_ARGS__); } while(0)
 
 // RAII hold on g_configMutex.
 //
@@ -108,7 +109,7 @@ CasambiWebServer::~CasambiWebServer() {
 
 bool CasambiWebServer::begin(uint16_t port) {
     if (_running) {
-        Serial.println("Web: Server already running");
+        Console.println("Web: Server already running");
         return true;
     }
 
@@ -118,7 +119,7 @@ bool CasambiWebServer::begin(uint16_t port) {
     // password is stored → authentication stays disabled (backward compatible).
     _deriveApiToken();
     if (_apiToken.isEmpty()) {
-        Serial.println("Web: API auth DISABLED (no Casambi password stored)");
+        Console.println("Web: API auth DISABLED (no Casambi password stored)");
     } else {
         WEB_LOG("Web: API auth enabled (X-API-Key required)\n");
     }
@@ -163,7 +164,7 @@ void CasambiWebServer::stop() {
             xQueueReset(_broadcastQueue);
         }
 
-        Serial.println("Web: Server stopped");
+        Console.println("Web: Server stopped");
     }
 }
 
@@ -323,7 +324,7 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
         (type == WS_EVT_CONNECT || type == WS_EVT_DISCONNECT || type == WS_EVT_ERROR)) {
         const char* ev = (type == WS_EVT_CONNECT) ? "CONNECT"
                        : (type == WS_EVT_DISCONNECT) ? "DISCONN" : "ERROR";
-        Serial.printf("WSDBG %s id=%u count=%u free=%u largest=%u\n",
+        Console.printf("WSDBG %s id=%u count=%u free=%u largest=%u\n",
                       ev, client->id(), (unsigned)server->count(),
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     }
