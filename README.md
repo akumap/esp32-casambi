@@ -15,6 +15,7 @@ An offline BLE controller for Casambi lighting systems, running on ESP32. Contro
 - ✅ **HTTP REST API** — Control and monitor lights from any home automation system
 - ✅ **WebSocket Push** — Real-time state push to connected clients; no polling required
 - ✅ **Built-in Web Interface** — `http://<esp32-ip>/` shows both link states (Casambi/Bluetooth and Wi-Fi/API) plus every unit with its generic control names and live values, and controls them: on/off, a slider per control, and a warm→cold Kelvin slider for colour temperature; responsive for phone and tablet, portrait and landscape
+- ✅ **Network Console** — The serial console is also reachable over Telnet (port 23), token-authenticated, for debugging and `refresh` without a cable — see [Network Console (Telnet)](#network-console-telnet)
 - ✅ **Real-Time State Tracking** — Receives status broadcasts from the Casambi mesh; current brightness, color temperature, and vertical distribution always up to date, even when lights are controlled via the Casambi app or other controllers
 - ✅ **Complete Protocol Support** — Full Casambi Evolution protocol implementation (ECDH, AES-CTR, CMAC)
 - ✅ **Generic Capability Detection** — Unit capabilities (dimmer, CCT, vertical) automatically derived from cloud API; no hardcoding of fixture types needed
@@ -221,7 +222,11 @@ debug web on/off             # HTTP API request logging
 debug parse on/off           # Protocol parse output with raw bytes (for analysis)
 debug heap on/off            # Heap monitoring output
 debug cloud on/off           # Dump raw cloud config on refresh (AES keys redacted)
-refresh                      # Re-download config from Casambi cloud
+refresh [password]           # Re-download config from Casambi cloud. Uses the
+                             # saved password if none is given; a given password
+                             # overrides it without an interactive prompt (the
+                             # command never blocks waiting for typed input, so
+                             # it also works over the telnet console below).
                              # (with 'debug cloud on', prints the raw JSON for analysis)
 clearconfig                  # Factory reset
 ```
@@ -232,6 +237,48 @@ clearconfig                  # Factory reset
 list units         # Show all units with ON/OFF state
 list groups        # Show all groups with IDs
 list scenes        # Show all scenes with IDs
+```
+
+#### Network Console (Telnet)
+
+The serial console above is also reachable over the network with a standard
+Telnet client — useful when the device is mounted somewhere for good BLE
+reception rather than sitting next to the machine you're debugging from
+(design rationale: `docs/konzept-tcp-konsole.md`). It mirrors the exact same
+commands and output as the serial console; **`setup` and `wifi set` are
+serial-only** (they would leak WiFi/Casambi credentials over an unencrypted
+connection and drive the same blocking BLE scan the setup wizard uses).
+**Flashing still requires a USB/serial connection** — this does not replace
+it.
+
+The console starts automatically once a Casambi network password is stored
+(so a login token exists — see below) and Wi-Fi is connected, listening on
+**port 23**, the Telnet default. In PuTTY: *Session* → enter the device's
+hostname/IP → *Connection type: Telnet* → *Open*.
+
+**Login uses the same derived token as the REST API** (see
+[Authentication](#authentication) above), not the raw Casambi network
+password — so the Casambi cloud credential itself never goes out over the
+unencrypted Telnet connection:
+
+```
+Password: <apiToken>   # SHA-256("casambi-api:" + <casambi-network-password>), lowercase hex
+```
+
+Save the computed token in the PuTTY session profile so you only type it
+once. Three failed attempts close the connection. Only one session is
+allowed at a time — a second connection attempt is refused while one is
+active.
+
+```
+telnet status              - Show whether the console is listening, whether a
+                             session is active, and dropped-byte count for a
+                             client that couldn't keep up with the output
+telnet timeout <seconds>   - Idle timeout before an inactive session is closed
+                             (default 900s / 15 min); 0 disables it, e.g. for
+                             an overnight capture. Measured from the last
+                             complete command line, not the last byte — a
+                             client's own Telnet keepalive does not reset it.
 ```
 
 -----
