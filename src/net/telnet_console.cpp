@@ -122,6 +122,8 @@ void TelnetConsole::_beginSession(WiFiClient client) {
     _loginAttempts = 0;
     _passwordMode = true;
     _parser.reset();
+    _pendingLen = _pendingSent = 0;   // no leftovers from a previous session
+    _lastOutByte = '\n';
     _lastActivityMs = millis();
     _lastNopMs = millis();
 
@@ -140,18 +142,27 @@ void TelnetConsole::_endSession() {
     _state = State::Idle;
     _passwordMode = false;
     _parser.reset();
+    _pendingLen = _pendingSent = 0;
 }
 
 void TelnetConsole::_handleLine() {
+    // Deliberately no _parser.reset() here: the parser starts a fresh line by
+    // itself once new content arrives (see telnet_line.h). Resetting would
+    // clear its "just saw CR" state, so the LF of a client's CR LF would no
+    // longer be recognised as the second half of that pair and would fire a
+    // second, EMPTY line -- one spurious command, and one extra prompt, after
+    // every single command. reset() belongs at session start/end only.
     String line(_parser.line());
-    _parser.reset();
 
     if (_state == State::AwaitingPassword) {
         line.trim();
-        // Login uses the SAME derived token as REST/WebSocket auth, never
-        // the raw Casambi password — see decision E1.
+        // What the user types IS the token (the 64-char hex digest), compared
+        // as-is against the stored one — NOT hashed again. Deriving from the
+        // input and comparing digests would instead require typing the raw
+        // Casambi password, which is exactly the cloud credential decision E1
+        // exists to keep off an unencrypted Telnet connection.
         String expected = ApiToken::derive(networkConfig.casambiPassword);
-        if (!expected.isEmpty() && ApiToken::constantTimeEquals(ApiToken::derive(line), expected)) {
+        if (!expected.isEmpty() && ApiToken::constantTimeEquals(line, expected)) {
             _state = State::Authenticated;
             _passwordMode = false;
             // Scrollback replay: start at the oldest byte still buffered so a
@@ -209,6 +220,16 @@ void TelnetConsole::_drainOutput() {
         // watchdog (docs/konzept-tcp-konsole.md, 4.2 point 2 / E7).
         if (!socketWritable(_client.fd())) return;
 
+        // Finish the previous chunk first. write() reports what the socket
+        // actually accepted (it sends with MSG_DONTWAIT under the hood), which
+        // can be less than requested even right after select() said "writable".
+        if (_pendingSent < _pendingLen) {
+            _pendingSent += _client.write(_pending + _pendingSent,
+                                          _pendingLen - _pendingSent);
+            if (_pendingSent < _pendingLen) return;   // still full; resume later
+        }
+        _pendingLen = _pendingSent = 0;
+
         uint8_t buf[128];
         uint64_t dropped = 0;
         size_t n = consoleRingRead(&_outCursor, buf, sizeof(buf), &dropped);
@@ -219,18 +240,19 @@ void TelnetConsole::_drainOutput() {
         }
         if (n == 0) return;   // ring buffer drained
 
-        // write() reports what the socket actually accepted (it sends with
-        // MSG_DONTWAIT under the hood), which can be less than requested even
-        // after select() said "writable". Rewind the cursor over the unsent
-        // tail so it is retried on the next loop() iteration --
-        // consoleRingRead() has already advanced the cursor past everything it
-        // copied out, so without this the remainder would be dropped on the
-        // floor, unsent and unreported.
-        size_t sent = _client.write(buf, n);
-        if (sent < n) {
-            _outCursor -= (n - sent);
-            return;           // socket full for now; continue next iteration
+        // Expand bare \n to \r\n. Telnet NVT ends a line with CR LF, and most
+        // of this firmware's output is printf("...\n") -- only Print::println()
+        // already emits both. Sent verbatim, every such line staircases on a
+        // terminal that takes LF literally. _lastOutByte carries the previous
+        // byte across chunk boundaries so an existing \r\n is not turned into
+        // \r\r\n when the pair happens to straddle two chunks.
+        for (size_t i = 0; i < n; i++) {
+            const uint8_t c = buf[i];
+            if (c == '\n' && _lastOutByte != '\r') _pending[_pendingLen++] = '\r';
+            _pending[_pendingLen++] = c;
+            _lastOutByte = c;
         }
+
         budget -= (budget < n) ? budget : n;
     }
 }

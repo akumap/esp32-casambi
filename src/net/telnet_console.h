@@ -65,6 +65,16 @@ private:
     uint64_t _outCursor = 0;
     uint64_t _totalDropped = 0;
 
+    // One ring-buffer chunk, newline-expanded for Telnet (see _drainOutput).
+    // Holding the expanded bytes here until the socket has taken all of them
+    // is what keeps a partial write simple: the ring cursor advances once,
+    // when the chunk is read, so no mapping from sent bytes back to source
+    // bytes is ever needed. Sized for the worst case, every byte a newline.
+    uint8_t _pending[256];
+    size_t  _pendingLen = 0;
+    size_t  _pendingSent = 0;
+    uint8_t _lastOutByte = '\n';   // for CR-LF collapsing across chunks
+
     unsigned long _lastActivityMs = 0;   // last complete command line (E6a)
     unsigned long _lastNopMs = 0;        // last liveness probe sent (E6b)
 };

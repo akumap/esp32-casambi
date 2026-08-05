@@ -281,7 +281,7 @@ static void cmdLog(const String& cmd) {
         int n = sub.length() > 0 ? sub.toInt() : 30;
         if (n <= 0) n = 30;
         Console.printf("\n=== Event Log (newest %d) ===\n", n);
-        EventLog::writeText(Serial, n);
+        EventLog::writeText(Console, n);
         Console.println();
     }
 }
