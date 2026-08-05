@@ -3,6 +3,7 @@
  */
 
 #include "api_client.h"
+#include "../console_out.h"
 #include "config_invariants.h"
 #include <ArduinoJson.h>
 #include <utility>   // std::move for the transactional config commit
@@ -26,7 +27,7 @@ void CasambiAPIClient::_beginRequest(const String& url) {
     // builds where the CA bundle is unavailable.
     static bool warned = false;
     if (!warned) {
-        Serial.println("API: WARNING - TLS certificate validation DISABLED "
+        Console.println("API: WARNING - TLS certificate validation DISABLED "
                        "(CASAMBI_TLS_INSECURE)");
         warned = true;
     }
@@ -44,24 +45,24 @@ CasambiAPIClient::~CasambiAPIClient() {
 }
 
 bool CasambiAPIClient::connectWiFi(const String& ssid, const String& password) {
-    Serial.printf("Connecting to WiFi: %s\n", ssid.c_str());
+    Console.printf("Connecting to WiFi: %s\n", ssid.c_str());
 
     WiFi.begin(ssid.c_str(), password.c_str());
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
         delay(500);
-        Serial.print(".");
+        Console.print(".");
     }
-    Serial.println();
+    Console.println();
 
     if (WiFi.status() != WL_CONNECTED) {
         _lastError = "WiFi connection timeout";
         return false;
     }
 
-    Serial.println("WiFi connected");
-    Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
+    Console.println("WiFi connected");
+    Console.printf("IP: %s\n", WiFi.localIP().toString().c_str());
     return true;
 }
 
@@ -81,7 +82,7 @@ bool CasambiAPIClient::getNetworkId(const String& uuid, String& networkId) {
 
     String url = String(CASAMBI_API_BASE) + API_NETWORK_UUID_PATH + uuid;
 
-    Serial.printf("API: GET %s\n", url.c_str());
+    Console.printf("API: GET %s\n", url.c_str());
 
     _beginRequest(url);
     _http.setTimeout(API_REQUEST_TIMEOUT_MS);
@@ -90,7 +91,7 @@ bool CasambiAPIClient::getNetworkId(const String& uuid, String& networkId) {
 
     if (httpCode != 200) {
         _lastError = "HTTP " + String(httpCode);
-        Serial.printf("API: Failed: %s\n", _lastError.c_str());
+        Console.printf("API: Failed: %s\n", _lastError.c_str());
         _http.end();
         return false;
     }
@@ -104,7 +105,7 @@ bool CasambiAPIClient::getNetworkId(const String& uuid, String& networkId) {
 
     if (error) {
         _lastError = "JSON parse error: " + String(error.c_str());
-        Serial.printf("API: %s\n", _lastError.c_str());
+        Console.printf("API: %s\n", _lastError.c_str());
         return false;
     }
 
@@ -114,7 +115,7 @@ bool CasambiAPIClient::getNetworkId(const String& uuid, String& networkId) {
     }
 
     networkId = doc["id"].as<String>();
-    Serial.printf("API: Network ID: %s\n", networkId.c_str());
+    Console.printf("API: Network ID: %s\n", networkId.c_str());
 
     return true;
 }
@@ -127,7 +128,7 @@ bool CasambiAPIClient::createSession(const String& networkId, const String& pass
 
     String url = String(CASAMBI_API_BASE) + API_NETWORK_SESSION_PATH + networkId + "/session";
 
-    Serial.printf("API: POST %s\n", url.c_str());
+    Console.printf("API: POST %s\n", url.c_str());
 
     // Build request body
     JsonDocument doc;
@@ -148,9 +149,9 @@ bool CasambiAPIClient::createSession(const String& networkId, const String& pass
         if (httpCode == 401 || httpCode == 403) {
             _lastError += " (Invalid password)";
         }
-        Serial.printf("API: Failed: %s\n", _lastError.c_str());
+        Console.printf("API: Failed: %s\n", _lastError.c_str());
         String errorBody = _http.getString();
-        Serial.printf("API: Response: %s\n", errorBody.c_str());
+        Console.printf("API: Response: %s\n", errorBody.c_str());
         _http.end();
         return false;
     }
@@ -164,7 +165,7 @@ bool CasambiAPIClient::createSession(const String& networkId, const String& pass
 
     if (error) {
         _lastError = "JSON parse error: " + String(error.c_str());
-        Serial.printf("API: %s\n", _lastError.c_str());
+        Console.printf("API: %s\n", _lastError.c_str());
         return false;
     }
 
@@ -178,7 +179,7 @@ bool CasambiAPIClient::createSession(const String& networkId, const String& pass
     // pasted into support tickets or forwarded to network loggers, and the token
     // is a reusable credential for the duration of its validity. Log only that a
     // session was created, plus its length for coarse correlation.
-    Serial.printf("API: Session created (token length %u)\n",
+    Console.printf("API: Session created (token length %u)\n",
                   (unsigned)sessionToken.length());
 
     return true;
@@ -192,7 +193,7 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
 
     String url = String(CASAMBI_API_BASE) + API_NETWORK_CONFIG_PATH + networkId + "/";
 
-    Serial.printf("API: PUT %s\n", url.c_str());
+    Console.printf("API: PUT %s\n", url.c_str());
 
     // Build request body
     JsonDocument doc;
@@ -212,9 +213,9 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
 
     if (httpCode != 200) {
         _lastError = "HTTP " + String(httpCode);
-        Serial.printf("API: Failed: %s\n", _lastError.c_str());
+        Console.printf("API: Failed: %s\n", _lastError.c_str());
         String errorBody = _http.getString();
-        Serial.printf("API: Response: %s\n", errorBody.c_str());
+        Console.printf("API: Response: %s\n", errorBody.c_str());
         _http.end();
         return false;
     }
@@ -222,7 +223,7 @@ bool CasambiAPIClient::fetchNetworkConfig(const String& networkId, const String&
     String response = _http.getString();
     _http.end();
 
-    Serial.printf("API: Received %d bytes\n", response.length());
+    Console.printf("API: Received %d bytes\n", response.length());
 
     // Optional raw dump for protocol analysis (fixture modes/settings, capability
     // signals). AES keys are redacted — see _dumpRedactedConfig. Opt-in via
@@ -269,7 +270,7 @@ void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
         uint8_t stateLength = 0;
         String model, mode;
         if (!_fetchFixtureControls(unit.type, controls, stateLength, model, mode)) {
-            Serial.printf("Fixture: type %u fetch/parse failed - keeping heuristic capabilities\n",
+            Console.printf("Fixture: type %u fetch/parse failed - keeping heuristic capabilities\n",
                           unit.type);
             continue;
         }
@@ -290,14 +291,14 @@ void CasambiAPIClient::_fetchFixtures(NetworkConfig& config) {
             if (u.type != unit.type) continue;
             // Generic: list the actual controls; keep the heuristic flags in
             // parentheses purely as a verification cross-check.
-            Serial.printf("Fixture: unit %d (type %u) '%s' [%s] controls=[",
+            Console.printf("Fixture: unit %d (type %u) '%s' [%s] controls=[",
                           u.deviceId, u.type, model.c_str(), mode.c_str());
             for (size_t i = 0; i < controls.size(); i++) {
-                Serial.printf("%s%s", i ? "," : "", controls[i].typeName.c_str());
+                Console.printf("%s%s", i ? "," : "", controls[i].typeName.c_str());
                 if (controls[i].typeName == "temperature" && controls[i].max > controls[i].min)
-                    Serial.printf("(%u-%uK)", controls[i].min, controls[i].max);
+                    Console.printf("(%u-%uK)", controls[i].min, controls[i].max);
             }
-            Serial.printf("]  (heuristic was vertical=%d cct=%d)\n", u.hasVertical, u.hasCCT);
+            Console.printf("]  (heuristic was vertical=%d cct=%d)\n", u.hasVertical, u.hasCCT);
 
             u.controls     = controls;
             u.stateLength  = stateLength;
@@ -320,7 +321,7 @@ bool CasambiAPIClient::_fetchFixtureControls(uint16_t type, std::vector<UnitCont
     }
 
     String url = String(CASAMBI_API_BASE) + API_FIXTURE_PATH + String(type);
-    Serial.printf("API: GET %s\n", url.c_str());
+    Console.printf("API: GET %s\n", url.c_str());
 
     // The fixture endpoint is public (no session header — see casambi-bt).
     _beginRequest(url);
@@ -328,7 +329,7 @@ bool CasambiAPIClient::_fetchFixtureControls(uint16_t type, std::vector<UnitCont
 
     int httpCode = _http.GET();
     if (httpCode != 200) {
-        Serial.printf("API: Fixture %u -> HTTP %d\n", type, httpCode);
+        Console.printf("API: Fixture %u -> HTTP %d\n", type, httpCode);
         _http.end();
         return false;
     }
@@ -338,18 +339,18 @@ bool CasambiAPIClient::_fetchFixtureControls(uint16_t type, std::vector<UnitCont
 
     // Raw dump for analysis (fixture defs carry no secrets, so no redaction).
     if (cloudDebugEnabled) {
-        Serial.printf("API: ---- raw fixture %u (%d bytes) ----\n", type, response.length());
-        Serial.println(response);
-        Serial.println("API: ---- end raw fixture ----");
+        Console.printf("API: ---- raw fixture %u (%d bytes) ----\n", type, response.length());
+        Console.println(response);
+        Console.println("API: ---- end raw fixture ----");
     }
 
     JsonDocument doc;
     if (deserializeJson(doc, response)) {
-        Serial.printf("API: Fixture %u JSON parse error\n", type);
+        Console.printf("API: Fixture %u JSON parse error\n", type);
         return false;
     }
     if (!doc["controls"].is<JsonArrayConst>()) {
-        Serial.printf("API: Fixture %u has no controls array\n", type);
+        Console.printf("API: Fixture %u has no controls array\n", type);
         return false;
     }
 
@@ -383,7 +384,7 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
 
     if (error) {
         _lastError = "JSON parse error: " + String(error.c_str());
-        Serial.printf("Parse: %s\n", _lastError.c_str());
+        Console.printf("Parse: %s\n", _lastError.c_str());
         return false;
     }
 
@@ -405,7 +406,7 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
         return false;
     }
 
-    Serial.printf("Parse: Network '%s', protocol v%d, revision %d\n",
+    Console.printf("Parse: Network '%s', protocol v%d, revision %d\n",
                   config.networkName.c_str(), config.protocolVersion, config.revision);
 
     // Sub-parser contract: a MISSING optional section is fine (Classic
@@ -427,31 +428,31 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
         JsonObjectConst keyStore = network["keyStore"];
         if (!keyStore["keys"].is<JsonArrayConst>()) {
             _lastError = "keyStore present but has no keys array";
-            Serial.printf("Parse: FAILED - %s\n", _lastError.c_str());
+            Console.printf("Parse: FAILED - %s\n", _lastError.c_str());
             return false;
         }
         if (!_parseKeys(keyStore["keys"], config)) {
-            Serial.printf("Parse: FAILED keys - %s\n", _lastError.c_str());
+            Console.printf("Parse: FAILED keys - %s\n", _lastError.c_str());
             return false;
         }
     } else {
-        Serial.println("Parse: No keyStore (Classic network?)");
+        Console.println("Parse: No keyStore (Classic network?)");
     }
 
     // Parse units (before groups — group members are validated against them)
     if (network["units"].is<JsonArrayConst>()) {
         if (!_parseUnits(network["units"], config)) {
-            Serial.printf("Parse: FAILED units - %s\n", _lastError.c_str());
+            Console.printf("Parse: FAILED units - %s\n", _lastError.c_str());
             return false;
         }
     } else {
-        Serial.println("Parse: No units array (empty network?)");
+        Console.println("Parse: No units array (empty network?)");
     }
 
     // Parse scenes
     if (network["scenes"].is<JsonArrayConst>()) {
         if (!_parseScenes(network["scenes"], config)) {
-            Serial.printf("Parse: FAILED scenes - %s\n", _lastError.c_str());
+            Console.printf("Parse: FAILED scenes - %s\n", _lastError.c_str());
             return false;
         }
     }
@@ -459,7 +460,7 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
     // Parse groups (from grid structure)
     if (network["grid"].is<JsonObjectConst>()) {
         if (!_parseGroups(network["grid"], config)) {
-            Serial.printf("Parse: FAILED groups - %s\n", _lastError.c_str());
+            Console.printf("Parse: FAILED groups - %s\n", _lastError.c_str());
             return false;
         }
     }
@@ -477,11 +478,11 @@ bool CasambiAPIClient::_parseNetworkConfig(const String& json, NetworkConfig& co
     if (inv != cloudval::CLOUD_OK) {
         _lastError = String(cloudval::cloudInvariantName(inv)) +
                      " (id " + String(badId) + ")";
-        Serial.printf("Parse: FAILED invariants - %s\n", _lastError.c_str());
+        Console.printf("Parse: FAILED invariants - %s\n", _lastError.c_str());
         return false;
     }
 
-    Serial.printf("Parse: Complete - %d keys, %d units, %d groups, %d scenes\n",
+    Console.printf("Parse: Complete - %d keys, %d units, %d groups, %d scenes\n",
                   config.keys.size(), config.units.size(),
                   config.groups.size(), config.scenes.size());
 
@@ -515,7 +516,7 @@ bool CasambiAPIClient::_parseKeys(const JsonArrayConst& keysArray, NetworkConfig
         }
 
         config.keys.push_back(key);
-        Serial.printf("Parse: Key '%s' (id=%d, role=%d)\n", key.name.c_str(), key.id, key.role);
+        Console.printf("Parse: Key '%s' (id=%d, role=%d)\n", key.name.c_str(), key.id, key.role);
     }
 
     if (config.keys.empty()) {
@@ -595,7 +596,7 @@ bool CasambiAPIClient::_parseUnits(const JsonArrayConst& unitsArray, NetworkConf
         if (unit.hasVertical) caps += "+vertical";
         if (unit.hasCCT) caps += "+cct(" + String(unit.cctMinKelvin) + "-" + String(unit.cctMaxKelvin) + "K)";
 
-        Serial.printf("Parse: Unit [%d] '%s' (type=%d, ch=%d, %s)\n",
+        Console.printf("Parse: Unit [%d] '%s' (type=%d, ch=%d, %s)\n",
                       unit.deviceId, unit.name.c_str(), unit.type,
                       unit.numChannels, caps.c_str());
     }
@@ -647,7 +648,7 @@ bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfi
                 }
                 uint8_t unitId = subCell["unit"].as<uint8_t>();
                 if (!config.getUnitById(unitId)) {
-                    Serial.printf("Parse: Group [%d] drops unknown unit %d (stale reference)\n",
+                    Console.printf("Parse: Group [%d] drops unknown unit %d (stale reference)\n",
                                   group.groupId, unitId);
                     continue;
                 }
@@ -656,7 +657,7 @@ bool CasambiAPIClient::_parseGroups(const JsonObjectConst& gridObj, NetworkConfi
         }
 
         config.groups.push_back(group);
-        Serial.printf("Parse: Group [%d] '%s' (%d units)\n",
+        Console.printf("Parse: Group [%d] '%s' (%d units)\n",
                       group.groupId, group.name.c_str(), group.unitIds.size());
     }
 
@@ -678,7 +679,7 @@ bool CasambiAPIClient::_parseScenes(const JsonArrayConst& scenesArray, NetworkCo
         scene.name = sceneObj["name"].as<String>();
 
         config.scenes.push_back(scene);
-        Serial.printf("Parse: Scene [%d] '%s'\n", scene.sceneId, scene.name.c_str());
+        Console.printf("Parse: Scene [%d] '%s'\n", scene.sceneId, scene.name.c_str());
     }
 
     return true;
@@ -717,7 +718,7 @@ void CasambiAPIClient::_dumpRedactedConfig(const String& json) {
     static const char* NEEDLE = "\"key\"";
     static const size_t NLEN  = 5;
 
-    Serial.println("API: ---- raw cloud config (AES keys redacted) ----");
+    Console.println("API: ---- raw cloud config (AES keys redacted) ----");
 
     // Emit verbatim in chunks; only the 32-hex value after a "key" field is
     // swapped for "***". `seg` marks the start of the not-yet-flushed run.
@@ -733,8 +734,8 @@ void CasambiAPIClient::_dumpRedactedConfig(const String& json) {
                 while (valEnd < n && p[valEnd] != '"') valEnd++;
                 if (valEnd < n && _looksLikeAesKeyHex(p + valStart, valEnd - valStart)) {
                     // Flush up to and including the opening quote, then redact.
-                    Serial.write(reinterpret_cast<const uint8_t*>(p + seg), valStart - seg);
-                    Serial.print("***");
+                    Console.write(reinterpret_cast<const uint8_t*>(p + seg), valStart - seg);
+                    Console.print("***");
                     seg = valEnd;      // resume at the closing quote
                     i = valEnd;
                     continue;
@@ -744,8 +745,8 @@ void CasambiAPIClient::_dumpRedactedConfig(const String& json) {
         i++;
     }
     if (seg < n) {
-        Serial.write(reinterpret_cast<const uint8_t*>(p + seg), n - seg);
+        Console.write(reinterpret_cast<const uint8_t*>(p + seg), n - seg);
     }
-    Serial.println();
-    Serial.println("API: ---- end raw cloud config ----");
+    Console.println();
+    Console.println("API: ---- end raw cloud config ----");
 }

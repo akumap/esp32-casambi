@@ -9,6 +9,7 @@
 
 #include "packet.h"
 #include "../config.h"
+#include "../console_out.h"
 
 static PacketParseStats g_parseStats;
 
@@ -72,15 +73,15 @@ void hexDump(const char* label, const uint8_t* data, size_t len, size_t maxBytes
     // dumps use this so a status/network payload is never silently cut off at a
     // fixed length (only explicit previews pass a positive cap).
     size_t limit = (maxBytes == 0) ? len : maxBytes;
-    Serial.printf("%s (%d bytes): ", label, len);
+    Console.printf("%s (%d bytes): ", label, len);
     size_t printLen = (len < limit) ? len : limit;
     for (size_t i = 0; i < printLen; i++) {
-        Serial.printf("%02x ", data[i]);
+        Console.printf("%02x ", data[i]);
     }
     if (len > limit) {
-        Serial.print("...");
+        Console.print("...");
     }
-    Serial.println();
+    Console.println();
 }
 
 // ============================================================================
@@ -101,7 +102,7 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
     if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed06++;
         if (parseDebugEnabled) {
-            Serial.printf("PARSE 0x06: malformed at offset %u: %s (packet dropped)\n",
+            Console.printf("PARSE 0x06: malformed at offset %u: %s (packet dropped)\n",
                           (unsigned)diag.offset, diag.reason);
         }
         return false;
@@ -109,18 +110,18 @@ bool parseStatusBroadcast(const uint8_t* data, size_t len, std::vector<UnitState
     if (st == packetparse::ParseStatus::Partial) {
         g_parseStats.partial06++;
         if (parseDebugEnabled) {
-            Serial.printf("PARSE 0x06: partial — %u record(s) applied, tail dropped at offset %u: %s\n",
+            Console.printf("PARSE 0x06: partial — %u record(s) applied, tail dropped at offset %u: %s\n",
                           (unsigned)records.size(), (unsigned)diag.offset, diag.reason);
         }
     }
 
     if (parseDebugEnabled && !records.empty()) {
-        Serial.printf("PARSE 0x06: %d record(s)\n", records.size());
+        Console.printf("PARSE 0x06: %d record(s)\n", records.size());
         for (const auto& r : records) {
-            Serial.printf("  Unit %d: on=%d online=%d priority=%d state[0..%d]=",
+            Console.printf("  Unit %d: on=%d online=%d priority=%d state[0..%d]=",
                           r.unitId, r.on, r.online, r.priority, r.stateLen - 1);
-            for (uint8_t i = 0; i < r.stateLen; i++) Serial.printf("%d ", r.state[i]);
-            Serial.println();
+            for (uint8_t i = 0; i < r.stateLen; i++) Console.printf("%d ", r.state[i]);
+            Console.println();
         }
     }
 
@@ -142,7 +143,7 @@ bool parseInvocationStream(const uint8_t* data, size_t len, std::vector<Invocati
     if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed07++;
         if (parseDebugEnabled) {
-            Serial.printf("PARSE 0x07: malformed at offset %u: %s (packet dropped)\n",
+            Console.printf("PARSE 0x07: malformed at offset %u: %s (packet dropped)\n",
                           (unsigned)diag.offset, diag.reason);
         }
         return false;
@@ -150,22 +151,22 @@ bool parseInvocationStream(const uint8_t* data, size_t len, std::vector<Invocati
     if (st == packetparse::ParseStatus::Partial) {
         g_parseStats.partial07++;
         if (parseDebugEnabled) {
-            Serial.printf("PARSE 0x07: partial — %u frame(s) applied, tail dropped at offset %u: %s\n",
+            Console.printf("PARSE 0x07: partial — %u frame(s) applied, tail dropped at offset %u: %s\n",
                           (unsigned)frames.size(), (unsigned)diag.offset, diag.reason);
         }
     }
 
     if (parseDebugEnabled && !frames.empty()) {
-        Serial.printf("PARSE 0x07: %d frame(s)\n", frames.size());
+        Console.printf("PARSE 0x07: %d frame(s)\n", frames.size());
         for (const auto& f : frames) {
-            Serial.printf("  op=%s(%d) target=%s[%d] origin=%d age=%d payload=%d bytes",
+            Console.printf("  op=%s(%d) target=%s[%d] origin=%d age=%d payload=%d bytes",
                           opcodeName(f.opcode), f.opcode,
                           targetTypeName(f.targetType()), f.targetId(),
                           f.origin, f.age, f.payloadLen);
             if (f.hasOriginHandle) {
-                Serial.printf(" originHandle=%d", f.originHandle);
+                Console.printf(" originHandle=%d", f.originHandle);
             }
-            Serial.println();
+            Console.println();
             if (f.payloadLen > 0) {
                 hexDump("    payload", f.payload, f.payloadLen, 16);
             }
@@ -190,7 +191,7 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
     if (st == packetparse::ParseStatus::Malformed) {
         g_parseStats.malformed08++;
         if (parseDebugEnabled) {
-            Serial.printf("PARSE 0x08: malformed at offset %u: %s (packet dropped)\n",
+            Console.printf("PARSE 0x08: malformed at offset %u: %s (packet dropped)\n",
                           (unsigned)diag.offset, diag.reason);
         }
         return false;
@@ -198,18 +199,18 @@ bool parseUnitStateUpdate(const uint8_t* data, size_t len, std::vector<UnitState
     if (st == packetparse::ParseStatus::Partial) {
         g_parseStats.partial08++;
         if (parseDebugEnabled) {
-            Serial.printf("PARSE 0x08: partial — %u state(s) applied, tail dropped at offset %u: %s\n",
+            Console.printf("PARSE 0x08: partial — %u state(s) applied, tail dropped at offset %u: %s\n",
                           (unsigned)states.size(), (unsigned)diag.offset, diag.reason);
         }
     }
 
     if (parseDebugEnabled && !states.empty()) {
-        Serial.printf("PARSE 0x08: %d record(s)\n", states.size());
+        Console.printf("PARSE 0x08: %d record(s)\n", states.size());
         for (const auto& s : states) {
-            Serial.printf("  Unit %d: on=%d state[0]=%d", s.unitId, s.on, s.level);
-            if (s.hasVertical)  Serial.printf(" state[1]=%d", s.vertical);
-            if (s.hasColorTemp) Serial.printf(" state[2]=%d", s.colorTemp);
-            Serial.println();
+            Console.printf("  Unit %d: on=%d state[0]=%d", s.unitId, s.on, s.level);
+            if (s.hasVertical)  Console.printf(" state[1]=%d", s.vertical);
+            if (s.hasColorTemp) Console.printf(" state[2]=%d", s.colorTemp);
+            Console.println();
         }
     }
 

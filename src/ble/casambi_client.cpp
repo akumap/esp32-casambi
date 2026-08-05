@@ -6,6 +6,7 @@
  */
 
 #include "casambi_client.h"
+#include "../console_out.h"
 #include "packet.h"
 #include "casambi_scan.h"           // addrTypeName() + the failed-connect peer probe
 #include "../cloud/state_codec.h"   // MAX_STATE_BYTES bound for setUnitState
@@ -63,7 +64,7 @@ CasambiClient::CasambiClient(NetworkConfig* config)
         // notification handlers; a clean restart (the RTC log entry survives
         // it) beats running unprotected on an already-exhausted heap.
         EventLog::log(LOG_ERROR, "BLE: mutex creation failed (heap exhausted), restarting");
-        Serial.println("FATAL: BLE mutex creation failed - restarting");
+        Console.println("FATAL: BLE mutex creation failed - restarting");
         delay(250);
         ESP.restart();
     }
@@ -85,7 +86,7 @@ bool CasambiClient::connect(const String& address) {
     // mutex no sender can still be using _bleClient/_authChar when the
     // reconnect path below frees them via deleteClient().
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(10000)) != pdTRUE) {
-        Serial.println("BLE: connect: mutex timeout, try again");
+        Console.println("BLE: connect: mutex timeout, try again");
         return false;
     }
 
@@ -144,13 +145,13 @@ bool CasambiClient::_connectLocked(const String& address) {
     unsigned long attemptStart = millis();
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Connecting to %s (type=%s, timeout=%d ms, heap=%u, largest=%u)\n",
+        Console.printf("BLE: Connecting to %s (type=%s, timeout=%d ms, heap=%u, largest=%u)\n",
                       address.c_str(), CasambiScan::addrTypeName(GATEWAY_ADDR_TYPE),
                       BLE_CONNECT_TIMEOUT_MS, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     }
 
     if (_state != ConnectionState::None) {
-        Serial.println("BLE: Already connected/connecting, disconnecting first...");
+        Console.println("BLE: Already connected/connecting, disconnecting first...");
         _disconnectLocked(DisconnectReason::UserRequested, "connect");
         delay(500);
     }
@@ -196,7 +197,7 @@ bool CasambiClient::_connectLocked(const String& address) {
         // itself refused the request.
         int rc = _bleClient->getLastError();
         _lastConnectRc = rc;
-        Serial.printf("BLE: Connection failed after %lu ms (rc=%d '%s', addr=%s type=%s, heap=%u)\n",
+        Console.printf("BLE: Connection failed after %lu ms (rc=%d '%s', addr=%s type=%s, heap=%u)\n",
                       millis() - linkStart, rc, bleRcText(rc), address.c_str(),
                       CasambiScan::addrTypeName(GATEWAY_ADDR_TYPE), ESP.getFreeHeap());
         _probePeer(address);
@@ -227,10 +228,10 @@ bool CasambiClient::_connectLocked(const String& address) {
     // instead of the write-without-response we ask for — surfacing as
     // unexplained write failures rather than as an MTU problem.
     uint16_t attMtu = _bleClient->getMTU();
-    Serial.printf("BLE: Connected (link up in %lu ms, ATT MTU=%u)\n",
+    Console.printf("BLE: Connected (link up in %lu ms, ATT MTU=%u)\n",
                   millis() - linkStart, attMtu);
     if (attMtu < 64) {
-        Serial.printf("BLE: WARNING: ATT MTU %u is far below the negotiated default — "
+        Console.printf("BLE: WARNING: ATT MTU %u is far below the negotiated default — "
                       "control writes larger than %u bytes may fail\n",
                       attMtu, (unsigned)(attMtu > 3 ? attMtu - 3 : 0));
         EventLog::log(LOG_WARN, "BLE: low ATT MTU %u after connect", attMtu);
@@ -239,7 +240,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     _setPhase("service");
     NimBLERemoteService* service = _bleClient->getService(NimBLEUUID(CASAMBI_SERVICE_UUID));
     if (!service) {
-        Serial.printf("BLE: Service %s not found on %s\n", CASAMBI_SERVICE_UUID, address.c_str());
+        Console.printf("BLE: Service %s not found on %s\n", CASAMBI_SERVICE_UUID, address.c_str());
         _dumpGattTopology();
         _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
@@ -248,7 +249,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     _setPhase("characteristic");
     _authChar = service->getCharacteristic(NimBLEUUID(CASAMBI_AUTH_CHAR_UUID));
     if (!_authChar) {
-        Serial.printf("BLE: Auth characteristic %s not found in service %s\n",
+        Console.printf("BLE: Auth characteristic %s not found in service %s\n",
                       CASAMBI_AUTH_CHAR_UUID, CASAMBI_SERVICE_UUID);
         _dumpGattTopology();
         _disconnectLocked(DisconnectReason::InternalError, "connect");
@@ -259,10 +260,10 @@ bool CasambiClient::_connectLocked(const String& address) {
         // Properties decide whether the whole handshake CAN work: without
         // notify there is never a device public key, without write we cannot
         // send ours. Trace them once per connect instead of guessing later.
-        Serial.printf("BLE: Auth char handle=0x%04x props: read=%d write=%d writeNR=%d notify=%d indicate=%d\n",
+        Console.printf("BLE: Auth char handle=0x%04x props: read=%d write=%d writeNR=%d notify=%d indicate=%d\n",
                       _authChar->getHandle(), _authChar->canRead(), _authChar->canWrite(),
                       _authChar->canWriteNoResponse(), _authChar->canNotify(), _authChar->canIndicate());
-        Serial.println("BLE: Initializing key exchange...");
+        Console.println("BLE: Initializing key exchange...");
     }
 
     _setPhase("keypair");
@@ -270,7 +271,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     _keyExchange = new ECDHKeyExchange();
 
     if (!_keyExchange->generateKeyPair()) {
-        Serial.printf("BLE: Failed to generate key pair (heap=%u, largest=%u)\n",
+        Console.printf("BLE: Failed to generate key pair (heap=%u, largest=%u)\n",
                       ESP.getFreeHeap(), ESP.getMaxAllocHeap());
         _disconnectLocked(DisconnectReason::KeyExchangeFailed, "connect");
         return false;
@@ -278,14 +279,14 @@ bool CasambiClient::_connectLocked(const String& address) {
 
     _setPhase("devinfo");
     if (!_readDeviceInfo()) {
-        Serial.println("BLE: Failed to read device info");
+        Console.println("BLE: Failed to read device info");
         _disconnectLocked(DisconnectReason::InternalError, "connect");
         return false;
     }
 
     _setPhase("keyexchange");
     if (!_performKeyExchange()) {
-        Serial.println("BLE: Key exchange failed");
+        Console.println("BLE: Key exchange failed");
         _disconnectLocked(DisconnectReason::KeyExchangeFailed, "connect");
         return false;
     }
@@ -294,7 +295,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     CasambiKey* key = _config->getBestKey();
     if (key) {
         if (!_authenticate()) {
-            Serial.println("BLE: Authentication failed");
+            Console.println("BLE: Authentication failed");
             _disconnectLocked(DisconnectReason::AuthFailed, "connect");
             return false;
         }
@@ -302,7 +303,7 @@ bool CasambiClient::_connectLocked(const String& address) {
         // Not necessarily benign: a config that lost its keys (or a failed
         // cloud refresh) lands here too, and the network then ignores every
         // packet we send. Say so rather than implying a Classic network.
-        Serial.printf("BLE: No keys in config (%d units) - assuming Classic network, "
+        Console.printf("BLE: No keys in config (%d units) - assuming Classic network, "
                       "no authentication performed\n", (int)_config->units.size());
         _setState(ConnectionState::Authenticated);
     }
@@ -311,7 +312,7 @@ bool CasambiClient::_connectLocked(const String& address) {
     _lastRssi = _bleClient->getRssi();
 
     _setPhase("ready");
-    Serial.printf("BLE: Ready! (RSSI %d dBm, handshake %lu ms, mtu=%d, unitId=%d, heap=%u)\n",
+    Console.printf("BLE: Ready! (RSSI %d dBm, handshake %lu ms, mtu=%d, unitId=%d, heap=%u)\n",
                   _lastRssi.load(), millis() - attemptStart, _mtu, _unitId, ESP.getFreeHeap());
     return true;
 }
@@ -323,35 +324,35 @@ bool CasambiClient::_connectLocked(const String& address) {
 void CasambiClient::_setPhase(const char* phase) {
     _lastConnectPhase = phase;
     if (bleDebugEnabled) {
-        Serial.printf("BLE: phase -> %s\n", phase);
+        Console.printf("BLE: phase -> %s\n", phase);
     }
 }
 
 void CasambiClient::_dumpGattTopology() {
     if (!_bleClient || !_bleClient->isConnected()) {
-        Serial.println("BLE: GATT dump skipped - link already down");
+        Console.println("BLE: GATT dump skipped - link already down");
         return;
     }
 
     // refresh=true forces a fresh discovery instead of reporting a cached (and
     // possibly empty) list from an earlier attempt.
     const std::vector<NimBLERemoteService*>& services = _bleClient->getServices(true);
-    Serial.printf("BLE: Peer exposes %d service(s):\n", (int)services.size());
+    Console.printf("BLE: Peer exposes %d service(s):\n", (int)services.size());
     for (auto* svc : services) {
         if (!svc) continue;
-        Serial.printf("BLE:   service %s (handles 0x%04x-0x%04x)\n",
+        Console.printf("BLE:   service %s (handles 0x%04x-0x%04x)\n",
                       svc->getUUID().toString().c_str(),
                       svc->getStartHandle(), svc->getEndHandle());
         for (auto* chr : svc->getCharacteristics(true)) {
             if (!chr) continue;
-            Serial.printf("BLE:     char %s handle=0x%04x read=%d write=%d writeNR=%d notify=%d indicate=%d\n",
+            Console.printf("BLE:     char %s handle=0x%04x read=%d write=%d writeNR=%d notify=%d indicate=%d\n",
                           chr->getUUID().toString().c_str(), chr->getHandle(),
                           chr->canRead(), chr->canWrite(), chr->canWriteNoResponse(),
                           chr->canNotify(), chr->canIndicate());
         }
         esp_task_wdt_reset();
     }
-    Serial.printf("BLE: (expected service %s / characteristic %s)\n",
+    Console.printf("BLE: (expected service %s / characteristic %s)\n",
                   CASAMBI_SERVICE_UUID, CASAMBI_AUTH_CHAR_UUID);
 }
 
@@ -362,13 +363,13 @@ void CasambiClient::_probePeer(const String& address) {
         static bool hintShown = false;
         if (!hintShown) {
             hintShown = true;
-            Serial.println("BLE: (run 'blediag', or 'debug ble on' to probe the advertisement "
+            Console.println("BLE: (run 'blediag', or 'debug ble on' to probe the advertisement "
                            "after every failed connect)");
         }
         return;
     }
 
-    Serial.printf("BLE: Probing for advertisers (%lu s scan) to classify the failure...\n",
+    Console.printf("BLE: Probing for advertisers (%lu s scan) to classify the failure...\n",
                   (unsigned long)PEER_PROBE_SCAN_SECONDS);
 
     std::vector<CasambiScanResult> seen;
@@ -376,24 +377,24 @@ void CasambiClient::_probePeer(const String& address) {
     esp_task_wdt_reset();
 
     if (seen.empty()) {
-        Serial.println("BLE: Probe found NO Casambi advertiser at all - light powered off, "
+        Console.println("BLE: Probe found NO Casambi advertiser at all - light powered off, "
                        "out of range, or already connected to another central (phone app/gateway)");
         return;
     }
 
     bool targetSeen = false;
-    Serial.printf("BLE: Probe found %d Casambi advertiser(s):\n", (int)seen.size());
+    Console.printf("BLE: Probe found %d Casambi advertiser(s):\n", (int)seen.size());
     for (const auto& r : seen) {
         bool isTarget = r.mac.equalsIgnoreCase(address);
         targetSeen = targetSeen || isTarget;
-        Serial.printf("BLE:   %s type=%s rssi=%d name='%s'%s\n",
+        Console.printf("BLE:   %s type=%s rssi=%d name='%s'%s\n",
                       r.mac.c_str(), CasambiScan::addrTypeName(r.addrType), r.rssi,
                       r.name.c_str(), isTarget ? "  <-- our target" : "");
         if (isTarget && r.addrType != GATEWAY_ADDR_TYPE) {
             // Connecting with the wrong address type fails on every attempt,
             // forever, while the scan keeps showing the device — exactly the
             // "setup finds it but it never connects" pattern.
-            Serial.printf("BLE:   *** Address type mismatch: peer advertises '%s', "
+            Console.printf("BLE:   *** Address type mismatch: peer advertises '%s', "
                           "we connect as '%s' ***\n",
                           CasambiScan::addrTypeName(r.addrType),
                           CasambiScan::addrTypeName(GATEWAY_ADDR_TYPE));
@@ -406,7 +407,7 @@ void CasambiClient::_probePeer(const String& address) {
     if (!targetSeen) {
         // Every unit of a network advertises the same virtual address, so a
         // stored MAC can genuinely disappear when that unit is unplugged.
-        Serial.printf("BLE: Configured MAC %s is NOT advertising - it may belong to a unit that is "
+        Console.printf("BLE: Configured MAC %s is NOT advertising - it may belong to a unit that is "
                       "off; re-run 'scan' and 'connect <n>' to store a MAC that is present\n",
                       address.c_str());
     }
@@ -422,7 +423,7 @@ void CasambiClient::_disconnectInternal(DisconnectReason reason, const char* sou
     // are bounded by NimBLE's own timeouts — skip this attempt instead of
     // racing the holder; the periodic health check will retry.
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
-        Serial.println("BLE: disconnect skipped (mutex busy), will retry");
+        Console.println("BLE: disconnect skipped (mutex busy), will retry");
         return;
     }
     _disconnectLocked(reason, source);
@@ -461,14 +462,14 @@ void CasambiClient::_disconnectLocked(DisconnectReason reason, const char* sourc
     _setState(ConnectionState::None, reason);
 
     if (reason != DisconnectReason::UserRequested) {
-        Serial.printf("BLE: Disconnected (reason=%d/%s, source=%s, phase=%s, last rssi=%d dBm, "
+        Console.printf("BLE: Disconnected (reason=%d/%s, source=%s, phase=%s, last rssi=%d dBm, "
                       "packets=%u, uptime=%lus)\n",
                       static_cast<int>(reason), disconnectReasonName(reason),
                       source ? source : "-", _lastConnectPhase.load(), _lastRssi.load(),
                       _totalReceivedPackets.load(),
                       _connectTime ? (millis() - _connectTime) / 1000 : 0);
     } else {
-        Serial.println("BLE: Disconnected");
+        Console.println("BLE: Disconnected");
     }
 }
 
@@ -510,7 +511,7 @@ bool CasambiClient::sendKeepalive() {
     xSemaphoreGive(_mutex);
 
     if (value.length() == 0) {
-        Serial.println("BLE: Keepalive failed - no response");
+        Console.println("BLE: Keepalive failed - no response");
         _disconnectInternal(DisconnectReason::BLELinkLoss, "keepalive");
         return false;
     }
@@ -525,7 +526,7 @@ bool CasambiClient::sendKeepalive() {
         // decoding it needs the same decrypt path as a notification and a
         // capture to check the result against (see the 0x0A note in
         // _handleDataNotification and docs D.6).
-        Serial.printf("BLE: Keepalive OK (%d bytes)\n", value.length());
+        Console.printf("BLE: Keepalive OK (%d bytes)\n", value.length());
         hexDump("BLE: Keepalive response (undecoded)",
                 (const uint8_t*)value.data(), value.length());
     }
@@ -557,7 +558,7 @@ bool CasambiClient::checkConnectionHealth() {
             // Context matters for the post-mortem: a drop after a long healthy
             // uptime with a decent RSSI is a different fault than one a few
             // seconds in at -90 dBm.
-            Serial.printf("BLE: Silent disconnect detected! Link lost after %lus "
+            Console.printf("BLE: Silent disconnect detected! Link lost after %lus "
                           "(last rssi=%d dBm, %u packets, %lus since last notification)\n",
                           _connectTime ? (millis() - _connectTime) / 1000 : 0,
                           _lastRssi.load(), _totalReceivedPackets.load(),
@@ -575,7 +576,7 @@ bool CasambiClient::checkConnectionHealth() {
         unsigned long silentDuration = millis() - _lastNotificationTime;
         if (silentDuration > 300000UL) {
             if (bleDebugEnabled) {
-                Serial.printf("BLE: No data received for %lu seconds\n", silentDuration / 1000);
+                Console.printf("BLE: No data received for %lu seconds\n", silentDuration / 1000);
             }
         }
     }
@@ -593,12 +594,12 @@ bool CasambiClient::checkConnectionHealth() {
 
 bool CasambiClient::setSceneLevel(uint8_t sceneId, uint8_t level) {
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        Serial.println("Failed to acquire mutex (timeout)");
+        Console.println("Failed to acquire mutex (timeout)");
         return false;
     }
 
     if (!isAuthenticated()) {
-        Serial.println("Not authenticated");
+        Console.println("Not authenticated");
         xSemaphoreGive(_mutex);
         return false;
     }
@@ -723,7 +724,7 @@ bool CasambiClient::setGroupSlider(uint8_t groupId, uint8_t value) {
 
 bool CasambiClient::_readDeviceInfo() {
     if (bleDebugEnabled) {
-        Serial.println("BLE: Reading device info...");
+        Console.println("BLE: Reading device info...");
     }
 
     unsigned long readStart = millis();
@@ -740,7 +741,7 @@ bool CasambiClient::_readDeviceInfo() {
         // failed (link dropped mid-read, or the peer refused it) — print the
         // rc and whatever bytes did arrive instead of just the length.
         int rc = _bleClient ? _bleClient->getLastError() : 0;
-        Serial.printf("BLE: Invalid device info: got %d bytes after %lu ms, expected >= %d "
+        Console.printf("BLE: Invalid device info: got %d bytes after %lu ms, expected >= %d "
                       "(rc=%d '%s', link=%s)\n",
                       (int)value.length(), millis() - readStart,
                       (int)packetparse::DEVICE_INFO_MIN_LEN,
@@ -752,7 +753,7 @@ bool CasambiClient::_readDeviceInfo() {
     }
 
     if (st == packetparse::DeviceInfoStatus::WrongType) {
-        Serial.printf("BLE: Unexpected type: 0x%02x (expected 0x%02x)\n",
+        Console.printf("BLE: Unexpected type: 0x%02x (expected 0x%02x)\n",
                       data[0], packetparse::DEVICE_INFO_TYPE);
         hexDump("BLE: Device info", data, value.length());
         return false;
@@ -763,7 +764,7 @@ bool CasambiClient::_readDeviceInfo() {
         // derived for the version the cloud config was downloaded with.
         // The raw byte comes along because only its low nibble is the version
         // — the upper bits are an undecoded flag field (v11 reports 0x2B).
-        Serial.printf("BLE: Protocol version mismatch: device reports %d (raw 0x%02x), "
+        Console.printf("BLE: Protocol version mismatch: device reports %d (raw 0x%02x), "
                       "config has %d (continuing; run 'refresh' if authentication fails)\n",
                       info.version, info.versionRaw, _config->protocolVersion);
     }
@@ -776,7 +777,7 @@ bool CasambiClient::_readDeviceInfo() {
     memcpy(_nonce, info.nonce, NONCE_SIZE);
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: MTU=%d, UnitID=%d, Flags=0x%04x, version=%d (raw 0x%02x)\n",
+        Console.printf("BLE: MTU=%d, UnitID=%d, Flags=0x%04x, version=%d (raw 0x%02x)\n",
                       _mtu, _unitId, _flags, info.version, info.versionRaw);
         hexDump("BLE: Device nonce", _nonce, NONCE_SIZE);
     }
@@ -787,7 +788,7 @@ bool CasambiClient::_readDeviceInfo() {
     // leaving only a "timeout waiting for device public key" five seconds
     // later with no hint that we never even subscribed.
     if (!_authChar->canNotify()) {
-        Serial.printf("BLE: Auth characteristic does not support NOTIFY (indicate=%d) - "
+        Console.printf("BLE: Auth characteristic does not support NOTIFY (indicate=%d) - "
                       "the handshake cannot complete\n", _authChar->canIndicate());
         EventLog::log(LOG_ERROR, "BLE: auth char lacks NOTIFY (indicate=%d)",
                       _authChar->canIndicate());
@@ -799,12 +800,12 @@ bool CasambiClient::_readDeviceInfo() {
         // dead, and the key-exchange wait right after is the real verdict. But
         // say it out loud — this is the most likely cause of that timeout.
         int rc = _bleClient ? _bleClient->getLastError() : 0;
-        Serial.printf("BLE: Failed to subscribe to notifications (rc=%d '%s') - "
+        Console.printf("BLE: Failed to subscribe to notifications (rc=%d '%s') - "
                       "continuing, but the key exchange will likely time out\n",
                       rc, bleRcText(rc));
         EventLog::log(LOG_WARN, "BLE: notify subscribe failed (rc=%d)", rc);
     } else if (bleDebugEnabled) {
-        Serial.println("BLE: Notifications enabled");
+        Console.println("BLE: Notifications enabled");
     }
 
     return true;
@@ -812,11 +813,11 @@ bool CasambiClient::_readDeviceInfo() {
 
 bool CasambiClient::_performKeyExchange() {
     if (bleDebugEnabled) {
-        Serial.println("BLE: Performing ECDH key exchange...");
+        Console.println("BLE: Performing ECDH key exchange...");
     }
 
     if (!_keyExchange) {
-        Serial.println("BLE: Key exchange not initialized!");
+        Console.println("BLE: Key exchange not initialized!");
         return false;
     }
 
@@ -832,7 +833,7 @@ bool CasambiClient::_performKeyExchange() {
         // no notification at all (peer silent / not subscribed), a notification
         // that was rejected (state == Error, see _handleKeyExchangeNotification),
         // or a link that died while we waited.
-        Serial.printf("BLE: Timeout waiting for device public key after %lu ms "
+        Console.printf("BLE: Timeout waiting for device public key after %lu ms "
                       "(state=%d, notifications during wait=%u, link=%s)\n",
                       millis() - startTime, static_cast<int>(_state.load()),
                       _totalReceivedPackets.load() - packetsBeforeWait,
@@ -850,7 +851,7 @@ bool CasambiClient::_performKeyExchange() {
         xSemaphoreGive(_encMutex);
     }
     if (bleDebugEnabled) {
-        Serial.println("BLE: Transport key derived, encryption initialized");
+        Console.println("BLE: Transport key derived, encryption initialized");
     }
 
     std::vector<uint8_t> pubKeyX = _keyExchange->getPublicKeyX();
@@ -867,12 +868,12 @@ bool CasambiClient::_performKeyExchange() {
         // Our public key never reached the peer — the ack wait below would
         // otherwise time out looking like a slow device.
         int rc = _bleClient ? _bleClient->getLastError() : 0;
-        Serial.printf("BLE: Failed to send our public key (rc=%d '%s', link=%s)\n",
+        Console.printf("BLE: Failed to send our public key (rc=%d '%s', link=%s)\n",
                       rc, bleRcText(rc), isBLEConnected() ? "up" : "down");
         return false;
     }
     if (bleDebugEnabled) {
-        Serial.println("BLE: Sent our public key");
+        Console.println("BLE: Sent our public key");
     }
 
     // Wait for the device's acknowledgment notification (1-byte ACK for our public key)
@@ -888,31 +889,31 @@ bool CasambiClient::_performKeyExchange() {
 
     if (bleDebugEnabled) {
         if (_totalReceivedPackets > notifyCountBefore) {
-            Serial.println("BLE: Public key acknowledged by device");
+            Console.println("BLE: Public key acknowledged by device");
         } else {
-            Serial.println("BLE: No ack for public key (proceeding anyway)");
+            Console.println("BLE: No ack for public key (proceeding anyway)");
         }
     }
 
     if (_state == ConnectionState::Error) {
-        Serial.println("BLE: Key exchange error");
+        Console.println("BLE: Key exchange error");
         return false;
     }
 
     if (bleDebugEnabled) {
-        Serial.println("BLE: Key exchange complete");
+        Console.println("BLE: Key exchange complete");
     }
     return true;
 }
 
 bool CasambiClient::_authenticate() {
     if (bleDebugEnabled) {
-        Serial.println("BLE: Authenticating...");
+        Console.println("BLE: Authenticating...");
     }
 
     CasambiKey* key = _config->getBestKey();
     if (!key) {
-        Serial.println("BLE: No key available");
+        Console.println("BLE: No key available");
         return false;
     }
 
@@ -920,13 +921,13 @@ bool CasambiClient::_authenticate() {
     // auth rejection with a manager-role key means something different than one
     // with a guest-role key, and both are invisible without this line.
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Using key id=%d type=%d role=%d name='%s' (%d key(s) in config)\n",
+        Console.printf("BLE: Using key id=%d type=%d role=%d name='%s' (%d key(s) in config)\n",
                       key->id, key->type, key->role, key->name.c_str(), (int)_config->keys.size());
     }
 
     // Reuse the transport key cached by _performKeyExchange; avoids a second ECDH computation.
     if (_transportKey.size() < AES_KEY_SIZE) {
-        Serial.printf("BLE: Transport key not available (%d bytes, need %d)\n",
+        Console.printf("BLE: Transport key not available (%d bytes, need %d)\n",
                       (int)_transportKey.size(), AES_KEY_SIZE);
         return false;
     }
@@ -957,12 +958,12 @@ bool CasambiClient::_authenticate() {
     authLen += sizeof(authDigest);
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Sending auth with counter=%u\n", _inPacketCount);
+        Console.printf("BLE: Sending auth with counter=%u\n", _inPacketCount);
     }
     // A failed write means the auth packet never left the device — without
     // this check the wait below would blame the peer for our own send error.
     if (!_sendEncryptedPacket(authPacket, authLen, _inPacketCount)) {
-        Serial.println("BLE: Failed to send auth packet");
+        Console.println("BLE: Failed to send auth packet");
         return false;
     }
     _inPacketCount++;
@@ -981,7 +982,7 @@ bool CasambiClient::_authenticate() {
         // rejected (the notification handler logged the detail); still
         // Connected/KeyExchanged with 0 notifications means no answer at all —
         // typically a key that does not belong to this network.
-        Serial.printf("BLE: Authentication %s after %lu ms (state=%d, key id=%d role=%d, "
+        Console.printf("BLE: Authentication %s after %lu ms (state=%d, key id=%d role=%d, "
                       "notifications during wait=%u, link=%s)\n",
                       _state == ConnectionState::Error ? "rejected" : "timeout",
                       millis() - startTime, static_cast<int>(_state.load()),
@@ -992,7 +993,7 @@ bool CasambiClient::_authenticate() {
     }
 
     if (bleDebugEnabled) {
-        Serial.println("BLE: Authenticated!");
+        Console.println("BLE: Authenticated!");
     }
     return true;
 }
@@ -1003,12 +1004,12 @@ bool CasambiClient::_authenticate() {
 
 bool CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::vector<uint8_t>& payload) {
     if (!isAuthenticated() || !_encryption) {
-        Serial.println("BLE: Not authenticated");
+        Console.println("BLE: Not authenticated");
         return false;
     }
 
     if (!isBLEConnected()) {
-        Serial.println("BLE: Link lost, cannot send operation");
+        Console.println("BLE: Link lost, cannot send operation");
         // Callers (the control setters) hold _mutex, so use the locked variant
         // directly — _disconnectInternal would deadlock on the same mutex.
         _disconnectLocked(DisconnectReason::BLELinkLoss, "send");
@@ -1016,7 +1017,7 @@ bool CasambiClient::_sendOperation(uint8_t opcode, uint16_t target, const std::v
     }
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Sending operation - opcode=0x%02x, target=0x%04x, payload_len=%d\n",
+        Console.printf("BLE: Sending operation - opcode=0x%02x, target=0x%04x, payload_len=%d\n",
                       opcode, target, payload.size());
     }
 
@@ -1056,7 +1057,7 @@ bool CasambiClient::_buildOperation(uint8_t opcode, uint16_t target,
     // 9 bytes of operation header plus the payload.
     const size_t need = 9 + payload.size();
     if (outLen + need > outCap) {
-        Serial.printf("BLE: Operation too large for packet buffer (%u + %u > %u)\n",
+        Console.printf("BLE: Operation too large for packet buffer (%u + %u > %u)\n",
                       (unsigned)outLen, (unsigned)need, (unsigned)outCap);
         return false;
     }
@@ -1080,12 +1081,12 @@ bool CasambiClient::_buildOperation(uint8_t opcode, uint16_t target,
 
 bool CasambiClient::_sendEncryptedPacket(const uint8_t* packet, size_t pktLen, uint32_t counter) {
     if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-        Serial.println("BLE: _sendEncryptedPacket: encMutex timeout");
+        Console.println("BLE: _sendEncryptedPacket: encMutex timeout");
         return false;
     }
 
     if (!_encryption || !_authChar) {
-        Serial.println("BLE: Encryption not initialized");
+        Console.println("BLE: Encryption not initialized");
         xSemaphoreGive(_encMutex);
         return false;
     }
@@ -1106,12 +1107,12 @@ bool CasambiClient::_sendEncryptedPacket(const uint8_t* packet, size_t pktLen, u
     xSemaphoreGive(_encMutex);
 
     if (!ok || encLen == 0) {
-        Serial.println("BLE: Encryption produced empty ciphertext");
+        Console.println("BLE: Encryption produced empty ciphertext");
         return false;
     }
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Sending encrypted packet - counter=%u, plaintext_len=%u, encrypted_len=%u\n",
+        Console.printf("BLE: Sending encrypted packet - counter=%u, plaintext_len=%u, encrypted_len=%u\n",
                       counter, (unsigned)pktLen, (unsigned)encLen);
     }
 
@@ -1120,7 +1121,7 @@ bool CasambiClient::_sendEncryptedPacket(const uint8_t* packet, size_t pktLen, u
     // received it. It still distinguishes a queued write from an outright
     // failure (disconnected characteristic, full tx buffer).
     if (!_authChar->writeValue(encrypted, encLen, false)) {
-        Serial.println("BLE: GATT writeValue failed");
+        Console.println("BLE: GATT writeValue failed");
         return false;
     }
     return true;
@@ -1152,7 +1153,7 @@ void CasambiClient::_handleNotification(uint8_t* data, size_t len) {
     _totalReceivedPackets++;
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Notification received (%d bytes, total #%u)\n", len, _totalReceivedPackets.load());
+        Console.printf("BLE: Notification received (%d bytes, total #%u)\n", len, _totalReceivedPackets.load());
     }
 
     switch (_state) {
@@ -1163,7 +1164,7 @@ void CasambiClient::_handleNotification(uint8_t* data, size_t len) {
         case ConnectionState::KeyExchanged:
             if (len < 10) {
                 if (bleDebugEnabled) {
-                    Serial.printf("BLE: Key exchange acknowledgment received (%d bytes)\n", len);
+                    Console.printf("BLE: Key exchange acknowledgment received (%d bytes)\n", len);
                 }
             } else {
                 _handleAuthNotification(data, len);
@@ -1175,20 +1176,20 @@ void CasambiClient::_handleNotification(uint8_t* data, size_t len) {
             break;
 
         default:
-            Serial.printf("BLE: Unexpected notification in state %d\n", static_cast<int>(_state.load()));
+            Console.printf("BLE: Unexpected notification in state %d\n", static_cast<int>(_state.load()));
             break;
     }
 }
 
 void CasambiClient::_handleKeyExchangeNotification(uint8_t* data, size_t len) {
     if (len < 65) {
-        Serial.printf("BLE: Invalid key exchange packet length: %d\n", len);
+        Console.printf("BLE: Invalid key exchange packet length: %d\n", len);
         _setState(ConnectionState::Error, DisconnectReason::KeyExchangeFailed);
         return;
     }
 
     if (data[0] != 0x02) {
-        Serial.printf("BLE: Unexpected packet type during key exchange: 0x%02x\n", data[0]);
+        Console.printf("BLE: Unexpected packet type during key exchange: 0x%02x\n", data[0]);
         _setState(ConnectionState::Error, DisconnectReason::KeyExchangeFailed);
         return;
     }
@@ -1197,17 +1198,17 @@ void CasambiClient::_handleKeyExchangeNotification(uint8_t* data, size_t len) {
     const uint8_t* deviceKeyY = data + 33;
 
     if (bleDebugEnabled) {
-        Serial.println("BLE: Received device public key");
+        Console.println("BLE: Received device public key");
     }
 
     if (!_keyExchange) {
-        Serial.println("BLE: Key exchange not initialized!");
+        Console.println("BLE: Key exchange not initialized!");
         _setState(ConnectionState::Error, DisconnectReason::InternalError);
         return;
     }
 
     if (!_keyExchange->setDevicePublicKey(deviceKeyX, deviceKeyY)) {
-        Serial.println("BLE: Failed to set device public key");
+        Console.println("BLE: Failed to set device public key");
         _setState(ConnectionState::Error, DisconnectReason::KeyExchangeFailed);
         return;
     }
@@ -1219,14 +1220,14 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
     if (xSemaphoreTake(_encMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
 
     if (!_encryption) {
-        Serial.println("BLE: Encryption not initialized");
+        Console.println("BLE: Encryption not initialized");
         xSemaphoreGive(_encMutex);
         _setState(ConnectionState::Error, DisconnectReason::InternalError);
         return;
     }
 
     if (len < CMAC_SIZE + 5) {
-        Serial.printf("BLE: Auth response too short: %d\n", len);
+        Console.printf("BLE: Auth response too short: %d\n", len);
         xSemaphoreGive(_encMutex);
         _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
         return;
@@ -1235,11 +1236,11 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
     uint32_t counter = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Auth response packet (counter=%u, len=%d)\n", counter, len);
+        Console.printf("BLE: Auth response packet (counter=%u, len=%d)\n", counter, len);
     }
 
     if (len > CRYPTO_MAX_PACKET_LEN) {
-        Serial.printf("BLE: Auth response exceeds crypto buffer (%u > %u)\n",
+        Console.printf("BLE: Auth response exceeds crypto buffer (%u > %u)\n",
                       (unsigned)len, (unsigned)CRYPTO_MAX_PACKET_LEN);
         xSemaphoreGive(_encMutex);
         _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
@@ -1259,7 +1260,7 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
     xSemaphoreGive(_encMutex);
 
     if (!ok || plainLen == 0) {
-        Serial.println("BLE: Auth response decryption failed");
+        Console.println("BLE: Auth response decryption failed");
         _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
         return;
     }
@@ -1268,14 +1269,14 @@ void CasambiClient::_handleAuthNotification(uint8_t* data, size_t len) {
 
     if (responseType == 0x05) {
         if (bleDebugEnabled) {
-            Serial.println("BLE: Authentication successful!");
+            Console.println("BLE: Authentication successful!");
         }
         _setState(ConnectionState::Authenticated);
     } else if (responseType == 0x06) {
-        Serial.println("BLE: Authentication rejected by device");
+        Console.println("BLE: Authentication rejected by device");
         _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
     } else {
-        Serial.printf("BLE: Unexpected auth response type: 0x%02x\n", responseType);
+        Console.printf("BLE: Unexpected auth response type: 0x%02x\n", responseType);
         _setState(ConnectionState::Error, DisconnectReason::AuthFailed);
     }
 }
@@ -1291,7 +1292,7 @@ static bool plausibleEpoch(uint32_t v) {
 void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
     if (len < CMAC_SIZE + 5) {
         if (bleDebugEnabled) {
-            Serial.printf("BLE: Data packet too short: %d bytes\n", len);
+            Console.printf("BLE: Data packet too short: %d bytes\n", len);
         }
         return;
     }
@@ -1309,7 +1310,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
         // Cannot happen below the negotiated ATT MTU, but a truncated read here
         // would decrypt into a partial buffer — drop the packet instead.
         xSemaphoreGive(_encMutex);
-        Serial.printf("BLE: Data packet exceeds crypto buffer (%u > %u), dropped\n",
+        Console.printf("BLE: Data packet exceeds crypto buffer (%u > %u), dropped\n",
                       (unsigned)len, (unsigned)CRYPTO_MAX_PACKET_LEN);
         return;
     }
@@ -1330,7 +1331,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
     if (!ok || plainLen == 0) {
         if (bleDebugEnabled) {
-            Serial.println("BLE: Data packet decryption failed");
+            Console.println("BLE: Data packet decryption failed");
         }
         return;
     }
@@ -1338,7 +1339,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
     uint8_t packetType = plaintext[0];
 
     if (bleDebugEnabled) {
-        Serial.printf("BLE: Data packet type=0x%02x, decrypted_len=%u, counter=0x%08x\n",
+        Console.printf("BLE: Data packet type=0x%02x, decrypted_len=%u, counter=0x%08x\n",
                       packetType, (unsigned)plainLen, counter);
     }
 
@@ -1380,7 +1381,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
         case 0x08: {
             if (bleDebugEnabled) {
-                Serial.printf("BLE: <<< Unit state (0x08) %d bytes\n", payloadLen);
+                Console.printf("BLE: <<< Unit state (0x08) %d bytes\n", payloadLen);
                 hexDump("BLE: 0x08", payload, payloadLen);
             }
             // Pair-list format carries no flags byte at all — synthesize a
@@ -1408,13 +1409,13 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
         case 0x09: {
             if (bleDebugEnabled) {
-                Serial.printf("BLE: <<< Network state (0x09) %d bytes\n", payloadLen);
+                Console.printf("BLE: <<< Network state (0x09) %d bytes\n", payloadLen);
                 hexDump("BLE: 0x09", payload, payloadLen);
             }
             if (parseDebugEnabled) {
-                Serial.printf("P09 raw (%d):", payloadLen);
-                for (size_t i = 0; i < payloadLen; i++) Serial.printf(" %02x", payload[i]);
-                Serial.println();
+                Console.printf("P09 raw (%d):", payloadLen);
+                for (size_t i = 0; i < payloadLen; i++) Console.printf(" %02x", payload[i]);
+                Console.println();
 
                 // P09 = scene/config revision tracker (confirmed). Structure:
                 //   [0x02] [3-byte records...] [0x00 terminator]
@@ -1447,20 +1448,20 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                 if (payloadLen > 1 && payload[0] == 0x02) {
                     // scene first: resolves ID collisions (e.g. scene10 vs unit10)
                     auto printEntity = [this](uint8_t id) {
-                        if (CasambiScene* s = _config->getSceneById(id)) { Serial.printf("scene%d(%s)", id, s->name.c_str()); return; }
-                        if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
-                        if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
-                        Serial.printf("?%d", id);
+                        if (CasambiScene* s = _config->getSceneById(id)) { Console.printf("scene%d(%s)", id, s->name.c_str()); return; }
+                        if (CasambiGroup* g = _config->getGroupById(id)) { Console.printf("grp%d(%s)",   id, g->name.c_str()); return; }
+                        if (CasambiUnit*  u = _config->getUnitById(id))  { Console.printf("unit%d(%s)",  id, u->name.c_str()); return; }
+                        Console.printf("?%d", id);
                     };
                     // unit first: gateways and relay nodes are physical devices
                     auto printDevice = [this](uint8_t id) {
-                        if (CasambiUnit*  u = _config->getUnitById(id))  { Serial.printf("unit%d(%s)",  id, u->name.c_str()); return; }
-                        if (CasambiGroup* g = _config->getGroupById(id)) { Serial.printf("grp%d(%s)",   id, g->name.c_str()); return; }
-                        Serial.printf("?%d", id);
+                        if (CasambiUnit*  u = _config->getUnitById(id))  { Console.printf("unit%d(%s)",  id, u->name.c_str()); return; }
+                        if (CasambiGroup* g = _config->getGroupById(id)) { Console.printf("grp%d(%s)",   id, g->name.c_str()); return; }
+                        Console.printf("?%d", id);
                     };
 
                     bool isDelta = (payloadLen <= 8);
-                    if (!isDelta) Serial.printf("P09 snapshot:\n");
+                    if (!isDelta) Console.printf("P09 snapshot:\n");
 
                     bool inChain = false;
                     uint8_t chainPrev = 0;
@@ -1472,19 +1473,19 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                         if (b0 & 0x80) {
                             // Class A: entity / gateway / seq
                             inChain = false;
-                            Serial.printf(isDelta ? "P09 Δ " : "  A ");
+                            Console.printf(isDelta ? "P09 Δ " : "  A ");
                             printEntity(b0 & 0x7F);
-                            Serial.printf(" seq=%d gw=", b2);
+                            Console.printf(" seq=%d gw=", b2);
                             printDevice(b1);
-                            Serial.println();
+                            Console.println();
                             nA++;
                         } else if (b1 & 0x80) {
                             // Class B: relay node, raw bytes
                             inChain = false;
                             if (!isDelta) {
-                                Serial.printf("  B relay=");
+                                Console.printf("  B relay=");
                                 printDevice(b1 & 0x7F);
-                                Serial.printf(" %02x ?? %02x\n", b0, b2);
+                                Console.printf(" %02x ?? %02x\n", b0, b2);
                             }
                             nB++;
                         } else if (b2 & 0x80) {
@@ -1492,20 +1493,20 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                             if (!isDelta) {
                                 if (!inChain) {
                                     // header: b0=reporter, b1=ctx, b2&0x7F=first entity
-                                    Serial.printf("  C[ ");
+                                    Console.printf("  C[ ");
                                     printDevice(b0);
-                                    Serial.printf(" ctx=%02x → ", b1);
+                                    Console.printf(" ctx=%02x → ", b1);
                                     printEntity(b2 & 0x7F);
-                                    Serial.println();
+                                    Console.println();
                                 } else {
                                     // link: b0=gw, b1=seq for chainPrev, b2&0x7F=next entity
-                                    Serial.printf("  C  ");
+                                    Console.printf("  C  ");
                                     printEntity(chainPrev);
-                                    Serial.printf(" seq=%d gw=", b1);
+                                    Console.printf(" seq=%d gw=", b1);
                                     printDevice(b0);
-                                    Serial.printf(" → ");
+                                    Console.printf(" → ");
                                     printEntity(b2 & 0x7F);
-                                    Serial.println();
+                                    Console.println();
                                 }
                             }
                             chainPrev = b2 & 0x7F;
@@ -1514,24 +1515,24 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                         } else if (inChain) {
                             // Class C terminator: b0=gw, b1=seq for chainPrev, b2=0x00
                             if (!isDelta) {
-                                Serial.printf("  C  ");
+                                Console.printf("  C  ");
                                 printEntity(chainPrev);
-                                Serial.printf(" seq=%d gw=", b1);
+                                Console.printf(" seq=%d gw=", b1);
                                 printDevice(b0);
-                                Serial.printf(" [end]\n");
+                                Console.printf(" [end]\n");
                             }
                             inChain = false;
                             nC++;
                         } else {
                             // Unclassified
-                            if (!isDelta) Serial.printf("  ? %02x %02x %02x\n", b0, b1, b2);
+                            if (!isDelta) Console.printf("  ? %02x %02x %02x\n", b0, b1, b2);
                             nUnk++;
                         }
                         i += 3;
                     }
-                    if (!isDelta) Serial.printf("  (%d config, %d relay, %d chain, %d unknown)\n", nA, nB, nC, nUnk);
+                    if (!isDelta) Console.printf("  (%d config, %d relay, %d chain, %d unknown)\n", nA, nB, nC, nUnk);
                 } else if (payloadLen > 0) {
-                    Serial.printf("P09 bad preamble: 0x%02x\n", payload[0]);
+                    Console.printf("P09 bad preamble: 0x%02x\n", payload[0]);
                 }
             }
             break;
@@ -1554,7 +1555,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
             // and the device clock is not used by the firmware (time comes
             // from NTP, see net/time_sync).
             if (bleDebugEnabled || parseDebugEnabled) {
-                Serial.printf("BLE: <<< Time sync (0x0A) %u bytes\n", (unsigned)payloadLen);
+                Console.printf("BLE: <<< Time sync (0x0A) %u bytes\n", (unsigned)payloadLen);
                 hexDump("BLE: 0x0A", payload, payloadLen);
             }
             if (parseDebugEnabled && payloadLen >= 4) {
@@ -1562,7 +1563,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
                               ((uint32_t)payload[2] <<  8) |  (uint32_t)payload[3];
                 uint32_t le = ((uint32_t)payload[3] << 24) | ((uint32_t)payload[2] << 16) |
                               ((uint32_t)payload[1] <<  8) |  (uint32_t)payload[0];
-                Serial.printf("P0A leading u32 (unverified hypothesis: unix epoch): "
+                Console.printf("P0A leading u32 (unverified hypothesis: unix epoch): "
                               "BE=%u%s LE=%u%s\n",
                               be, plausibleEpoch(be) ? " <- plausible" : "",
                               le, plausibleEpoch(le) ? " <- plausible" : "");
@@ -1575,7 +1576,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
             // 0x0A: dump the bytes so a capture is possible at all. Observed
             // so far only as a response to our own GATT-read keepalive.
             if (bleDebugEnabled || parseDebugEnabled) {
-                Serial.printf("BLE: <<< Keepalive (0x0C) %u bytes\n", (unsigned)payloadLen);
+                Console.printf("BLE: <<< Keepalive (0x0C) %u bytes\n", (unsigned)payloadLen);
                 hexDump("BLE: 0x0C", payload, payloadLen);
             }
             break;
@@ -1583,7 +1584,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
 
         default: {
             if (bleDebugEnabled) {
-                Serial.printf("BLE: <<< Unknown 0x%02x (%d bytes)\n", packetType, payloadLen);
+                Console.printf("BLE: <<< Unknown 0x%02x (%d bytes)\n", packetType, payloadLen);
                 hexDump("BLE: Unknown", payload, payloadLen);
             }
             break;
@@ -1602,7 +1603,7 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateRecord>& records
 
         if (!unit) {
             if (casambiDebugEnabled) {
-                Serial.printf("Casambi: State for unknown unit %d (level=%d)\n",
+                Console.printf("Casambi: State for unknown unit %d (level=%d)\n",
                               record.unitId, level0);
             }
             // Fire callback even for unknown units
@@ -1670,28 +1671,28 @@ void CasambiClient::_applyUnitStates(const std::vector<UnitStateRecord>& records
         // control type and annotated with its byte position (b<n>). Shown for
         // either debug flag so it also appears with `debug ble on`.
         if (casambiDebugEnabled || bleDebugEnabled) {
-            Serial.printf("Casambi: Unit [%d] '%s' %s%s priority=%d",
+            Console.printf("Casambi: Unit [%d] '%s' %s%s priority=%d",
                           unit->deviceId, unit->name.c_str(),
                           unit->on ? "ON" : "OFF",
                           record.online ? "" : " OFFLINE",
                           record.priority);
             if (unit->hasFixture && !unit->controls.empty()) {
                 for (const UnitControl& c : unit->controls) {
-                    Serial.printf(" %s(b%u)=%u", c.typeName.c_str(), c.offset / 8, c.value);
+                    Console.printf(" %s(b%u)=%u", c.typeName.c_str(), c.offset / 8, c.value);
                     if (c.typeName == "temperature" && c.max > c.min) {
-                        Serial.printf("(%uK)",
+                        Console.printf("(%uK)",
                             (uint16_t)(c.min + (uint32_t)c.value * (c.max - c.min) / 255));
                     }
                 }
             } else {
                 // Fallback (no fixture controls): legacy named fields. Tagged so
                 // it is unmistakable that no cloud fixture drives this unit.
-                Serial.print(" [no-fixture/legacy]");
-                Serial.printf(" level=%d", unit->level);
-                if (unit->hasVertical) Serial.printf(" vertical=%d", unit->vertical);
-                if (unit->hasCCT)      Serial.printf(" colorTemp=%d", unit->colorTemp);
+                Console.print(" [no-fixture/legacy]");
+                Console.printf(" level=%d", unit->level);
+                if (unit->hasVertical) Console.printf(" vertical=%d", unit->vertical);
+                if (unit->hasCCT)      Console.printf(" colorTemp=%d", unit->colorTemp);
             }
-            Serial.println();
+            Console.println();
         }
 
         // Fire callback
@@ -1717,15 +1718,15 @@ void CasambiClient::_applyInvocationFrames(const std::vector<InvocationFrame>& f
 
     if (casambiDebugEnabled) {
         for (const auto& ev : events) {
-            Serial.printf("Casambi: 0x07 input event unit=%d index=%d label=%d type=%d",
+            Console.printf("Casambi: 0x07 input event unit=%d index=%d label=%d type=%d",
                           ev.unitId, ev.index, ev.label, static_cast<int>(ev.type));
             if (ev.isButtonStream) {
-                Serial.printf(" pressed=%d p=%d s=%d", ev.pressed, ev.p, ev.s);
+                Console.printf(" pressed=%d p=%d s=%d", ev.pressed, ev.p, ev.s);
             } else {
-                Serial.printf(" code=0x%02x channel=%d", ev.inputCode, ev.channel);
-                if (ev.hasValue16) Serial.printf(" value16=%d", ev.value16);
+                Console.printf(" code=0x%02x channel=%d", ev.inputCode, ev.channel);
+                if (ev.hasValue16) Console.printf(" value16=%d", ev.value16);
             }
-            Serial.println();
+            Console.println();
         }
     }
 

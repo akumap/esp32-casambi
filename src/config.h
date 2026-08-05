@@ -360,6 +360,39 @@
 #define BLE_CMD_QUEUE_DEPTH             8
 
 // ============================================================================
+// TELNET CONSOLE (docs/konzept-tcp-konsole.md)
+// ============================================================================
+
+// TCP port for the network console. PuTTY's Telnet default, so a saved
+// session profile needs no non-default port.
+#define TELNET_PORT                     23
+
+// Capacity of the ring buffer every Console.print/println/printf/write call
+// mirrors into (console_out.*), drained by the telnet session. Statically
+// allocated on purpose: static RAM is abundant on this board (~470 KB free),
+// heap is the scarce resource TLS/BLE need — see konzept-tcp-konsole.md 4.2/E5.
+#define CONSOLE_RING_BUFFER_SIZE        4096
+
+// Idle-timeout default and ceiling for 'telnet timeout <seconds>' (E6a).
+// Measured from the last COMPLETE command line, not the last byte received —
+// a client's own Telnet keepalive would otherwise reset the timer forever
+// without the user noticing. See konzept-tcp-konsole.md 4.6.
+#define TELNET_TIMEOUT_DEFAULT_SECONDS  900
+#define TELNET_TIMEOUT_MAX_SECONDS      86400
+
+// Failed-login attempts before the connection is closed.
+#define TELNET_MAX_LOGIN_ATTEMPTS       3
+
+// Longest line the console buffers from a client (bytes, including the
+// terminating NUL). Longer input is silently truncated, not rejected.
+#define TELNET_LINE_MAX_LEN             160
+
+// Interval for a liveness probe (Telnet IAC NOP) sent to the client,
+// independent of the idle timeout above — so a dead-but-undetected TCP peer
+// still frees the single session slot even with 'telnet timeout 0' (E6b).
+#define TELNET_NOP_INTERVAL_MS          60000
+
+// ============================================================================
 // CLOUD CONFIG LIMITS
 // ============================================================================
 

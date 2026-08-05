@@ -5,15 +5,16 @@
 #include "webserver.h"
 #include "dashboard.h"      // DASHBOARD_HTML — the status page served at GET /
 #include "../config.h"
+#include "../console_out.h"
 #include "../log/event_log.h"
 #include "../storage/config_store.h"
 #include "../ble/packet.h"   // packetParseStats() for /api/status diagnostics
+#include "../crypto/api_token.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <time.h>
 #include <memory>
 #include <new>              // std::bad_alloc — see the WS_HAS_EXCEPTIONS note
-#include <mbedtls/sha256.h>
 
 // Whether this translation unit can catch a failed allocation.
 //
@@ -31,7 +32,7 @@
 #  define WS_HAS_EXCEPTIONS 0
 #endif
 
-#define WEB_LOG(...) do { if (webDebugEnabled) Serial.printf(__VA_ARGS__); } while(0)
+#define WEB_LOG(...) do { if (webDebugEnabled) Console.printf(__VA_ARGS__); } while(0)
 
 // RAII hold on g_configMutex.
 //
@@ -108,7 +109,7 @@ CasambiWebServer::~CasambiWebServer() {
 
 bool CasambiWebServer::begin(uint16_t port) {
     if (_running) {
-        Serial.println("Web: Server already running");
+        Console.println("Web: Server already running");
         return true;
     }
 
@@ -118,7 +119,7 @@ bool CasambiWebServer::begin(uint16_t port) {
     // password is stored → authentication stays disabled (backward compatible).
     _deriveApiToken();
     if (_apiToken.isEmpty()) {
-        Serial.println("Web: API auth DISABLED (no Casambi password stored)");
+        Console.println("Web: API auth DISABLED (no Casambi password stored)");
     } else {
         WEB_LOG("Web: API auth enabled (X-API-Key required)\n");
     }
@@ -163,7 +164,7 @@ void CasambiWebServer::stop() {
             xQueueReset(_broadcastQueue);
         }
 
-        Serial.println("Web: Server stopped");
+        Console.println("Web: Server stopped");
     }
 }
 
@@ -247,34 +248,12 @@ bool CasambiWebServer::consumeNtpRequest(String& serverOut) {
 // ============================================================================
 
 void CasambiWebServer::_deriveApiToken() {
-    _apiToken = "";
-    if (!_config || _config->casambiPassword.isEmpty()) return;
-
-    // apiToken = hex( SHA-256( API_TOKEN_PREFIX || casambiPassword ) )
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0);   // 0 = SHA-256 (not SHA-224)
-    mbedtls_sha256_update(&ctx, (const uint8_t*)API_TOKEN_PREFIX, strlen(API_TOKEN_PREFIX));
-    mbedtls_sha256_update(&ctx, (const uint8_t*)_config->casambiPassword.c_str(),
-                          _config->casambiPassword.length());
-    uint8_t hash[32];
-    mbedtls_sha256_finish(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    char hex[sizeof(hash) * 2 + 1];
-    for (size_t i = 0; i < sizeof(hash); i++) sprintf(hex + i * 2, "%02x", hash[i]);
-    hex[sizeof(hash) * 2] = '\0';
-    _apiToken = String(hex);
+    _apiToken = (!_config || _config->casambiPassword.isEmpty())
+        ? "" : ApiToken::derive(_config->casambiPassword);
 }
 
 bool CasambiWebServer::_constantTimeEquals(const String& a, const String& b) {
-    // Compare without an early exit so the time taken does not reveal how many
-    // leading characters matched. Length mismatch still short-circuits (lengths
-    // are not secret), but equal-length comparisons run in constant time.
-    if (a.length() != b.length()) return false;
-    uint8_t diff = 0;
-    for (size_t i = 0; i < a.length(); i++) diff |= (uint8_t)a[i] ^ (uint8_t)b[i];
-    return diff == 0;
+    return ApiToken::constantTimeEquals(a, b);
 }
 
 bool CasambiWebServer::_authOk(AsyncWebServerRequest* request) {
@@ -323,7 +302,7 @@ void CasambiWebServer::_handleWebSocketEvent(AsyncWebSocket* server,
         (type == WS_EVT_CONNECT || type == WS_EVT_DISCONNECT || type == WS_EVT_ERROR)) {
         const char* ev = (type == WS_EVT_CONNECT) ? "CONNECT"
                        : (type == WS_EVT_DISCONNECT) ? "DISCONN" : "ERROR";
-        Serial.printf("WSDBG %s id=%u count=%u free=%u largest=%u\n",
+        Console.printf("WSDBG %s id=%u count=%u free=%u largest=%u\n",
                       ev, client->id(), (unsigned)server->count(),
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     }

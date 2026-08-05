@@ -6,6 +6,7 @@
 
 #include <WiFi.h>
 #include "../config.h"
+#include "../console_out.h"
 #include "../app_state.h"
 #include "../log/event_log.h"
 #include "../web/webserver.h"
@@ -69,7 +70,7 @@ static void noteBLEIdle(const char* reason, const char* remedy) {
     if (lastBLEIdleNotice != 0 && now - lastBLEIdleNotice < BLE_IDLE_NOTICE_INTERVAL_MS) return;
     lastBLEIdleNotice = now;
 
-    Serial.printf("BLE: not connected and NOT attempting to reconnect - %s (%s)\n", reason, remedy);
+    Console.printf("BLE: not connected and NOT attempting to reconnect - %s (%s)\n", reason, remedy);
     if (!bleIdleReasonLogged) {
         bleIdleReasonLogged = true;
         EventLog::log(LOG_WARN, "BLE idle, no reconnect: %s", reason);
@@ -106,7 +107,7 @@ void checkAndReconnectBLE() {
 
     lastBLEReconnectAttempt = now;
 
-    Serial.printf("BLE: Auto-reconnect attempt #%d to %s (backoff: %lu ms, offline %lus, heap=%u)...\n",
+    Console.printf("BLE: Auto-reconnect attempt #%d to %s (backoff: %lu ms, offline %lus, heap=%u)...\n",
                   consecutiveReconnectFailures + 1,
                   networkConfig.autoConnectAddress.c_str(),
                   bleReconnectInterval,
@@ -114,7 +115,7 @@ void checkAndReconnectBLE() {
                   ESP.getFreeHeap());
 
     if (casambiClient->connect(networkConfig.autoConnectAddress)) {
-        Serial.println("BLE: Reconnect successful!");
+        Console.println("BLE: Reconnect successful!");
         // Record the recovery: attempts needed and how long the link was down.
         // Together with the loss entry this shows outage windows in the log.
         unsigned long offlineSecs = bleLostAt ? (millis() - bleLostAt) / 1000 : 0;
@@ -129,7 +130,7 @@ void checkAndReconnectBLE() {
         if (WiFi.status() == WL_CONNECTED && !webServer) {
             webServer = new CasambiWebServer(casambiClient, &networkConfig);
             if (webServer->begin()) {
-                Serial.printf("Web API restarted at: http://%s/api\n",
+                Console.printf("Web API restarted at: http://%s/api\n",
                               WiFi.localIP().toString().c_str());
             }
             startMDNS();
@@ -155,7 +156,7 @@ void checkAndReconnectBLE() {
         // The phase says where it broke, the rc says why the radio said no.
         // "peer unreachable" alone sent people hunting for range problems when
         // the real fault was one phase further in (see issue #42).
-        Serial.printf("BLE: Reconnect failed (#%d, %s, phase=%s, reason=%d/%s, rc=%d). "
+        Console.printf("BLE: Reconnect failed (#%d, %s, phase=%s, reason=%d/%s, rc=%d). "
                       "Next attempt in %lu ms\n",
                       consecutiveReconnectFailures,
                       internalFailure ? "internal error" : "peer unreachable",
@@ -174,7 +175,7 @@ void checkAndReconnectBLE() {
         }
 
         if (internalFailureStreak >= MAX_RECONNECT_FAILURES) {
-            Serial.println("*** Too many internal BLE failures! Restarting ESP32 ***");
+            Console.println("*** Too many internal BLE failures! Restarting ESP32 ***");
             EventLog::log(LOG_CRITICAL, "Restart: %d internal BLE failures (phase=%s, reason=%s)",
                           internalFailureStreak, casambiClient->getLastConnectPhase(),
                           disconnectReasonName(lastReason));

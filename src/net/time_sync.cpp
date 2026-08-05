@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include "../config.h"
+#include "../console_out.h"
 #include "../app_state.h"
 
 // Short, stable per-device suffix (the LAST two MAC octets) used for the mDNS
@@ -41,9 +42,9 @@ void startMDNS() {
         MDNS.addServiceTxt("http", "tcp", "configured", "1");
         MDNS.addServiceTxt("http", "tcp", "build", String(FIRMWARE_BUILD));
         MDNS.addServiceTxt("http", "tcp", "network", networkConfig.networkName);
-        Serial.printf("mDNS: http://%s.local/\n", host.c_str());
+        Console.printf("mDNS: http://%s.local/\n", host.c_str());
     } else {
-        Serial.println("mDNS: failed to start (will retry on next WiFi recovery)");
+        Console.println("mDNS: failed to start (will retry on next WiFi recovery)");
     }
 }
 
@@ -119,6 +120,6 @@ void syncTime() {
         configTime(0, 0, cfgServer);
         g_ntpCandidates = cfgServer;
     }
-    Serial.printf("NTP: time sync requested, server order: %s (UTC)\n",
+    Console.printf("NTP: time sync requested, server order: %s (UTC)\n",
                   g_ntpCandidates.c_str());
 }

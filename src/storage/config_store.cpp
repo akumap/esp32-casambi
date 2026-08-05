@@ -4,6 +4,7 @@
 
 #include "config_store.h"
 #include "config_validation.h"
+#include "../console_out.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
@@ -13,12 +14,12 @@ bool ConfigStore::init() {
     if (_initialized) return true;
 
     if (!LittleFS.begin(true)) {
-        Serial.println("Failed to mount LittleFS");
+        Console.println("Failed to mount LittleFS");
         return false;
     }
 
     _initialized = true;
-    Serial.println("LittleFS mounted");
+    Console.println("LittleFS mounted");
     return true;
 }
 
@@ -39,14 +40,14 @@ static bool commitAtomic(const char* livePath, const char* tmpPath,
 
     if (LittleFS.exists(livePath)) {
         if (!LittleFS.rename(livePath, bakPath)) {
-            Serial.println("Storage: failed to back up live file; aborting save");
+            Console.println("Storage: failed to back up live file; aborting save");
             LittleFS.remove(tmpPath);
             return false;
         }
     }
 
     if (!LittleFS.rename(tmpPath, livePath)) {
-        Serial.println("Storage: failed to move temp into place; restoring backup");
+        Console.println("Storage: failed to move temp into place; restoring backup");
         if (LittleFS.exists(bakPath)) LittleFS.rename(bakPath, livePath);
         LittleFS.remove(tmpPath);
         return false;
@@ -74,7 +75,7 @@ bool ConfigStore::hasValidConfig() {
 bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     if (!_initialized && !init()) return false;
 
-    Serial.println("Storage: Saving network config...");
+    Console.println("Storage: Saving network config...");
 
     // Create JSON document
     JsonDocument doc;
@@ -96,6 +97,9 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
 
     // Casambi network password (reused by `refresh`)
     doc["casambiPassword"] = config.casambiPassword;
+
+    // Telnet console idle-timeout (seconds; 0 = disabled)
+    doc["telnetTimeoutSeconds"] = config.telnetTimeoutSeconds;
 
     // Debug settings (per category)
     doc["bleDebugEnabled"]     = config.bleDebugEnabled;
@@ -185,11 +189,11 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     // is safely on flash.
     File file = LittleFS.open(CONFIG_TMP_PATH, "w");
     if (!file) {
-        Serial.println("Storage: Failed to open temp config file for writing");
+        Console.println("Storage: Failed to open temp config file for writing");
         return false;
     }
     if (serializeJson(doc, file) == 0) {
-        Serial.println("Storage: Failed to write JSON");
+        Console.println("Storage: Failed to write JSON");
         file.close();
         LittleFS.remove(CONFIG_TMP_PATH);
         return false;
@@ -201,7 +205,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
     {
         File verify = LittleFS.open(CONFIG_TMP_PATH, "r");
         if (!verify) {
-            Serial.println("Storage: Failed to reopen temp config for validation");
+            Console.println("Storage: Failed to reopen temp config for validation");
             LittleFS.remove(CONFIG_TMP_PATH);
             return false;
         }
@@ -215,7 +219,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
                                                    MAX_PROTOCOL_VERSION,
                                                    AES_KEY_SIZE);
         if (verr || !configval::isCommittable(vreason)) {
-            Serial.printf("Storage: temp config failed validation (parse=%s, reason=%d, "
+            Console.printf("Storage: temp config failed validation (parse=%s, reason=%d, "
                           "networkId='%s', protocolVersion=%d, keys=%d); not committing\n",
                           verr ? verr.c_str() : "ok", (int)vreason,
                           vdoc["networkId"].as<const char*>() ? vdoc["networkId"].as<const char*>() : "(none)",
@@ -225,7 +229,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
             return false;
         }
         if (vreason == configval::CFG_UNSUPPORTED_PROTOCOL) {
-            Serial.printf("Storage: WARNING: protocolVersion %d outside supported range "
+            Console.printf("Storage: WARNING: protocolVersion %d outside supported range "
                           "[%d,%d]; saving anyway (on-air handling is version tolerant)\n",
                           vdoc["protocolVersion"].as<int>(),
                           MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION);
@@ -236,7 +240,7 @@ bool ConfigStore::saveNetworkConfig(const NetworkConfig& config) {
         return false;
     }
 
-    Serial.printf("Storage: Saved config (%d keys, %d units, %d groups, %d scenes)\n",
+    Console.printf("Storage: Saved config (%d keys, %d units, %d groups, %d scenes)\n",
                   config.keys.size(), config.units.size(),
                   config.groups.size(), config.scenes.size());
 
@@ -253,13 +257,13 @@ bool ConfigStore::loadNetworkConfig(NetworkConfig& config) {
 
     if (LittleFS.exists(CONFIG_BAK_PATH) &&
         _loadNetworkConfigFrom(CONFIG_BAK_PATH, config)) {
-        Serial.println("Storage: recovered network config from backup");
+        Console.println("Storage: recovered network config from backup");
         if (LittleFS.exists(CONFIG_FILE_PATH)) LittleFS.remove(CONFIG_FILE_PATH);
         LittleFS.rename(CONFIG_BAK_PATH, CONFIG_FILE_PATH);  // best-effort promote
         return true;
     }
 
-    Serial.println("Storage: no valid network config (live or backup)");
+    Console.println("Storage: no valid network config (live or backup)");
     return false;
 }
 
@@ -276,11 +280,11 @@ bool ConfigStore::saveDebugFlags(const NetworkConfig& config) {
 
     File file = LittleFS.open(DEBUG_FLAGS_TMP_PATH, "w");
     if (!file) {
-        Serial.println("Storage: Failed to open temp debug-flags file for writing");
+        Console.println("Storage: Failed to open temp debug-flags file for writing");
         return false;
     }
     if (serializeJson(doc, file) == 0) {
-        Serial.println("Storage: Failed to write debug flags");
+        Console.println("Storage: Failed to write debug flags");
         file.close();
         LittleFS.remove(DEBUG_FLAGS_TMP_PATH);
         return false;
@@ -313,7 +317,7 @@ bool ConfigStore::loadDebugFlags(NetworkConfig& config) {
     if (err) {
         // Keep whatever loadNetworkConfig() supplied rather than resetting to
         // defaults; a debug flag is not worth failing a boot over.
-        Serial.printf("Storage: debug flags unreadable (%s), keeping config values\n",
+        Console.printf("Storage: debug flags unreadable (%s), keeping config values\n",
                       err.c_str());
         return false;
     }
@@ -333,11 +337,11 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
         return false;
     }
 
-    Serial.printf("Storage: Loading network config from %s...\n", path);
+    Console.printf("Storage: Loading network config from %s...\n", path);
 
     File file = LittleFS.open(path, "r");
     if (!file) {
-        Serial.println("Storage: Failed to open config file");
+        Console.println("Storage: Failed to open config file");
         return false;
     }
 
@@ -347,7 +351,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     file.close();
 
     if (error) {
-        Serial.printf("Storage: JSON parse error: %s\n", error.c_str());
+        Console.printf("Storage: JSON parse error: %s\n", error.c_str());
         return false;
     }
 
@@ -362,7 +366,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
                                         MAX_PROTOCOL_VERSION,
                                         AES_KEY_SIZE);
     if (!configval::isCommittable(reason)) {
-        Serial.printf("Storage: config failed semantic validation (reason=%d, "
+        Console.printf("Storage: config failed semantic validation (reason=%d, "
                       "networkId='%s', protocolVersion=%d, keys=%d)\n",
                       (int)reason,
                       doc["networkId"].as<const char*>() ? doc["networkId"].as<const char*>() : "(none)",
@@ -371,7 +375,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
         return false;
     }
     if (reason == configval::CFG_UNSUPPORTED_PROTOCOL) {
-        Serial.printf("Storage: WARNING: protocolVersion %d outside supported range "
+        Console.printf("Storage: WARNING: protocolVersion %d outside supported range "
                       "[%d,%d]; loading anyway (on-air handling is version tolerant)\n",
                       doc["protocolVersion"].as<int>(),
                       MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION);
@@ -395,6 +399,9 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     // Load saved Casambi network password (empty for configs from before
     // this field existed, in which case `refresh` will prompt for it)
     config.casambiPassword = doc["casambiPassword"] | "";
+
+    // Load telnet idle-timeout (default for configs predating this field)
+    config.telnetTimeoutSeconds = doc["telnetTimeoutSeconds"] | (uint32_t)TELNET_TIMEOUT_DEFAULT_SECONDS;
 
     // Load debug settings (with defaults for backward compatibility)
     config.bleDebugEnabled     = doc["bleDebugEnabled"]     | false;
@@ -504,7 +511,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
         }
     }
 
-    Serial.printf("Storage: Loaded config (%d keys, %d units, %d groups, %d scenes)\n",
+    Console.printf("Storage: Loaded config (%d keys, %d units, %d groups, %d scenes)\n",
                   config.keys.size(), config.units.size(),
                   config.groups.size(), config.scenes.size());
 
@@ -514,7 +521,7 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
 bool ConfigStore::saveWiFiCredentials(const WiFiCredentials& creds) {
     if (!_initialized && !init()) return false;
 
-    Serial.println("Storage: Saving WiFi credentials...");
+    Console.println("Storage: Saving WiFi credentials...");
 
     JsonDocument doc;
     doc["ssid"] = creds.ssid;
@@ -524,11 +531,11 @@ bool ConfigStore::saveWiFiCredentials(const WiFiCredentials& creds) {
     // truncate the live credentials before the new ones are safely on flash.
     File file = LittleFS.open(WIFI_TMP_PATH, "w");
     if (!file) {
-        Serial.println("Storage: Failed to open temp WiFi file for writing");
+        Console.println("Storage: Failed to open temp WiFi file for writing");
         return false;
     }
     if (serializeJson(doc, file) == 0) {
-        Serial.println("Storage: Failed to write WiFi JSON");
+        Console.println("Storage: Failed to write WiFi JSON");
         file.close();
         LittleFS.remove(WIFI_TMP_PATH);
         return false;
@@ -545,7 +552,7 @@ bool ConfigStore::saveWiFiCredentials(const WiFiCredentials& creds) {
         DeserializationError verr = deserializeJson(vdoc, verify);
         verify.close();
         if (verr || !configval::isValidWifiDoc(vdoc)) {
-            Serial.println("Storage: temp WiFi creds failed validation; not committing");
+            Console.println("Storage: temp WiFi creds failed validation; not committing");
             LittleFS.remove(WIFI_TMP_PATH);
             return false;
         }
@@ -555,7 +562,7 @@ bool ConfigStore::saveWiFiCredentials(const WiFiCredentials& creds) {
         return false;
     }
 
-    Serial.printf("Storage: Saved WiFi credentials (SSID: %s)\n", creds.ssid.c_str());
+    Console.printf("Storage: Saved WiFi credentials (SSID: %s)\n", creds.ssid.c_str());
     return true;
 }
 
@@ -566,13 +573,13 @@ bool ConfigStore::loadWiFiCredentials(WiFiCredentials& creds) {
 
     if (LittleFS.exists(WIFI_BAK_PATH) &&
         _loadWiFiCredentialsFrom(WIFI_BAK_PATH, creds)) {
-        Serial.println("Storage: recovered WiFi credentials from backup");
+        Console.println("Storage: recovered WiFi credentials from backup");
         if (LittleFS.exists(WIFI_FILE_PATH)) LittleFS.remove(WIFI_FILE_PATH);
         LittleFS.rename(WIFI_BAK_PATH, WIFI_FILE_PATH);  // best-effort promote
         return true;
     }
 
-    Serial.println("Storage: no valid WiFi credentials (live or backup)");
+    Console.println("Storage: no valid WiFi credentials (live or backup)");
     return false;
 }
 
@@ -583,7 +590,7 @@ bool ConfigStore::_loadWiFiCredentialsFrom(const char* path, WiFiCredentials& cr
 
     File file = LittleFS.open(path, "r");
     if (!file) {
-        Serial.println("Storage: Failed to open WiFi file");
+        Console.println("Storage: Failed to open WiFi file");
         return false;
     }
 
@@ -592,19 +599,19 @@ bool ConfigStore::_loadWiFiCredentialsFrom(const char* path, WiFiCredentials& cr
     file.close();
 
     if (error) {
-        Serial.printf("Storage: WiFi JSON parse error: %s\n", error.c_str());
+        Console.printf("Storage: WiFi JSON parse error: %s\n", error.c_str());
         return false;
     }
 
     if (!configval::isValidWifiDoc(doc)) {
-        Serial.println("Storage: WiFi credentials failed validation");
+        Console.println("Storage: WiFi credentials failed validation");
         return false;
     }
 
     creds.ssid = doc["ssid"].as<String>();
     creds.password = doc["password"].as<String>();
 
-    Serial.printf("Storage: Loaded WiFi credentials (SSID: %s)\n", creds.ssid.c_str());
+    Console.printf("Storage: Loaded WiFi credentials (SSID: %s)\n", creds.ssid.c_str());
     return true;
 }
 
@@ -622,7 +629,7 @@ void ConfigStore::clearAll() {
         if (LittleFS.exists(p)) LittleFS.remove(p);
     }
 
-    Serial.println("Configuration cleared");
+    Console.println("Configuration cleared");
 }
 
 void ConfigStore::setRefreshPending() {

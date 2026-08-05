@@ -11,6 +11,7 @@
 #include <ArduinoJson.h>
 
 #include "../config.h"
+#include "../console_out.h"
 #include "../cloud/api_client.h"
 #include "../storage/config_store.h"
 #include "../log/event_log.h"
@@ -179,7 +180,7 @@ SetupPortal::SetupPortal()
         // without it would race the async_tcp task. Restart cleanly instead —
         // the portal is recreated on the next boot.
         EventLog::log(LOG_ERROR, "Portal: mutex creation failed (heap exhausted), restarting");
-        Serial.println("FATAL: portal mutex creation failed - restarting");
+        Console.println("FATAL: portal mutex creation failed - restarting");
         delay(250);
         ESP.restart();
     }
@@ -208,8 +209,8 @@ bool SetupPortal::begin() {
     _setupRoutes();
     _server->begin();
 
-    Serial.println("\n=== Setup Portal active ===");
-    Serial.printf("Connect to open WiFi '%s', then open http://%s/\n",
+    Console.println("\n=== Setup Portal active ===");
+    Console.printf("Connect to open WiFi '%s', then open http://%s/\n",
                   ssid.c_str(), ip.toString().c_str());
     return true;
 }
@@ -396,7 +397,7 @@ void SetupPortal::loop() {
     }
 
     if (_prov == ProvState::Done && _rebootAt && millis() >= _rebootAt) {
-        Serial.println("Setup complete - restarting into operation mode");
+        Console.println("Setup complete - restarting into operation mode");
         delay(200);
         ESP.restart();
     }
@@ -404,7 +405,7 @@ void SetupPortal::loop() {
 
 void SetupPortal::_runScan() {
     _scan = ScanState::Running;
-    Serial.println("Portal: BLE scan...");
+    Console.println("Portal: BLE scan...");
 
     // Keep BLE initialised across repeated scans. Releasing the controller
     // memory (deinit(true)) cannot be undone within the same boot, so doing it
@@ -426,7 +427,7 @@ void SetupPortal::_runScan() {
         xSemaphoreGive(_mutex);
     }
 
-    Serial.printf("Portal: BLE scan done, %d device(s)\n", _scanResults.size());
+    Console.printf("Portal: BLE scan done, %d device(s)\n", _scanResults.size());
     _scan = ScanState::Done;
 }
 
@@ -482,7 +483,7 @@ void SetupPortal::_runProvision() {
         _prov = ProvState::Error;
         return;
     }
-    Serial.printf("Portal: WiFi connected, IP %s\n", WiFi.localIP().toString().c_str());
+    Console.printf("Portal: WiFi connected, IP %s\n", WiFi.localIP().toString().c_str());
 
     _prov = ProvState::Fetching;
 
@@ -559,7 +560,7 @@ void SetupPortal::_runProvision() {
     }
     _prov = ProvState::Done;
     _rebootAt = millis() + 4000;       // let the browser poll the success state
-    Serial.printf("Portal: provisioned network '%s'\n", cfg.networkName.c_str());
+    Console.printf("Portal: provisioned network '%s'\n", cfg.networkName.c_str());
 }
 
 // ---------------------------------------------------------------------------

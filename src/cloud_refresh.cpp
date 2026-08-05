@@ -9,6 +9,7 @@
 #include <esp_task_wdt.h>
 #include "config.h"
 #include "app_state.h"
+#include "console_out.h"
 #include "cloud/api_client.h"
 #include "storage/config_store.h"
 #include "log/event_log.h"
@@ -31,7 +32,7 @@
 // POST /api/refreshCasambi. On success it does not return — it reboots.
 void requestCloudRefresh(const String& password) {
     if (password.length() == 0) {
-        Serial.println("ERROR: No network password available for refresh.");
+        Console.println("ERROR: No network password available for refresh.");
         return;
     }
 
@@ -42,13 +43,13 @@ void requestCloudRefresh(const String& password) {
         networkConfig.casambiPassword = password;
         configUnlock();
         if (!ConfigStore::saveNetworkConfig(networkConfig)) {
-            Serial.println("ERROR: Failed to store password for refresh");
+            Console.println("ERROR: Failed to store password for refresh");
             return;
         }
     }
 
     ConfigStore::setRefreshPending();
-    Serial.println("Cloud refresh scheduled. Restarting to apply...");
+    Console.println("Cloud refresh scheduled. Restarting to apply...");
     delay(500);
     ESP.restart();
 }
@@ -62,23 +63,23 @@ void requestCloudRefresh(const String& password) {
 // continues into normal operation with the existing (unchanged) config. On
 // success the device reboots and comes up with the fresh config.
 void runScheduledCloudRefresh() {
-    Serial.println("\n=== Scheduled Cloud Refresh ===");
+    Console.println("\n=== Scheduled Cloud Refresh ===");
 
     const String password = networkConfig.casambiPassword;
     if (password.length() == 0) {
-        Serial.println("ERROR: No stored network password; skipping refresh.");
+        Console.println("ERROR: No stored network password; skipping refresh.");
         return;
     }
 
     // Bring up WiFi (nothing else is connected yet at this point in boot).
     WiFiCredentials wifiCreds;
     if (!ConfigStore::loadWiFiCredentials(wifiCreds)) {
-        Serial.println("ERROR: No WiFi credentials stored; skipping refresh.");
+        Console.println("ERROR: No WiFi credentials stored; skipping refresh.");
         return;
     }
     wifiLoadCachedCredentials();
 
-    Serial.printf("Connecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
+    Console.printf("Connecting to WiFi: %s...\n", wifiCreds.ssid.c_str());
     WiFi.mode(WIFI_STA);
     WiFi.begin(wifiCreds.ssid.c_str(), wifiCreds.password.c_str());
 
@@ -86,44 +87,44 @@ void runScheduledCloudRefresh() {
     while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
         delay(100);
         esp_task_wdt_reset();
-        Serial.print(".");
+        Console.print(".");
     }
-    Serial.println();
+    Console.println();
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("ERROR: WiFi connection failed; skipping refresh.");
+        Console.println("ERROR: WiFi connection failed; skipping refresh.");
         WiFi.disconnect(true);
         return;
     }
-    Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+    Console.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
 
     // On any failure below, drop WiFi so setup() resumes from its normal
     // "BLE first, then WiFi" ordering with the existing config untouched.
 
     // Get network ID from stored UUID
-    Serial.println("--- Fetching network ID ---");
+    Console.println("--- Fetching network ID ---");
     String networkId;
     CasambiAPIClient tempClient;
     if (!tempClient.getNetworkId(networkConfig.networkUuid, networkId)) {
-        Serial.printf("ERROR: Failed to get network ID: %s\n", tempClient.getLastError().c_str());
+        Console.printf("ERROR: Failed to get network ID: %s\n", tempClient.getLastError().c_str());
         WiFi.disconnect(true);
         return;
     }
 
     // Create session
-    Serial.println("--- Creating session ---");
+    Console.println("--- Creating session ---");
     String sessionToken;
     if (!tempClient.createSession(networkId, password, sessionToken)) {
-        Serial.printf("ERROR: Authentication failed: %s\n", tempClient.getLastError().c_str());
+        Console.printf("ERROR: Authentication failed: %s\n", tempClient.getLastError().c_str());
         WiFi.disconnect(true);
         return;
     }
 
     // Fetch fresh configuration
-    Serial.println("--- Downloading configuration ---");
+    Console.println("--- Downloading configuration ---");
     NetworkConfig freshConfig;
     if (!tempClient.fetchNetworkConfig(networkId, sessionToken, freshConfig)) {
-        Serial.printf("ERROR: Failed to fetch config: %s\n", tempClient.getLastError().c_str());
+        Console.printf("ERROR: Failed to fetch config: %s\n", tempClient.getLastError().c_str());
         WiFi.disconnect(true);
         return;
     }
@@ -140,23 +141,23 @@ void runScheduledCloudRefresh() {
     preserveLocalSettings(networkConfig, freshConfig);
 
     // Save updated configuration
-    Serial.println("--- Saving to flash ---");
+    Console.println("--- Saving to flash ---");
     if (!ConfigStore::saveNetworkConfig(freshConfig)) {
-        Serial.println("ERROR: Failed to save configuration; keeping existing config.");
+        Console.println("ERROR: Failed to save configuration; keeping existing config.");
         WiFi.disconnect(true);
         return;
     }
 
-    Serial.println("\n=== Refresh Complete! ===");
-    Serial.printf("Network: %s\n", freshConfig.networkName.c_str());
-    Serial.printf("Protocol: v%d (revision %d)\n", freshConfig.protocolVersion, freshConfig.revision);
-    Serial.printf("Units: %d\n", freshConfig.units.size());
-    Serial.printf("Groups: %d\n", freshConfig.groups.size());
-    Serial.printf("Scenes: %d\n", freshConfig.scenes.size());
+    Console.println("\n=== Refresh Complete! ===");
+    Console.printf("Network: %s\n", freshConfig.networkName.c_str());
+    Console.printf("Protocol: v%d (revision %d)\n", freshConfig.protocolVersion, freshConfig.revision);
+    Console.printf("Units: %d\n", freshConfig.units.size());
+    Console.printf("Groups: %d\n", freshConfig.groups.size());
+    Console.printf("Scenes: %d\n", freshConfig.scenes.size());
 
     checkCasambiVersions(freshConfig);
 
-    Serial.println("\nConfiguration updated. Restarting to apply...");
+    Console.println("\nConfiguration updated. Restarting to apply...");
     delay(2000);
     ESP.restart();
 }

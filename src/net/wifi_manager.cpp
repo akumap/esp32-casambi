@@ -8,6 +8,7 @@
 #include <esp_task_wdt.h>
 #include <atomic>
 #include "../config.h"
+#include "../console_out.h"
 #include "../app_state.h"
 #include "../log/event_log.h"
 #include "../web/webserver.h"
@@ -146,8 +147,8 @@ void checkAndReconnectWiFi() {
         // recovery, not on every check while connected.
         if (!g_wifiWasConnected) {
             g_wifiWasConnected = true;
-            Serial.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
-            if (heapDebugEnabled) Serial.println("WiFiRC: <- reconnected");
+            Console.printf("WiFi: Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
+            if (heapDebugEnabled) Console.println("WiFiRC: <- reconnected");
             EventLog::log(LOG_INFO, "WiFi reconnected (SSID %s)", WiFi.SSID().c_str());
             syncTime();  // re-arm NTP after reconnect
 
@@ -156,7 +157,7 @@ void checkAndReconnectWiFi() {
             if (casambiClient && !webServer) {
                 webServer = new CasambiWebServer(casambiClient, &networkConfig);
                 if (webServer->begin()) {
-                    Serial.printf("Web API restarted at: http://%s/api\n",
+                    Console.printf("Web API restarted at: http://%s/api\n",
                                   WiFi.localIP().toString().c_str());
                 }
             }
@@ -192,7 +193,7 @@ void checkAndReconnectWiFi() {
     // before a reboot. The esp_task_wdt_reset() calls stay UNCONDITIONAL — they
     // feed the watchdog and are functional, not diagnostics.
     esp_task_wdt_reset();
-    if (heapDebugEnabled) Serial.println("WiFiRC: -> reconnect() [non-blocking]");
+    if (heapDebugEnabled) Console.println("WiFiRC: -> reconnect() [non-blocking]");
     WiFi.reconnect();
     esp_task_wdt_reset();
 }

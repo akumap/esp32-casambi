@@ -9,6 +9,7 @@
 #include <esp_task_wdt.h>   // the advertisement probe feeds the WDT while scanning
 #include "config.h"
 #include "app_state.h"
+#include "console_out.h"
 #include "log/event_log.h"
 #include "web/webserver.h"
 #include "ble/casambi_client.h"
@@ -43,7 +44,7 @@ void monitorHeap() {
     }
 
     if (heapDebugEnabled) {
-        Serial.printf("HEAP: free=%d, min=%d, largest_block=%d\n",
+        Console.printf("HEAP: free=%d, min=%d, largest_block=%d\n",
                       freeHeap, minFreeHeap, largestBlock);
     }
 
@@ -53,7 +54,7 @@ void monitorHeap() {
     static uint8_t lowHeapStreak = 0;
     if (freeHeap < HEAP_CRITICAL_THRESHOLD) {
         lowHeapStreak++;
-        Serial.printf("*** Low heap %d < %d (%u/%u) ***\n",
+        Console.printf("*** Low heap %d < %d (%u/%u) ***\n",
                       freeHeap, HEAP_CRITICAL_THRESHOLD,
                       lowHeapStreak, HEAP_CRITICAL_CONSECUTIVE);
         // Record the onset of a low-heap episode once, for post-mortem analysis.
@@ -62,7 +63,7 @@ void monitorHeap() {
                           (unsigned)freeHeap, (unsigned)HEAP_CRITICAL_THRESHOLD);
         }
         if (lowHeapStreak >= HEAP_CRITICAL_CONSECUTIVE) {
-            Serial.println("*** Sustained low heap - restarting ESP32 ***");
+            Console.println("*** Sustained low heap - restarting ESP32 ***");
             EventLog::log(LOG_CRITICAL, "Restart: low heap %u < %u bytes (%u readings)",
                           (unsigned)freeHeap, (unsigned)HEAP_CRITICAL_THRESHOLD,
                           lowHeapStreak);
@@ -79,21 +80,21 @@ void monitorHeap() {
 // ============================================================================
 
 void printStatus() {
-    Serial.println("\n=== System Status ===");
+    Console.println("\n=== System Status ===");
 
     // BLE status
     if (casambiClient) {
-        Serial.printf("BLE: %s\n",
+        Console.printf("BLE: %s\n",
             casambiClient->isAuthenticated() ? "Authenticated" :
             (casambiClient->getState() == ConnectionState::None ? "Disconnected" : "Connecting..."));
 
         if (casambiClient->isAuthenticated()) {
             unsigned long uptime = casambiClient->getConnectionUptime();
-            Serial.printf("  Uptime: %lu:%02lu:%02lu\n",
+            Console.printf("  Uptime: %lu:%02lu:%02lu\n",
                           uptime / 3600000, (uptime / 60000) % 60, (uptime / 1000) % 60);
-            Serial.printf("  Packets received: %u\n", casambiClient->getReceivedPacketCount());
-            Serial.printf("  Connected to: %s\n", casambiClient->getConnectedAddress().c_str());
-            Serial.printf("  RSSI: %d dBm\n", casambiClient->getLastRssi());
+            Console.printf("  Packets received: %u\n", casambiClient->getReceivedPacketCount());
+            Console.printf("  Connected to: %s\n", casambiClient->getConnectedAddress().c_str());
+            Console.printf("  RSSI: %d dBm\n", casambiClient->getLastRssi());
         }
 
         // Parser counters. "partial" = the understood prefix was applied and
@@ -102,16 +103,16 @@ void printStatus() {
         // "malformed" = the packet yielded nothing usable.
         const PacketParseStats& ps = packetParseStats();
         if (ps.partial06.load() || ps.partial07.load() || ps.partial08.load()) {
-            Serial.printf("  Partially decoded packets: 0x06=%u 0x07=%u 0x08=%u\n",
+            Console.printf("  Partially decoded packets: 0x06=%u 0x07=%u 0x08=%u\n",
                           ps.partial06.load(), ps.partial07.load(), ps.partial08.load());
         }
         if (ps.malformed06.load() || ps.malformed07.load() || ps.malformed08.load()) {
-            Serial.printf("  Malformed packets dropped: 0x06=%u 0x07=%u 0x08=%u\n",
+            Console.printf("  Malformed packets dropped: 0x06=%u 0x07=%u 0x08=%u\n",
                           ps.malformed06.load(), ps.malformed07.load(), ps.malformed08.load());
         }
 
         if (casambiClient->getLastDisconnectReason() != DisconnectReason::None) {
-            Serial.printf("  Last disconnect: reason=%d/%s, source=%s\n",
+            Console.printf("  Last disconnect: reason=%d/%s, source=%s\n",
                           static_cast<int>(casambiClient->getLastDisconnectReason()),
                           disconnectReasonName(casambiClient->getLastDisconnectReason()),
                           casambiClient->getLastDisconnectSource());
@@ -120,37 +121,37 @@ void printStatus() {
             // Where the last attempt broke is the single most useful number
             // when the link never comes up ("link" = never reached the peer,
             // anything else = we talked to it and the handshake failed).
-            Serial.printf("  Last connect phase: %s (rc=%d)\n",
+            Console.printf("  Last connect phase: %s (rc=%d)\n",
                           casambiClient->getLastConnectPhase(),
                           casambiClient->getLastConnectError());
-            Serial.printf("  Auto-connect: %s, MAC: %s\n",
+            Console.printf("  Auto-connect: %s, MAC: %s\n",
                           networkConfig.autoConnectEnabled ? "enabled" : "disabled",
                           networkConfig.autoConnectAddress.length()
                               ? networkConfig.autoConnectAddress.c_str() : "(none)");
-            Serial.println("  Run 'blediag' for a full BLE diagnostic report");
+            Console.println("  Run 'blediag' for a full BLE diagnostic report");
         }
     } else {
-        Serial.println("BLE: Setup mode - no client");
+        Console.println("BLE: Setup mode - no client");
     }
 
     // WiFi status
-    Serial.printf("WiFi: %s\n", WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
+    Console.printf("WiFi: %s\n", WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("  IP: %s, RSSI: %d dBm\n",
+        Console.printf("  IP: %s, RSSI: %d dBm\n",
                       WiFi.localIP().toString().c_str(), WiFi.RSSI());
     }
 
     // Web server
-    Serial.printf("Web Server: %s\n",
+    Console.printf("Web Server: %s\n",
                   (webServer && webServer->isRunning()) ? "Running" : "Stopped");
 
     // System info
-    Serial.printf("Heap: free=%d, min=%d, largest=%d\n",
+    Console.printf("Heap: free=%d, min=%d, largest=%d\n",
                   ESP.getFreeHeap(), minFreeHeap, ESP.getMaxAllocHeap());
-    Serial.printf("Uptime: %lu seconds\n", millis() / 1000);
-    Serial.printf("Reconnect failures: %d/%d\n", bleConsecutiveFailures(), MAX_RECONNECT_FAILURES);
-    Serial.printf("Auto-reconnect: %s\n", bleReconnectEnabled() ? "enabled" : "disabled");
-    Serial.println();
+    Console.printf("Uptime: %lu seconds\n", millis() / 1000);
+    Console.printf("Reconnect failures: %d/%d\n", bleConsecutiveFailures(), MAX_RECONNECT_FAILURES);
+    Console.printf("Auto-reconnect: %s\n", bleReconnectEnabled() ? "enabled" : "disabled");
+    Console.println();
 }
 
 // ============================================================================
@@ -163,113 +164,113 @@ void printStatus() {
 // for issue #42, where a device was discovered by setup but never connected
 // and the existing traces said nothing at all.
 void printBLEDiagnostics() {
-    Serial.println("\n=== BLE Diagnostics ===");
-    Serial.printf("Firmware build: %d, uptime: %lus, heap: free=%u min=%u largest=%u\n",
+    Console.println("\n=== BLE Diagnostics ===");
+    Console.printf("Firmware build: %d, uptime: %lus, heap: free=%u min=%u largest=%u\n",
                   FIRMWARE_BUILD, millis() / 1000,
                   ESP.getFreeHeap(), minFreeHeap, ESP.getMaxAllocHeap());
-    Serial.printf("Chip: %s rev %d, %d core(s)\n",
+    Console.printf("Chip: %s rev %d, %d core(s)\n",
                   ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores());
 
     // --- Configuration -----------------------------------------------------
-    Serial.println("\n-- Configuration --");
-    Serial.printf("Network: '%s' (uuid=%s)\n",
+    Console.println("\n-- Configuration --");
+    Console.printf("Network: '%s' (uuid=%s)\n",
                   networkConfig.networkName.c_str(), networkConfig.networkUuid.c_str());
-    Serial.printf("Protocol version: %d (minimum %d)\n",
+    Console.printf("Protocol version: %d (minimum %d)\n",
                   networkConfig.protocolVersion, MIN_PROTOCOL_VERSION);
-    Serial.printf("Units: %d, groups: %d, scenes: %d\n",
+    Console.printf("Units: %d, groups: %d, scenes: %d\n",
                   (int)networkConfig.units.size(), (int)networkConfig.groups.size(),
                   (int)networkConfig.scenes.size());
-    Serial.printf("Keys: %d\n", (int)networkConfig.keys.size());
+    Console.printf("Keys: %d\n", (int)networkConfig.keys.size());
     for (const auto& k : networkConfig.keys) {
         // Metadata only — never the key material itself.
-        Serial.printf("  key id=%d type=%d role=%d name='%s'\n",
+        Console.printf("  key id=%d type=%d role=%d name='%s'\n",
                       k.id, k.type, k.role, k.name.c_str());
     }
     if (networkConfig.keys.empty()) {
-        Serial.println("  *** No keys: the gateway will connect but never authenticate "
+        Console.println("  *** No keys: the gateway will connect but never authenticate "
                        "(re-run 'setup' or 'refresh') ***");
     }
-    Serial.printf("Auto-connect: %s, MAC: %s\n",
+    Console.printf("Auto-connect: %s, MAC: %s\n",
                   networkConfig.autoConnectEnabled ? "enabled" : "disabled",
                   networkConfig.autoConnectAddress.length()
                       ? networkConfig.autoConnectAddress.c_str() : "(none)");
-    Serial.printf("Auto-reconnect: %s, failures: %d, next backoff: %lu ms\n",
+    Console.printf("Auto-reconnect: %s, failures: %d, next backoff: %lu ms\n",
                   bleReconnectEnabled() ? "enabled" : "disabled",
                   bleConsecutiveFailures(), bleReconnectBackoffMs());
-    Serial.printf("Debug flags: ble=%s casambi=%s\n",
+    Console.printf("Debug flags: ble=%s casambi=%s\n",
                   bleDebugEnabled ? "on" : "off", casambiDebugEnabled ? "on" : "off");
 
     // --- Client state ------------------------------------------------------
-    Serial.println("\n-- Link --");
+    Console.println("\n-- Link --");
     if (!casambiClient) {
-        Serial.println("No BLE client (setup mode)");
-        Serial.println();
+        Console.println("No BLE client (setup mode)");
+        Console.println();
         return;
     }
 
-    Serial.printf("State: %d (%s)\n", static_cast<int>(casambiClient->getState()),
+    Console.printf("State: %d (%s)\n", static_cast<int>(casambiClient->getState()),
                   casambiClient->isAuthenticated() ? "authenticated"
                       : (casambiClient->getState() == ConnectionState::None ? "disconnected"
                                                                             : "connecting"));
-    Serial.printf("Last connect phase: %s (NimBLE rc=%d)\n",
+    Console.printf("Last connect phase: %s (NimBLE rc=%d)\n",
                   casambiClient->getLastConnectPhase(), casambiClient->getLastConnectError());
-    Serial.printf("Last disconnect: reason=%d/%s, source=%s\n",
+    Console.printf("Last disconnect: reason=%d/%s, source=%s\n",
                   static_cast<int>(casambiClient->getLastDisconnectReason()),
                   disconnectReasonName(casambiClient->getLastDisconnectReason()),
                   casambiClient->getLastDisconnectSource());
-    Serial.printf("Gateway: %s, rssi=%d dBm (accept threshold %d dBm)\n",
+    Console.printf("Gateway: %s, rssi=%d dBm (accept threshold %d dBm)\n",
                   casambiClient->getConnectedAddress().length()
                       ? casambiClient->getConnectedAddress().c_str() : "(never connected)",
                   casambiClient->getLastRssi(), BLE_MIN_CONNECT_RSSI);
-    Serial.printf("Packets received: %u, link uptime: %lus, offline for: %lus\n",
+    Console.printf("Packets received: %u, link uptime: %lus, offline for: %lus\n",
                   casambiClient->getReceivedPacketCount(),
                   casambiClient->getConnectionUptime() / 1000,
                   bleLostAtMs() ? (millis() - bleLostAtMs()) / 1000 : 0);
 
     // --- What is actually out there ----------------------------------------
-    Serial.println("\n-- Advertisement probe --");
+    Console.println("\n-- Advertisement probe --");
     if (casambiClient->isAuthenticated()) {
         // Scanning while connected can disturb a healthy link for no benefit.
-        Serial.println("Link is up - skipping the scan.");
-        Serial.println();
+        Console.println("Link is up - skipping the scan.");
+        Console.println();
         return;
     }
 
-    Serial.println("Scanning 5 s for Casambi advertisers...");
+    Console.println("Scanning 5 s for Casambi advertisers...");
     std::vector<CasambiScanResult> seen;
     CasambiScan::run(5, seen);
     esp_task_wdt_reset();
 
     if (seen.empty()) {
-        Serial.println("NO Casambi device is advertising.");
-        Serial.println("  - are the lights powered on and in range?");
-        Serial.println("  - is a phone with the Casambi app (or another gateway) already connected?");
-        Serial.println("    a Casambi unit accepts only ONE central at a time");
-        Serial.println();
+        Console.println("NO Casambi device is advertising.");
+        Console.println("  - are the lights powered on and in range?");
+        Console.println("  - is a phone with the Casambi app (or another gateway) already connected?");
+        Console.println("    a Casambi unit accepts only ONE central at a time");
+        Console.println();
         return;
     }
 
     bool targetSeen = false;
-    Serial.printf("Found %d advertiser(s):\n", (int)seen.size());
+    Console.printf("Found %d advertiser(s):\n", (int)seen.size());
     for (const auto& r : seen) {
         bool isTarget = networkConfig.autoConnectAddress.length() &&
                         r.mac.equalsIgnoreCase(networkConfig.autoConnectAddress);
         targetSeen = targetSeen || isTarget;
-        Serial.printf("  %s type=%s rssi=%d name='%s'%s\n",
+        Console.printf("  %s type=%s rssi=%d name='%s'%s\n",
                       r.mac.c_str(), CasambiScan::addrTypeName(r.addrType), r.rssi,
                       r.name.c_str(), isTarget ? "  <-- configured gateway" : "");
-        if (r.mfgData.length()) Serial.printf("      mfg: %s\n", r.mfgData.c_str());
-        if (r.svcData.length()) Serial.printf("      svc: %s\n", r.svcData.c_str());
+        if (r.mfgData.length()) Console.printf("      mfg: %s\n", r.mfgData.c_str());
+        if (r.svcData.length()) Console.printf("      svc: %s\n", r.svcData.c_str());
     }
 
     if (networkConfig.autoConnectAddress.length() && !targetSeen) {
-        Serial.printf("\n*** Configured MAC %s is NOT among them ***\n",
+        Console.printf("\n*** Configured MAC %s is NOT among them ***\n",
                       networkConfig.autoConnectAddress.c_str());
-        Serial.println("Every unit of a network advertises its own address, so a stored MAC");
-        Serial.println("disappears when that particular unit is switched off. Fix with:");
-        Serial.println("  scan, then connect <n>   (stores the MAC of a unit that is present)");
+        Console.println("Every unit of a network advertises its own address, so a stored MAC");
+        Console.println("disappears when that particular unit is switched off. Fix with:");
+        Console.println("  scan, then connect <n>   (stores the MAC of a unit that is present)");
     }
-    Serial.println();
+    Console.println();
 }
 
 // ============================================================================
@@ -281,11 +282,11 @@ void printBLEDiagnostics() {
 void checkCasambiVersions(const NetworkConfig& cfg) {
     // Check Casambi BLE protocol version
     if (cfg.protocolVersion < MIN_PROTOCOL_VERSION) {
-        Serial.printf("*** WARNING: Casambi protocol v%d is below minimum v%d! ***\n",
+        Console.printf("*** WARNING: Casambi protocol v%d is below minimum v%d! ***\n",
                       cfg.protocolVersion, MIN_PROTOCOL_VERSION);
-        Serial.println("*** Update Casambi firmware or check network configuration. ***");
+        Console.println("*** Update Casambi firmware or check network configuration. ***");
     } else if (cfg.protocolVersion > MAX_PROTOCOL_VERSION) {
-        Serial.printf("*** WARNING: Casambi protocol v%d exceeds maximum v%d — may be incompatible! ***\n",
+        Console.printf("*** WARNING: Casambi protocol v%d exceeds maximum v%d — may be incompatible! ***\n",
                       cfg.protocolVersion, MAX_PROTOCOL_VERSION);
     }
 
@@ -299,7 +300,7 @@ void checkCasambiVersions(const NetworkConfig& cfg) {
 
         float fwVersion = unit.firmware.substring(slashPos + 1).toFloat();
         if (fwVersion > 0.0f && fwVersion < MIN_UNIT_FIRMWARE_VERSION) {
-            Serial.printf("*** WARNING: Unit '%s' (id=%d) firmware %.1f < minimum %.1f ***\n",
+            Console.printf("*** WARNING: Unit '%s' (id=%d) firmware %.1f < minimum %.1f ***\n",
                           unit.name.c_str(), unit.deviceId,
                           fwVersion, MIN_UNIT_FIRMWARE_VERSION);
         }
