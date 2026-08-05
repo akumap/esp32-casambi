@@ -167,9 +167,23 @@ void TelnetConsole::_handleLine() {
 void TelnetConsole::_drainOutput() {
     if (_state != State::Authenticated) return;  // nothing leaks pre-auth
 
+    // Never ask the socket for more than it can currently accept — a
+    // blocking client.write() here would stall the loop task and, at worst,
+    // trip the watchdog (docs/konzept-tcp-konsole.md, 4.2 point 2 / E7).
+    // Checked BEFORE reading from the ring buffer, not after: consoleRingRead()
+    // advances the cursor by however much it copies out, so bytes read while
+    // the socket had no room would otherwise be silently lost -- read out of
+    // the ring buffer (cursor moved past them) but never actually sent, and
+    // not reported as dropped either, since that counter is only for bytes
+    // overwritten by the ring buffer itself.
+    int avail = _client.availableForWrite();
+    if (avail <= 0) return;
+
     uint8_t buf[128];
+    size_t maxLen = ((size_t)avail < sizeof(buf)) ? (size_t)avail : sizeof(buf);
+
     uint64_t dropped = 0;
-    size_t n = consoleRingRead(&_outCursor, buf, sizeof(buf), &dropped);
+    size_t n = consoleRingRead(&_outCursor, buf, maxLen, &dropped);
     if (dropped > 0) {
         _totalDropped += dropped;
         _client.printf("\r\n[%lu Bytes verworfen -- Client war zu langsam]\r\n",
@@ -177,15 +191,5 @@ void TelnetConsole::_drainOutput() {
     }
     if (n == 0) return;
 
-    // Never ask the socket for more than it can currently accept — a
-    // blocking client.write() here would stall the loop task and, at worst,
-    // trip the watchdog (docs/konzept-tcp-konsole.md, 4.2 point 2 / E7).
-    int avail = _client.availableForWrite();
-    if (avail <= 0) return;
-    size_t toSend = ((size_t)avail < n) ? (size_t)avail : n;
-    _client.write(buf, toSend);
-
-    // Unsent tail stays in the ring buffer: rewind the cursor so it is
-    // retried next loop() iteration instead of silently skipped.
-    if (toSend < n) _outCursor -= (n - toSend);
+    _client.write(buf, n);  // n <= avail by construction, so this never blocks
 }
