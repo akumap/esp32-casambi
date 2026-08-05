@@ -33,11 +33,22 @@ public:
     // otherwise the oldest still-buffered bytes are silently overwritten.
     void write(const uint8_t* data, size_t len) {
         if (len == 0 || _capacity == 0) return;
+
+        // The sequence number advances by the FULL logical length, even when
+        // only the tail physically fits -- callers computing drops (read())
+        // compare against this, and undercounting here would make a single
+        // oversized write invisible to that accounting instead of reported.
+        const uint64_t newWritten = _written + len;
+
         if (len > _capacity) {
             data += (len - _capacity);
             len = _capacity;
         }
-        size_t pos = (size_t)(_written % _capacity);
+
+        // Physical position derived from where this data ends up in the
+        // logical stream (newWritten - len), not from the pre-write _written
+        // -- those differ exactly when the write above was truncated.
+        size_t pos = (size_t)((newWritten - len) % _capacity);
         size_t first = _capacity - pos;
         if (first >= len) {
             memcpy(_storage + pos, data, len);
@@ -45,7 +56,7 @@ public:
             memcpy(_storage + pos, data, first);
             memcpy(_storage, data + first, len - first);
         }
-        _written += len;
+        _written = newWritten;
     }
 
     // Total bytes ever written — the buffer's current write sequence number.
