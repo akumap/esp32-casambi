@@ -13,6 +13,7 @@
 #include "cloud/api_client.h"
 #include "storage/config_store.h"
 #include "log/event_log.h"
+#include "net/telnet_console.h"
 #include "net/wifi_manager.h"
 #include "diagnostics.h"
 
@@ -50,6 +51,10 @@ void requestCloudRefresh(const String& password) {
 
     ConfigStore::setRefreshPending();
     Console.println("Cloud refresh scheduled. Restarting to apply...");
+    // Close a telnet session cleanly first (E6) — the line above only reaches
+    // the ring buffer, and nothing drains it once the reboot runs. Covers both
+    // callers: the serial/telnet 'refresh' command and POST /api/refreshCasambi.
+    telnetNotifyReboot("Cloud refresh scheduled. Restarting -- session closed.");
     delay(500);
     ESP.restart();
 }

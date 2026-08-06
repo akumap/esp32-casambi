@@ -253,8 +253,10 @@ it.
 
 The console starts automatically once a Casambi network password is stored
 (so a login token exists — see below) and Wi-Fi is connected, listening on
-**port 23**, the Telnet default. In PuTTY: *Session* → enter the device's
-hostname/IP → *Connection type: Telnet* → *Open*.
+**port 23**, the Telnet default. If the device booted while the router was
+still down, the console is started as soon as Wi-Fi comes up — no reboot
+needed. In PuTTY: *Session* → enter the device's hostname/IP → *Connection
+type: Telnet* → *Open*.
 
 **Login uses the same derived token as the REST API** (see
 [Authentication](#authentication) above), not the raw Casambi network
@@ -271,9 +273,14 @@ Compute it once — this is the string to type at the prompt, verbatim:
 printf 'casambi-api:%s' '<casambi-network-password>' | sha256sum | cut -d' ' -f1
 ```
 
-Save the result in the PuTTY session profile so you only type it once. Three
-failed attempts close the connection. Only one session is allowed at a time —
-a second connection attempt is refused while one is active.
+Save the result in the PuTTY session profile so you only type it once.
+
+Three failed attempts close the connection, and **six failed attempts in a row
+— counted across connections — close port 23 for a minute**, so reconnecting
+in a loop gets you nowhere. A connection that does not complete the login
+within **30 seconds** is dropped as well: only one session is allowed at a
+time, and an unauthenticated peer must not be able to sit on that slot. A
+second connection attempt while a session is active is refused with a note.
 
 **Leaving the session:** type `exit` (or `quit`). Both are Telnet-only and do
 not appear in `help`, which is shared with the serial console. This matters
@@ -282,6 +289,16 @@ taken until the idle timeout expires or the client's disconnect is noticed,
 which blocks the next login from another machine. Note that `plink` has no
 Telnet escape character (the classic `telnet` client's `Ctrl+]` is a feature
 of that client, not of the protocol), so `exit` is the only in-band way out.
+
+**Commands that reboot** (`restart`, `clearconfig`, `refresh`, and a reboot
+triggered from the API) say so on the Telnet session and close it cleanly
+before the device resets, instead of letting the connection die silently.
+
+**Pasting** works, but the console deliberately executes **one command per
+pass through its main loop** and rejects any line longer than 159 characters
+with `Line too long -- ignored` rather than running the truncated remainder.
+A pasted script therefore runs a few milliseconds apart, and a mangled paste
+cannot turn into a half-command that switches a light.
 
 ```
 telnet status              - Show whether the console is listening, whether a

@@ -438,6 +438,7 @@ void loop() {
         // gives the TCP task time to send the queued 200 before the reset.
         if (webServer->consumeRebootRequest()) {
             Console.println("\n*** Reboot requested via API ***");
+            telnetNotifyReboot("Device is rebooting (requested via API) -- session closed.");
             delay(250);
             ESP.restart();
         }

@@ -133,15 +133,45 @@ static void test_iac_subnegotiation_stripped() {
     TEST_ASSERT_EQUAL_STRING("x", p.line());
 }
 
-static void test_overflow_truncates_but_stays_bounded() {
+static void test_overflow_stays_bounded_and_is_reported() {
     char buf[8];   // 7 usable chars + NUL
     TelnetLineParser p(buf, sizeof(buf));
     const char* longLine = "0123456789ABCDEF\n";
     Result last;
     feedAll(p, (const uint8_t*)longLine, strlen(longLine), &last);
-    TEST_ASSERT_EQUAL(Result::LineReady, last);
+    // The line is bounded to the buffer, but it must NOT be handed over as a
+    // ready command: a truncated line is itself executable ("ulevel 5 200…"
+    // cut short switches a real light), so the caller has to reject it.
+    TEST_ASSERT_EQUAL(Result::LineTooLong, last);
     TEST_ASSERT_EQUAL_STRING("0123456", p.line());   // bounded to capacity-1
     TEST_ASSERT_EQUAL_size_t(7, p.length());
+}
+
+static void test_overflow_flag_clears_on_the_next_line() {
+    char buf[8];
+    TelnetLineParser p(buf, sizeof(buf));
+    Result last;
+    feedAll(p, (const uint8_t*)"0123456789\n", 11, &last);
+    TEST_ASSERT_EQUAL(Result::LineTooLong, last);
+    TEST_ASSERT_FALSE(p.overflowed());   // cleared with the line that carried it
+
+    // The connection resynchronises: the following short line is normal again.
+    feedAll(p, (const uint8_t*)"help\n", 5, &last);
+    TEST_ASSERT_EQUAL(Result::LineReady, last);
+    TEST_ASSERT_EQUAL_STRING("help", p.line());
+}
+
+static void test_overflow_does_not_leak_into_the_following_command() {
+    // Everything past the capacity is dropped, not glued onto the next line.
+    char buf[6];   // 5 usable chars
+    TelnetLineParser p(buf, sizeof(buf));
+    Result last;
+    feedAll(p, (const uint8_t*)"uon 199999\r", 11, &last);
+    TEST_ASSERT_EQUAL(Result::LineTooLong, last);
+
+    feedAll(p, (const uint8_t*)"\nhelp\r", 6, &last);   // LF of the CR LF, then a short line
+    TEST_ASSERT_EQUAL(Result::LineReady, last);
+    TEST_ASSERT_EQUAL_STRING("help", p.line());
 }
 
 static void test_explicit_reset_abandons_partial_line() {
@@ -190,7 +220,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_backspace_on_empty_line_is_safe_noop);
     RUN_TEST(test_iac_will_negotiation_stripped);
     RUN_TEST(test_iac_subnegotiation_stripped);
-    RUN_TEST(test_overflow_truncates_but_stays_bounded);
+    RUN_TEST(test_overflow_stays_bounded_and_is_reported);
+    RUN_TEST(test_overflow_flag_clears_on_the_next_line);
+    RUN_TEST(test_overflow_does_not_leak_into_the_following_command);
     RUN_TEST(test_explicit_reset_abandons_partial_line);
     RUN_TEST(test_multiple_lines_in_sequence);
     return UNITY_END();

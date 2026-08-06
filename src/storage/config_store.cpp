@@ -400,8 +400,14 @@ bool ConfigStore::_loadNetworkConfigFrom(const char* path, NetworkConfig& config
     // this field existed, in which case `refresh` will prompt for it)
     config.casambiPassword = doc["casambiPassword"] | "";
 
-    // Load telnet idle-timeout (default for configs predating this field)
+    // Load telnet idle-timeout (default for configs predating this field).
+    // Clamped on the way in: the command validates its argument, a hand-edited
+    // or corrupt file does not, and the console converts this to milliseconds
+    // (seconds * 1000 overflows a uint32 above ~4.3e6).
     config.telnetTimeoutSeconds = doc["telnetTimeoutSeconds"] | (uint32_t)TELNET_TIMEOUT_DEFAULT_SECONDS;
+    if (config.telnetTimeoutSeconds > TELNET_TIMEOUT_MAX_SECONDS) {
+        config.telnetTimeoutSeconds = TELNET_TIMEOUT_MAX_SECONDS;
+    }
 
     // Load debug settings (with defaults for backward compatibility)
     config.bleDebugEnabled     = doc["bleDebugEnabled"]     | false;

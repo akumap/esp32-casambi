@@ -7,7 +7,9 @@
  * unprompted on connect; without stripping them the first command line would
  * start with garbage. Collapses CR, LF, CRLF and CR-NUL line endings into a
  * single line-complete signal (different Telnet clients use different ones).
- * Handles backspace/DEL for local line editing.
+ * Handles backspace/DEL for local line editing. A line longer than the buffer
+ * is bounded AND flagged: it ends as `LineTooLong` so the caller can reject it
+ * rather than execute a truncated command.
  *
  * Arduino-free and single-threaded by design — see test/test_telnet_line.
  * The caller (net/telnet_console.cpp) owns echoing bytes back to the client;
@@ -23,10 +25,11 @@
 class TelnetLineParser {
 public:
     enum class Result {
-        Consumed,    // byte appended to the in-progress line
-        Backspaced,  // backspace/DEL removed the previous character
-        LineReady,   // line() now holds a complete, NUL-terminated line
-        Ignored,     // absorbed (IAC sequence, or backspace on an empty line)
+        Consumed,     // byte appended to the in-progress line
+        Backspaced,   // backspace/DEL removed the previous character
+        LineReady,    // line() now holds a complete, NUL-terminated line
+        LineTooLong,  // line ended, but bytes were dropped — do NOT execute it
+        Ignored,      // absorbed (IAC sequence, or backspace on an empty line)
     };
 
     // `buf` must stay valid for the parser's lifetime and have room for at
@@ -44,6 +47,7 @@ public:
         _state = State::Normal;
         _afterCr = false;
         _lineComplete = false;
+        _overflow = false;
         _terminate();
     }
 
@@ -85,7 +89,13 @@ public:
             _afterCr = (b == '\r');
             _terminate();
             _lineComplete = true;
-            return Result::LineReady;
+            // An overflowed line is reported as such and must not be executed:
+            // the truncated remainder is itself a syntactically valid command
+            // ('ulevel 5 200…' cut short still switches a real light). The flag
+            // belongs to the line that carried it and is cleared with it.
+            const bool tooLong = _overflow;
+            _overflow = false;
+            return tooLong ? Result::LineTooLong : Result::LineReady;
         }
 
         _startNewLineIfNeeded();
@@ -104,8 +114,17 @@ public:
             _terminate();
             return Result::Consumed;
         }
-        return Result::Ignored;  // line too long; drop extra bytes, keep scanning for line end
+        // Line too long: drop the extra bytes but keep scanning for the line
+        // end, so the connection resynchronises on the next newline instead of
+        // gluing the overflow onto the following command. The flag turns the
+        // eventual line end into LineTooLong.
+        _overflow = true;
+        return Result::Ignored;
     }
+
+    // True while the current line has dropped bytes (survives until the line
+    // ends or a new line starts). Exposed for tests and diagnostics.
+    bool overflowed() const { return _overflow; }
 
 private:
     enum class State { Normal, Iac, IacOpt, IacSb, IacSbIac };
@@ -128,6 +147,7 @@ private:
         if (_lineComplete) {
             _len = 0;
             _lineComplete = false;
+            _overflow = false;
             _terminate();
         }
     }
@@ -138,6 +158,7 @@ private:
     State  _state = State::Normal;
     bool   _afterCr = false;
     bool   _lineComplete = false;
+    bool   _overflow = false;
 };
 
 #endif // TELNET_LINE_H

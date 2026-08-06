@@ -403,3 +403,108 @@ Nachschau ab.
    nach dem Rename (Verfahren siehe CLAUDE.md, „Serial monitor").
 9. **Stabilität** — `scripts/stress_test.py` mit offener Telnet-Session, um
    Wechselwirkung mit async_tcp und Heap zu prüfen.
+
+-----
+
+## 8. Nachtrag: Review nach der Erstimplementierung
+
+Ein Review der fertigen Implementierung (Fokus Fehlerfreiheit/Stabilität) hat
+gezeigt, dass die Sorgfalt aus 4.2 einseitig im **Ausgabe**pfad gelandet war.
+Die folgenden Punkte sind nachgezogen; die Entscheidungen E1–E12 bleiben
+unverändert gültig, E3, E6 und E7 sind lediglich vollständig umgesetzt.
+
+### 8.1 E7 galt nur für den Drainer (Stabilität)
+
+`socketWritable()` schützte ausschließlich `_drainOutput()` und die NOP-Probe.
+Banner, `Password:`, Zeichen-Echo, Prompt, „Busy", „Bye.", Idle-Meldung und
+die Drop-Meldung gingen als direkte `_client.print()`-Aufrufe an den Socket —
+und `WiFiClient::write()` ist **nicht** non-blocking: bei vollem Sendefenster
+läuft im Arduino-Core eine eigene Retry-Schleife
+(`WIFI_CLIENT_MAX_WRITE_RETRY` Versuche à 1 s `select()`), ein Aufruf kann den
+loop-Task also ~10 s anhalten. Genau der Fall aus Testplan 4 (Client
+`SIGSTOP`), sobald der Client noch tippt.
+
+Auch `select()` + `write()` genügt nicht: `select()` sagt nur zu, dass **ein**
+Byte passt; für den Rest geht der Core wieder in dieselbe Schleife.
+
+**Jetzt:** ein einziger Ausgabeweg. Alles wird in `_outBuf` gepuffert und mit
+einem einzelnen `send(..., MSG_DONTWAIT)` auf dem Descriptor abgeschickt.
+Passt nichts mehr, wird verworfen (E7) statt gewartet. Der Ringpuffer wird nur
+angezapft, wenn ein ganzer Chunk in seiner Worst-Case-Form (jedes Byte durch
+CR-LF-Expansion **oder IAC-Escaping** verdoppelt) garantiert hineinpasst —
+sonst würde der Cursor über Bytes laufen, die anschließend niemand mehr
+zählen kann.
+
+### 8.2 Der Eingabepfad war unbegrenzt (Stabilität, vor Auth erreichbar)
+
+`while (_client.available())` hatte kein Budget, der WDT wird aber nur einmal
+pro `loop()` gefüttert. Ein Peer, der schneller sendet als die Konsole liest
+(`cat datei | nc gerät 23`), hält den loop-Task damit beliebig lange — nach
+45 s Reboot, ohne Token, ohne Login. Dieselbe Schleife führte außerdem **alle**
+Zeilen eines Pastes zwischen zwei Watchdog-Fütterungen aus.
+
+**Jetzt:** `TELNET_INPUT_BUDGET_BYTES` pro Iteration und höchstens **eine**
+Kommandozeile pro Iteration; der Rest wartet im Socket-Puffer.
+
+### 8.3 Die E3-Sperre war umgehbar (Sicherheit)
+
+`startsWith("wifi set")` prüfte die Rohzeile, `cmdWifi()` trimmt sein
+Sub-Kommando aber selbst — `wifi␣␣set ssid pw` lief also durch, und aus
+demselben Grund griff die Maskierung im Kommando-Echo nicht: das WLAN-Passwort
+landete im Klartext im Ringpuffer und damit auf genau der Telnet-Verbindung,
+die E3 davon freihalten soll.
+
+**Jetzt:** `net/telnet_policy.h` normalisiert die Zeile (trim + Whitespace-Runs
+zusammenfassen) und prüft darauf; ausgeführt wird weiterhin die getrimmte
+Originalzeile. Host-Tests unter `test/test_telnet_policy` (Konvention E10).
+Zusätzlich wird die Kommandozeile über Telnet jetzt getrimmt — vorher scheiterte
+`status␣` als „Unknown command", während dieselbe Eingabe seriell funktionierte.
+
+### 8.4 Prompt vor der Ausgabe (Bedienung)
+
+Der Prompt wurde direkt in den Socket geschrieben, die Ausgabe des Kommandos
+lag zu dem Zeitpunkt erst im Ringpuffer — der Client sah also `> ` **vor** dem
+Ergebnis des Kommandos. Jetzt merkt sich die Session den ausstehenden Prompt
+und schickt ihn, sobald der Ringpuffer leer gelaufen ist. Nebeneffekt: nach dem
+Login erscheint er hinter dem Scrollback-Replay, nicht davor.
+
+### 8.5 E6 „Session wird bei Reboot-Kommandos geschlossen" fehlte
+
+`restart`, `clearconfig`, `refresh` und `wifi set` liefen direkt in
+`ESP.restart()`. Die Bestätigungszeile stand nur im Ringpuffer, den niemand
+mehr drainiert; die Verbindung starb ohne FIN. `telnetNotifyReboot()` schickt
+jetzt an allen vier Stellen (plus `POST /api/reboot`) eine Begründung und
+schließt die Session sauber.
+
+### 8.6 Kleinere Korrekturen
+
+| Punkt | Vorher | Jetzt |
+|---|---|---|
+| Zeilenüberlauf | abgeschnittene Zeile wurde **ausgeführt** (`ulevel 5 200…` schaltet gekürzt eine echte Lampe) | Parser meldet `LineTooLong`, Zeile wird verworfen |
+| Login-Slot | unauthentifizierte Verbindung belegt den einzigen Slot bis zum Idle-Timeout (mit `timeout 0`: dauerhaft) | eigener Login-Timeout, `TELNET_LOGIN_TIMEOUT_MS` |
+| Fehlversuche | Zähler pro Verbindung, Reconnect setzt ihn zurück; je 500 ms `delay()` im loop-Task | Lockout über Verbindungen hinweg (`TELNET_LOCKOUT_*`), Backoff als Deadline statt `delay()` |
+| `IAC` in der Ausgabe | ein 0xFF im Konsolentext fraß beim Client das Folgebyte | verdoppelt (RFC 854) |
+| `telnet status` | meldete „listening", sobald das Objekt existierte | fragt `listening()`, also den tatsächlichen Bind |
+| Start | nur im WLAN-Zweig von `setup()` | wird bei spätem WLAN-Aufbau nachgeholt (wie Webserver/mDNS) |
+| Idle-Timeout | `sekunden * 1000` ohne Schranke beim Laden | beim Laden auf `TELNET_TIMEOUT_MAX_SECONDS` geklemmt |
+| Drop-Meldung | deutsch, restliche Konsole englisch | englisch |
+
+### 8.7 Ergänzung zum Testplan
+
+Zusätzlich zu 7.1–7.9 gezielt zu prüfen:
+
+10. **Flut** — `head -c 5M /dev/urandom | nc gerät 23` **ohne** Login: Gerät
+    bleibt erreichbar (`curl /api/info`), kein WDT-Reboot, Boot-Zähler
+    unverändert.
+11. **Stalled Client** — Session öffnen, `kill -STOP` auf den Client, dann
+    `debug ble on` und BLE-Last: Drop-Meldung nach `kill -CONT`, kein Reboot,
+    BLE-Reconnect lief in der Zwischenzeit weiter.
+12. **Paste** — 20 Kommandos auf einmal einfügen: alle laufen nacheinander,
+    Prompt jeweils **nach** der Ausgabe; eine überlange Zeile wird abgelehnt.
+13. **Sperren** — `wifi␣␣set X Y` über Telnet ⇒ abgelehnt, kein Passwort im
+    Echo; seriell unverändert funktionsfähig.
+14. **Lockout** — 6× falscher Token über mehrere Verbindungen ⇒ Port weist für
+    60 s ab, danach normaler Login.
+15. **Reboot** — `restart` über Telnet ⇒ Meldung + sauberer Verbindungsabbau.
+
+Verifiziert am 2026-08-06 auf ATOM Lite (Build 265): Punkte 10-15 bestanden.
