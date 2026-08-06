@@ -349,7 +349,10 @@ static void cmdTelnet(const String& cmd) {
             Console.printf("Telnet idle timeout set to %ld s.\n", secs);
         }
     } else {
-        if (telnetConsole) {
+        // listening(), not just "the object exists": begin() legitimately
+        // fails when no network password is stored (E8), and the object is
+        // allocated either way.
+        if (telnetConsole && telnetConsole->listening()) {
             Console.printf("Telnet console: listening on port %d\n", TELNET_PORT);
             Console.printf("Session: %s\n", telnetConsole->sessionActive() ? "active" : "none");
             Console.printf("Dropped bytes (slow client): %lu\n",
@@ -472,6 +475,7 @@ static void cmdWifi(const String& cmd) {
                 // credentials — the boot path loads and connects them.
                 EventLog::log(LOG_INFO, "WiFi credentials changed via serial; restarting");
                 Console.println("Restarting to apply the new WiFi credentials...");
+                telnetNotifyReboot("WiFi credentials changed. Restarting -- session closed.");
                 delay(500);
                 ESP.restart();
             } else {
@@ -811,6 +815,10 @@ void handleCommand(const String& cmd) {
     else if (cmd == "restart") {
         Console.println("Restarting...");
         EventLog::log(LOG_INFO, "Restart: requested via serial command");
+        // Tell a telnet operator what happened and close the session (E6):
+        // "Restarting..." above only reaches the ring buffer, which nobody
+        // drains once ESP.restart() runs.
+        telnetNotifyReboot("Restarting -- session closed.");
         delay(500);
         ESP.restart();
     }
@@ -821,6 +829,8 @@ void handleCommand(const String& cmd) {
         ConfigStore::clearAll();
         Console.println("Configuration cleared. Restarting...");
         EventLog::log(LOG_INFO, "Restart: configuration cleared (factory reset)");
+        telnetNotifyReboot("Configuration cleared. Restarting -- session closed. "
+                           "The console stays closed until the device is set up again.");
         delay(1000);
         ESP.restart();
     }

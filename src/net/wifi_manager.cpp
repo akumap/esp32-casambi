@@ -12,6 +12,7 @@
 #include "../app_state.h"
 #include "../log/event_log.h"
 #include "../web/webserver.h"
+#include "telnet_console.h"
 #include "time_sync.h"
 
 // Cached WiFi credentials — loaded once at boot and updated by 'wifi set'.
@@ -165,6 +166,23 @@ void checkAndReconnectWiFi() {
             // Covers the boot-before-router case: without this, a device whose
             // WiFi only came up after setup() would never be discoverable.
             if (casambiClient) startMDNS();
+
+            // Same case for the telnet console: setup() only starts it inside
+            // its "WiFi connected" branch, so a device that booted while the
+            // router was down would leave port 23 closed until the next
+            // reboot — precisely when remote access is wanted most. begin()
+            // is idempotent and returns false if it was already listening.
+            // Seating the pointer here is safe for the same reason the web
+            // server above may be: this runs on the loop task, and every
+            // reader of telnetConsole (loop(), 'telnet status',
+            // telnetNotifyReboot) runs on that task too — see app_state.h.
+            if (casambiClient && (!telnetConsole || !telnetConsole->listening())) {
+                if (!telnetConsole) telnetConsole = new TelnetConsole();
+                if (telnetConsole->begin()) {
+                    Console.printf("Telnet console available at: telnet://%s\n",
+                                  WiFi.localIP().toString().c_str());
+                }
+            }
         }
         return;
     }

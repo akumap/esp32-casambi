@@ -383,9 +383,46 @@
 // Failed-login attempts before the connection is closed.
 #define TELNET_MAX_LOGIN_ATTEMPTS       3
 
+// Pause between a failed login and the next 'Password: ' prompt. Enforced
+// without delay() — the loop task keeps running, the session just ignores
+// input until the deadline (see telnet_console.cpp, _repromptAtMs).
+#define TELNET_LOGIN_RETRY_DELAY_MS     500
+
+// Consecutive failed logins ACROSS connections before port 23 refuses new
+// sessions for TELNET_LOCKOUT_MS. Per-connection attempts alone are no
+// deterrent: a script simply reconnects. The counter resets on a successful
+// login. Not a brute-force defence in the cryptographic sense (a 64-hex-char
+// token is out of reach anyway) — it caps the flash wear and loop-task time a
+// LAN host can spend by hammering the login.
+#define TELNET_LOCKOUT_FAILURES         6
+#define TELNET_LOCKOUT_MS               60000
+
+// Time a connection may sit at the password prompt without completing a line
+// before it is dropped. Without it an unauthenticated peer holds the single
+// session slot for the whole idle timeout (15 min by default, forever with
+// 'telnet timeout 0') and locks the legitimate user out.
+#define TELNET_LOGIN_TIMEOUT_MS         30000
+
 // Longest line the console buffers from a client (bytes, including the
-// terminating NUL). Longer input is silently truncated, not rejected.
+// terminating NUL). Longer input is REJECTED, not silently truncated — a
+// truncated command line is still a valid command (a cut-off 'ulevel 5 200'
+// would switch a real light), so the parser reports the overflow instead.
 #define TELNET_LINE_MAX_LEN             160
+
+// Input bytes processed per loop() iteration. The watchdog is fed once per
+// loop() (main.cpp), so an unbounded read loop lets any peer that sends faster
+// than the console drains hold the loop task until the WDT fires — reachable
+// before authentication. Also: at most one command line runs per iteration,
+// so a pasted script cannot execute all of its lines between two WDT feeds.
+#define TELNET_INPUT_BUDGET_BYTES       512
+
+// Outbound staging buffer (bytes). Everything the session sends — banner,
+// echo, prompt and drained ring-buffer output — is queued here and pushed to
+// the socket with a non-blocking send(); nothing is ever written to the socket
+// directly (E7). Must hold at least twice TELNET_RING_CHUNK_BYTES, because a
+// drained chunk can double in size (CR-LF expansion, IAC escaping).
+#define TELNET_OUT_BUFFER_SIZE          512
+#define TELNET_RING_CHUNK_BYTES         128
 
 // Interval for a liveness probe (Telnet IAC NOP) sent to the client,
 // independent of the idle timeout above — so a dead-but-undetected TCP peer
