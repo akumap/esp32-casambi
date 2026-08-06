@@ -506,3 +506,5 @@ Zusätzlich zu 7.1–7.9 gezielt zu prüfen:
 14. **Lockout** — 6× falscher Token über mehrere Verbindungen ⇒ Port weist für
     60 s ab, danach normaler Login.
 15. **Reboot** — `restart` über Telnet ⇒ Meldung + sauberer Verbindungsabbau.
+
+Verifiziert am 2026-08-06 auf ATOM Lite (Build 265): Punkte 10-15 bestanden.

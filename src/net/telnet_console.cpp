@@ -227,6 +227,21 @@ void telnetNotifyReboot(const char* message) {
 void TelnetConsole::_readInput() {
     if (_repromptAtMs != 0) return;   // login backoff: leave the bytes in the socket
 
+    // Defer new input until this client's own scrollback cursor has caught up
+    // with everything written to the ring buffer so far. Character echo and
+    // "Line too long" go straight into _outBuf (the fast path, E7) while a
+    // command's real output is queued into the ring buffer first and only
+    // reaches _outBuf via _pumpOutput()'s drain, which can take several
+    // loop() iterations for a big command ('help' et al). Without this guard,
+    // echoing/executing the next pasted line during that drain lets its echo
+    // -- via the direct path -- overtake the still-draining previous output
+    // in _outBuf, splicing raw keystrokes into the middle of it. Left unread
+    // in the socket buffer; nothing is lost, same as the budget bound below.
+    // Pre-auth the ring buffer is never drained for this client (see
+    // _pumpOutput()), so this would wrongly block password entry -- hence
+    // Authenticated-only.
+    if (_state == State::Authenticated && _outCursor < consoleRingWritten()) return;
+
     // Bounded on purpose. The watchdog is fed once per loop() (main.cpp), so an
     // unbounded "while (available())" hands the loop task to whoever sends
     // fastest: a peer streaming data faster than the console drains it keeps
