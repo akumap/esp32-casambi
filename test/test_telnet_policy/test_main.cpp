@@ -1,7 +1,7 @@
 /**
  * Host-side unit tests for the telnet command policy (net/telnet_policy.h) —
  * the guard that keeps `setup` and `wifi set` on the serial console
- * (docs/konzept-tcp-konsole.md, decision E3).
+ * (docs/concept-tcp-console.md, decision E3).
  *
  * The point of these tests is the mismatch that made the original guard
  * bypassable: it matched the RAW line with startsWith("wifi set"), while the

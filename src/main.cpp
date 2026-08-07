@@ -293,7 +293,7 @@ void setup() {
                 }
                 startMDNS();
 
-                // Telnet console (docs/konzept-tcp-konsole.md). Only starts
+                // Telnet console (docs/concept-tcp-console.md). Only starts
                 // listening if a Casambi network password is stored — that
                 // password derives the login token (decision E8).
                 telnetConsole = new TelnetConsole();

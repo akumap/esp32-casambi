@@ -323,7 +323,7 @@ FHEM/
 
 test/test_*/test_main.cpp      # Unity host tests, one dir per header under test (env: native)
 scripts/                       # build_number.py (pre-build), stress_test.py, verify_tcp_stack.py
-docs/                          # Design docs ("konzept-*"), protocol reference, code-analysis notes
+docs/                          # Design docs ("concept-*"), protocol reference, code-analysis notes
 ```
 
 ### Generic capability detection (no fixture hardcoding)
@@ -382,10 +382,10 @@ the async_tcp task for contiguous heap. `-DCONFIG_NIMBLE_CPP_ENABLE_RETURN_CODE_
   build-number injection rationale in `config.h`). Read existing comments
   before "simplifying" code that looks over-engineered — the complexity is
   frequently load-bearing and tied to a numbered GitHub issue.
-- **`docs/konzept-*.md`** are design/decision documents (German for "concept")
-  for larger features or investigations (BLE migration, security hardening,
-  HomeKit/Matter feasibility, provisioning, versioning). Check there before
-  re-investigating something that may have already been designed or
+- **`docs/concept-*.md`** are design/decision documents for larger features or
+  investigations (BLE migration, security hardening, HomeKit/Matter
+  feasibility, provisioning, versioning, the Telnet console). Check there
+  before re-investigating something that may have already been designed or
   deliberately shelved.
 - Commit convention in this repo is Conventional Commits scoped to the module,
   e.g. `refactor(serial): extract the console and the cloud refresh from

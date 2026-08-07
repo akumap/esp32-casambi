@@ -7,7 +7,7 @@
  * readStringUntil) is untouched here — this is output-only. Console mirrors
  * everything written into a fixed-size ring buffer (see console_ring_buffer.h)
  * in addition to forwarding to Serial, so the telnet console
- * (docs/konzept-tcp-konsole.md) can replay it to a client without touching
+ * (docs/concept-tcp-console.md) can replay it to a client without touching
  * any of the ~660 print call sites directly.
  */
 

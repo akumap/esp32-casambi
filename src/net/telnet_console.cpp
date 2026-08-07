@@ -184,7 +184,7 @@ void TelnetConsole::_beginSession(WiFiClient client) {
 
     // Negotiate ECHO + SUPPRESS-GO-AHEAD so this side controls local echo
     // (needed to hide the password) instead of relying on the client's own
-    // "local echo" setting — see docs/konzept-tcp-konsole.md, decision E4.
+    // "local echo" setting — see docs/concept-tcp-console.md, decision E4.
     static const uint8_t neg[] = {255, 251, 1, 255, 251, 3};  // IAC WILL ECHO, IAC WILL SGA
     _queue(neg, sizeof(neg));
 
@@ -314,7 +314,7 @@ void TelnetConsole::_handleLine() {
             _lockoutUntilMs = 0;
             // Scrollback replay: start at the oldest byte still buffered so a
             // freshly logged-in client immediately sees recent history, not
-            // just output produced from now on (docs/konzept-tcp-konsole.md,
+            // just output produced from now on (docs/concept-tcp-console.md,
             // 4.2 point 3). Gated behind auth so nothing leaks pre-login.
             _outCursor = consoleRingOldestAvailable();
             EventLog::log(LOG_INFO, "Telnet: login from %s",

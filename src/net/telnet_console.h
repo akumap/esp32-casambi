@@ -7,7 +7,7 @@
  * exact same handleCommand() the serial console uses, on the loop task, so
  * the concurrency invariant in serial_console.h (only the loop task may call
  * handleCommand()) holds unchanged. 'setup' and 'wifi set' are refused here;
- * they remain serial-only (docs/konzept-tcp-konsole.md, decision E3, and
+ * they remain serial-only (docs/concept-tcp-console.md, decision E3, and
  * telnet_policy.h for why the check normalises the line first).
  *
  * Output: every Console.print/println/printf/write call in the firmware is

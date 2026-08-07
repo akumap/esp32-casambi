@@ -188,7 +188,7 @@ struct NetworkConfig {
     // Idle-timeout for a connected telnet console session, in seconds (0 =
     // disabled). Configurable via 'telnet timeout <seconds>'; a local runtime
     // setting, not part of the cloud config — see preserveLocalSettings below
-    // and docs/konzept-tcp-konsole.md, decision E6a.
+    // and docs/concept-tcp-console.md, decision E6a.
     uint32_t telnetTimeoutSeconds;
 
     NetworkConfig() : networkId(""), networkUuid(""), networkName(""),
