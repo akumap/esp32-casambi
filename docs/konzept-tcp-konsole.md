@@ -508,3 +508,25 @@ Zusätzlich zu 7.1–7.9 gezielt zu prüfen:
 15. **Reboot** — `restart` über Telnet ⇒ Meldung + sauberer Verbindungsabbau.
 
 Verifiziert am 2026-08-06 auf ATOM Lite (Build 265): Punkte 10-15 bestanden.
+
+### 8.8 Echo überholte die eigene Ausgabe beim Pasten (Bedienung)
+
+Die Hardware-Verifikation von 8.7 (Punkte 10–15) deckte einen weiteren Fall
+auf: mehrere Kommandos direkt nach einem großen (`help`, `status`) eingefügt
+ließen das Zeichenecho — es schreibt direkt in `_outBuf` — die noch aus dem
+Ringpuffer laufende Ausgabe dieses Kommandos überholen. Ergebnis: rohe
+Tastatureingaben erschienen mitten im sichtbaren Transkript.
+
+`_readInput()` hält neue Eingabe jetzt zurück, bis der Scrollback-Cursor
+dieser Session mit allem bisher in den Ringpuffer Geschriebenen gleichgezogen
+hat — nur im authentifizierten Zustand, da der Ringpuffer vor dem Login nie
+gedraint wird (siehe 4.2) und die Wartebedingung sonst die Passworteingabe
+blockieren würde. Verifiziert mit einem 21-Zeilen-Paste (inkl. `help`
+zweimal): alle `>>> CMD:`-Marker erscheinen in Reihenfolge, keine
+Überlappung mehr.
+
+Verworfen: Echo ebenfalls über den Ringpuffer zu leiten. Das hätte das
+Klartext-Passwort eines abgelehnten `wifi set`-Versuchs im gemeinsamen
+Scrollback für jede künftige Telnet-Session sichtbar gemacht (Replay beim
+Login) — also genau die Leck-Klasse wieder eingeführt, die die E3-Härtung
+(8.3) schließen sollte.

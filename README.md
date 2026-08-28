@@ -297,7 +297,11 @@ before the device resets, instead of letting the connection die silently.
 **Pasting** works, but the console deliberately executes **one command per
 pass through its main loop** and rejects any line longer than 159 characters
 with `Line too long -- ignored` rather than running the truncated remainder.
-A pasted script therefore runs a few milliseconds apart, and a mangled paste
+Once logged in, it also withholds newly typed/pasted input until this
+session's own scrollback has caught up with everything queued so far, so a
+paste that follows a large command (`help`, `status`) cannot splice its
+character echo into the middle of that command's still-draining output. A
+pasted script therefore runs a few milliseconds apart, and a mangled paste
 cannot turn into a half-command that switches a light.
 
 ```
