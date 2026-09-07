@@ -12,7 +12,7 @@
  * Arduino-free and NOT thread-safe by itself: callers that write and read
  * from different tasks must serialize access externally. console_out.cpp
  * does this with a critical section, because Console output is produced from
- * the loop, NimBLE host and async_tcp tasks (docs/konzept-tcp-konsole.md,
+ * the loop, NimBLE host and async_tcp tasks (docs/concept-tcp-console.md,
  * section 4.2).
  */
 

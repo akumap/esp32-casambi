@@ -1,6 +1,6 @@
 # Raw captures — 0x06 status-broadcast record framing investigation
 
-Context: `docs/casambi-protokoll-referenz.md` §D.5.1 flags an unresolved ambiguity between the
+Context: `docs/casambi-protocol-reference.md` §D.5.1 flags an unresolved ambiguity between the
 current capability-heuristic parser (`src/ble/packet_parse.h`) and the `state_len`/`priority`
 framing documented by `casambi-bt`'s `PROTOCOL_PARSING.md`. These are the raw serial captures
 taken to verify which interpretation the real network actually produces, before touching the

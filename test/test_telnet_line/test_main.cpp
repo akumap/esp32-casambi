@@ -1,7 +1,7 @@
 /**
  * Host-side unit tests for TelnetLineParser (net/telnet_line.h) — the
  * Telnet IAC filter and line splitter used by the telnet console
- * (docs/konzept-tcp-konsole.md, section 4.3/E10).
+ * (docs/concept-tcp-console.md, section 4.3/E10).
  */
 
 #include <unity.h>

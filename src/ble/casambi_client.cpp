@@ -1364,7 +1364,7 @@ void CasambiClient::_handleDataNotification(uint8_t* data, size_t len) {
             // Reading 0x07 as a stream of INVOCATION frames (button/NotifyInput
             // events) is an UNVERIFIED theory — it has never been observed on
             // the wire here (no captures exist) and conflicts with an equally
-            // unverified alternative in docs/casambi-protokoll-referenz.md B.12
+            // unverified alternative in docs/casambi-protocol-reference.md B.12
             // (casambi-bt's 3-byte-header SwitchEvent framing). Any real state
             // change also arrives as a 0x06, so acting on 0x07 would at best be
             // redundant and at worst inject a bogus level from a mis-decoded

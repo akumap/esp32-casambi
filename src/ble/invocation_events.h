@@ -11,7 +11,7 @@
  * UNVERIFIED — like the framing it builds on, none of this has been checked
  * against a real capture (0x07 has never been observed on the reference
  * network; see packet_parse.h's parseInvocationStream doc comment and
- * docs/casambi-protokoll-referenz.md B.12a). Classification here never feeds
+ * docs/casambi-protocol-reference.md B.12a). Classification here never feeds
  * `_applyUnitStates` — it only ever produces diagnostic/callback output.
  */
 

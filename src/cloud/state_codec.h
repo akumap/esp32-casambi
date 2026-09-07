@@ -7,7 +7,7 @@
  * config_invariants.h and serial_args.h.
  *
  * WRITE SEMANTICS (verified against an Oligo Grace dual-dimmer fixture, see
- * docs/casambi-protokoll-referenz.md): a SetState write carries the COMPLETE
+ * docs/casambi-protocol-reference.md): a SetState write carries the COMPLETE
  * state blob of the unit — every control's raw value at the bit position the
  * cloud fixture definition (/fixture/{type}) declares. Bytes that are sent
  * as zero RESET the corresponding control on the fixture (observed: a zeroed

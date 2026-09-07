@@ -21,7 +21,7 @@
 
 // NimBLE types are an implementation detail of src/ble/ — forward-declare here
 // and include <NimBLEDevice.h> only in the .cpp so the BLE stack does not leak
-// into the rest of the firmware (see docs/konzept-ble-nimble-migration.md, 5.1).
+// into the rest of the firmware (see docs/concept-ble-nimble-migration.md, 5.1).
 class NimBLEClient;
 class NimBLERemoteCharacteristic;
 

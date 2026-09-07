@@ -81,7 +81,7 @@
 //
 // A missing api_version_* field on the wire means version 1.0 (firmware
 // predating this contract). Version mismatches are WARNED about in FHEM but
-// never block operation (fail-operational, see docs/konzept-versionierung.md).
+// never block operation (fail-operational, see docs/concept-versioning.md).
 // 1.1: + POST /api/units/:id/state (generic atomic full-state write) and the
 //      optional `name` field in every `controls` entry (hello, unit_state,
 //      GET /api/units) — compatible extension, older clients ignore both.
@@ -360,7 +360,7 @@
 #define BLE_CMD_QUEUE_DEPTH             8
 
 // ============================================================================
-// TELNET CONSOLE (docs/konzept-tcp-konsole.md)
+// TELNET CONSOLE (docs/concept-tcp-console.md)
 // ============================================================================
 
 // TCP port for the network console. PuTTY's Telnet default, so a saved
@@ -370,13 +370,13 @@
 // Capacity of the ring buffer every Console.print/println/printf/write call
 // mirrors into (console_out.*), drained by the telnet session. Statically
 // allocated on purpose: static RAM is abundant on this board (~470 KB free),
-// heap is the scarce resource TLS/BLE need — see konzept-tcp-konsole.md 4.2/E5.
+// heap is the scarce resource TLS/BLE need — see concept-tcp-console.md 4.2/E5.
 #define CONSOLE_RING_BUFFER_SIZE        4096
 
 // Idle-timeout default and ceiling for 'telnet timeout <seconds>' (E6a).
 // Measured from the last COMPLETE command line, not the last byte received —
 // a client's own Telnet keepalive would otherwise reset the timer forever
-// without the user noticing. See konzept-tcp-konsole.md 4.6.
+// without the user noticing. See concept-tcp-console.md 4.6.
 #define TELNET_TIMEOUT_DEFAULT_SECONDS  900
 #define TELNET_TIMEOUT_MAX_SECONDS      86400
 

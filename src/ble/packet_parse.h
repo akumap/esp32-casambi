@@ -20,7 +20,7 @@
  *                      and the operation header (flags, origin, target —
  *                      docs B.9/D.4, byte-identical to casambi-bt).
  *
- * docs/casambi-protokoll-referenz.md D.6 tabulates every multi-byte field
+ * docs/casambi-protocol-reference.md D.6 tabulates every multi-byte field
  * with the evidence for its byte order.
  *
  * The data-packet parsers below are three-state, TOLERANT-BUT-HONEST:
@@ -399,7 +399,7 @@ inline ParseStatus parseStatusBroadcast(const uint8_t* data, size_t len,
  * encoder (docs B.9). That symmetry assumption is UNVERIFIED and now
  * believed wrong: 0x07 has never been observed on the reference network at
  * all (no captures exist), and it directly conflicts with an alternative,
- * equally unverified theory documented in docs/casambi-protokoll-referenz.md
+ * equally unverified theory documented in docs/casambi-protocol-reference.md
  * B.12 (ported from casambi-bt), which reads incoming 0x07 as a stream of
  * switch/sensor events framed with a 3-byte-per-message header — structurally
  * incompatible with the 9-byte header below. Neither theory can be confirmed

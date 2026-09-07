@@ -1,7 +1,7 @@
 /**
  * Host-side unit tests for ConsoleRingBuffer (console_ring_buffer.h) — the
  * ring buffer console_out.cpp mirrors output into for the telnet console
- * (docs/konzept-tcp-konsole.md, section 4.2).
+ * (docs/concept-tcp-console.md, section 4.2).
  */
 
 #include <unity.h>

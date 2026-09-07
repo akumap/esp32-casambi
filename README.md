@@ -244,7 +244,7 @@ list scenes        # Show all scenes with IDs
 The serial console above is also reachable over the network with a standard
 Telnet client — useful when the device is mounted somewhere for good BLE
 reception rather than sitting next to the machine you're debugging from
-(design rationale: `docs/konzept-tcp-konsole.md`). It mirrors the exact same
+(design rationale: `docs/concept-tcp-console.md`). It mirrors the exact same
 commands and output as the serial console; **`setup` and `wifi set` are
 serial-only** (they would leak WiFi/Casambi credentials over an unencrypted
 connection and drive the same blocking BLE scan the setup wizard uses).
@@ -1069,7 +1069,7 @@ The controller is designed for 24/7 unattended operation:
 
 ### BLE Protocol
 
-**BLE stack:** The firmware uses **NimBLE** (NimBLE-Arduino) as its BLE host, not the default Bluedroid stack. NimBLE's substantially smaller RAM footprint leaves more contiguous heap for the TLS cloud handshake and reduces heap-pressure reboots. See [`docs/konzept-ble-nimble-migration.md`](docs/konzept-ble-nimble-migration.md) for the migration rationale.
+**BLE stack:** The firmware uses **NimBLE** (NimBLE-Arduino) as its BLE host, not the default Bluedroid stack. NimBLE's substantially smaller RAM footprint leaves more contiguous heap for the TLS cloud handshake and reduces heap-pressure reboots. See [`docs/concept-ble-nimble-migration.md`](docs/concept-ble-nimble-migration.md) for the migration rationale.
 
 **Authentication Flow:**
 
@@ -1345,7 +1345,7 @@ carry the full **versioning contract** as a comment at those constants —
 the checklist there** (bump both sides in the same commit, document the change
 here). The version travels in `GET /api/info` and the WebSocket `hello`; a
 missing field means firmware at version `1.0` (predating the contract). Design
-rationale: `docs/konzept-versionierung.md` (issue #29).
+rationale: `docs/concept-versioning.md` (issue #29).
 
 **Version history:**
 

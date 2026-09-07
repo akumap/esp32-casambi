@@ -328,7 +328,7 @@ static void cmdNtp(const String& cmd) {
 }
 
 // 'telnet status' / 'telnet timeout <seconds>' — network console config
-// (docs/konzept-tcp-konsole.md, decision E6a).
+// (docs/concept-tcp-console.md, decision E6a).
 static void cmdTelnet(const String& cmd) {
     String sub = cmd.length() > 6 ? cmd.substring(7) : "";
     sub.trim();
