@@ -239,10 +239,22 @@ Every other endpoint needs `X-API-Key: <token>`, where
 ### Git / GitHub on this host
 
 - Remote: `https://github.com/akumap/esp32-casambi` (not `esp-casambi`).
-- `gh` CLI is not installed here, and the GitHub MCP connector is not
-  authorized — PRs must be created via the GitHub web UI, not from this host.
+- `gh` CLI is installed (`/usr/bin/gh`) and logged in as `akumap` (scopes
+  `repo`, `workflow`, `gist`, `read:org`) — issues and PRs can be created from
+  this host with `gh issue create` / `gh pr create`. The GitHub MCP connector
+  is not authorized.
 - CI (`.github/workflows/ci.yml`) only triggers on push for `main` and
   `claude/**`; other branch names only build once a PR is opened.
+
+## Skills im Repo — beim Session-Start lesen
+
+Zu Beginn jeder Session die Skills aus dem Verzeichnis `skills/` des Repos
+`github.com/akumap/AI_conn` lesen (z. B. `gh api repos/akumap/AI_conn/contents/skills`;
+in diesem Repo gibt es kein `skills/`) (nicht erst, wenn nachgefragt wird), bevor Hardware oder Maschinen angefasst werden. Skills
+beschreiben Abläufe, die sich aus den Tool-Beschreibungen nicht ergeben, z. B.
+`aiconn-part-program-runner` (Teileprogramme per `AICONN_LOOP.MPF` hochladen und
+ausführen, Protokoll R90/R91; Repo `github.com/akumap/AI_conn`). Sie tauchen
+nicht zwingend in der Skill-Liste der Session auf.
 
 ## Architecture
 
